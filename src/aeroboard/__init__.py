@@ -17,7 +17,7 @@ _default_client = None
 def get_default_client():
     return _default_client
 
-def init(run_id=None, url="grpc://localhost:50051", batch_size=100) -> AeroboardClient:
+def init(run_id=None, url="grpc://localhost:50051", api_base_url=None, batch_size=100) -> AeroboardClient:
     """
     Initialize the Aeroboard globally.
     If multiple connections are needed, construct AeroboardClient directly.
@@ -26,7 +26,12 @@ def init(run_id=None, url="grpc://localhost:50051", batch_size=100) -> Aeroboard
 
     from .client import _normalize_run_id
 
-    _default_client = AeroboardClient(run_id=_normalize_run_id(run_id), url=url, batch_size=batch_size)
+    _default_client = AeroboardClient(
+        run_id=_normalize_run_id(run_id),
+        url=url,
+        api_base_url=api_base_url,
+        batch_size=batch_size,
+    )
     return _default_client
 
 def log(metrics: dict):

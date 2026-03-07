@@ -1,19 +1,17 @@
 #!/bin/bash
 set -e
 
-# Ensure we are in a virtual environment if uv is used
-if [ -d ".venv" ]; then
-    echo "🏗️ Using existing virtual environment..."
-else
-    echo "🌱 Creating virtual environment..."
-    uv venv
+if ! command -v uv >/dev/null 2>&1; then
+    echo "❌ uv is required to manage the Aeroboard Python environment."
+    echo "   Install uv first, then rerun ./setup.sh"
+    exit 1
 fi
 
-echo "🚀 Installing Aeroboard Package and Example Dependencies..."
-uv pip install -e ".[examples]"
+echo "🌱 Syncing Aeroboard Python environment with uv..."
+uv sync --extra examples --dev
 
 echo "📦 Setting up Web and Server components..."
-# Use uv run to ensure we use the installed CLI in the venv
+# Use uv run so the CLI executes inside the managed uv environment.
 uv run aeroboard setup
 
 echo ""

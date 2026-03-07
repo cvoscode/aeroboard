@@ -3,6 +3,9 @@ import time
 import io
 import math
 import base64
+import os
+from urllib.parse import urlparse
+
 import pyarrow as pa
 import pyarrow.flight as fl
 from .schema import scalar_schema, image_schema, hyperparameter_schema
@@ -10,39 +13,15 @@ from .schema import scalar_schema, image_schema, hyperparameter_schema
 MAX_IMAGE_BYTES = 256 * 1024
 
 
-def _quote_sql_string(value: str) -> str:
-    return value.replace("'", "''")
-
-
-def _extract_greptime_run_ids(payload: dict) -> set[str]:
-    output = payload.get("output", [])
-    if not output or "records" not in output[0]:
-        return set()
-    rows = output[0]["records"].get("rows", [])
-    return {row[0] for row in rows if row and row[0]}
-
-
 def _fetch_existing_run_ids(base: str) -> set[str]:
     import requests
 
     existing: set[str] = set()
     normalized_base = _normalize_run_id(base)
-    quoted = _quote_sql_string(normalized_base)
+    api_base = _default_api_base()
 
     try:
-        sql = f"SELECT DISTINCT run_id FROM scalars WHERE run_id = '{quoted}' OR run_id LIKE '{quoted}-v%'"
-        resp = requests.get(
-            "http://localhost:4000/v1/sql",
-            params={"sql": sql, "db": "public"},
-            timeout=1,
-        )
-        if resp.status_code == 200:
-            existing.update(_extract_greptime_run_ids(resp.json()))
-    except Exception:
-        pass
-
-    try:
-        resp = requests.get("http://localhost:3000/api/runs", timeout=1)
+        resp = requests.get(f"{api_base}/api/runs", timeout=1)
         if resp.status_code == 200:
             runs = resp.json().get("runs", [])
             existing.update(run_id for run_id in runs if run_id == normalized_base or run_id.startswith(f"{normalized_base}-v"))
@@ -55,6 +34,21 @@ def _fetch_existing_run_ids(base: str) -> set[str]:
 def _normalize_run_id(run_id: str | None) -> str:
     cleaned = (run_id or '').strip()
     return cleaned or f"run-{int(time.time())}"
+
+
+def _default_api_base(flight_url: str | None = None) -> str:
+    override = os.getenv("AEROBOARD_API_BASE_URL")
+    if override:
+        return override.rstrip("/")
+
+    if flight_url:
+        parsed = urlparse(flight_url)
+        if parsed.hostname:
+            scheme = "https" if parsed.scheme in {"grpcs", "https"} else "http"
+            port = os.getenv("AEROBOARD_HTTP_PORT", "3000")
+            return f"{scheme}://{parsed.hostname}:{port}"
+
+    return "http://localhost:3000"
 
 
 def _with_lightning_suffix(run_id: str) -> str:
@@ -108,9 +102,10 @@ class AeroboardClient:
     """
     Python SDK client for sending telemetry data to the Aeroboard Rust backend.
     """
-    def __init__(self, run_id=None, url="grpc://localhost:50051", batch_size=100):
+    def __init__(self, run_id=None, url="grpc://localhost:50051", batch_size=100, api_base_url: str | None = None):
         self.base_run_id = _normalize_run_id(run_id)
         self.url = url
+        self.api_base_url = (api_base_url or _default_api_base(url)).rstrip("/")
         self.batch_size = batch_size
         self._scalar_buffer = []
         self._hyperparameter_buffer = []
@@ -130,12 +125,30 @@ class AeroboardClient:
 
     def _resolve_run_id(self, base: str) -> str:
         """
-        Query GreptimeDB to find if a run with this base name already exists.
-        If it does, auto-increment a version suffix: resnet -> resnet-v2 -> resnet-v3 …
+        Ask the Aeroboard server to resolve the canonical run ID for the configured
+        storage backend. Falls back to the current live run listing if the dedicated
+        endpoint is unavailable.
         """
+        import requests
+
         normalized_base = _normalize_run_id(base)
-        existing = _fetch_existing_run_ids(normalized_base)
-        resolved = resolve_run_id(normalized_base, existing)
+        resolved = normalized_base
+
+        try:
+            resp = requests.post(
+                f"{self.api_base_url}/api/runs/resolve",
+                json={"base_run_id": normalized_base},
+                timeout=1,
+            )
+            if resp.status_code == 200:
+                resolved = resp.json().get("run_id", normalized_base)
+            else:
+                existing = _fetch_existing_run_ids(normalized_base)
+                resolved = resolve_run_id(normalized_base, existing)
+        except Exception:
+            existing = _fetch_existing_run_ids(normalized_base)
+            resolved = resolve_run_id(normalized_base, existing)
+
         if resolved != normalized_base:
             print(f"[Aeroboard] Run '{normalized_base}' already exists → using '{resolved}'")
         return resolved
@@ -206,6 +219,7 @@ class AeroboardClient:
             client=self,
             run_id=run_name or self.base_run_id,
             url=self.url,
+            api_base_url=self.api_base_url,
             batch_size=batch_size or self.batch_size,
         )
 
@@ -305,6 +319,7 @@ class AeroboardLightningCallback:
         self,
         run_id: str | None = None,
         url: str = "grpc://localhost:50051",
+        api_base_url: str | None = None,
         batch_size: int = 100,
         client: AeroboardClient | None = None,
     ):
@@ -368,7 +383,7 @@ class AeroboardLightningCallback:
             def on_train_end(self, trainer, pl_module):
                 self._client().flush()
 
-        self.client = client or AeroboardClient(run_id=run_id, url=url, batch_size=batch_size)
+        self.client = client or AeroboardClient(run_id=run_id, url=url, api_base_url=api_base_url, batch_size=batch_size)
         self.callback = _Callback(self)
 
     def __getattr__(self, item):

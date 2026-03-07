@@ -8,6 +8,7 @@ use arrow_flight::{
 };
 use arrow_flight::flight_service_server::FlightService;
 
+use crate::telemetry::{TelemetryBatch, TelemetryKind};
 use crate::t_junction::TJunction;
 
 #[derive(Clone)]
@@ -84,8 +85,13 @@ impl FlightService for AeroboardFlightServer {
 
             let dictionaries_by_id = std::collections::HashMap::new();
             let mut schema: Option<Arc<Schema>> = None;
+            let mut declared_kind = TelemetryKind::Unknown;
 
             while let Some(msg) = stream.message().await.unwrap_or(None) {
+                if let Some(descriptor) = msg.flight_descriptor.as_ref() {
+                    declared_kind = TelemetryKind::from_descriptor_path(&descriptor.path);
+                }
+
                 if msg.data_header.is_empty() {
                     // This could be app_metadata or something, but usually a put stream starts with Schema.
                     continue;
@@ -120,7 +126,13 @@ impl FlightService for AeroboardFlightServer {
                                     // Successfully decoded an Arrow RecordBatch.
                                     tracing::debug!("Received RecordBatch with {} rows", batch.num_rows());
                                     // Ship it to the T-Junction!
-                                    let _ = t_junction.publish(Arc::new(batch));
+                                    let batch = Arc::new(batch);
+                                    let kind = if declared_kind == TelemetryKind::Unknown {
+                                        TelemetryKind::from_batch(&batch)
+                                    } else {
+                                        declared_kind.clone()
+                                    };
+                                    let _ = t_junction.publish(Arc::new(TelemetryBatch::new(kind, batch)));
                                 }
                                 Err(e) => {
                                     eprintln!("Error decoding batch: {}", e);

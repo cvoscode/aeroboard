@@ -8,14 +8,15 @@ use axum::{
 };
 use futures::{sink::SinkExt, stream::StreamExt};
 use arrow::ipc::writer::StreamWriter;
+use tokio::sync::broadcast;
 
-use crate::t_junction::TJunction;
+use crate::{app_state::AppState, t_junction::TJunction};
 
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
-    State(t_junction): State<Arc<TJunction>>,
+    State(state): State<AppState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, t_junction))
+    ws.on_upgrade(move |socket| handle_socket(socket, state.t_junction.clone()))
 }
 
 async fn handle_socket(socket: WebSocket, t_junction: Arc<TJunction>) {
@@ -37,19 +38,32 @@ async fn handle_socket(socket: WebSocket, t_junction: Arc<TJunction>) {
     });
 
     let mut send_task = tokio::spawn(async move {
-        while let Ok(batch) = rx.recv().await {
-            // Serialize Arrow RecordBatch to IPC Bytes
-            let mut buf: Vec<u8> = Vec::new();
-            {
-                let mut writer = StreamWriter::try_new(&mut buf, &batch.schema()).unwrap();
-                writer.write(&batch).unwrap();
-                writer.finish().unwrap();
-            }
+        loop {
+            match rx.recv().await {
+                Ok(telemetry) => {
+                    let batch = telemetry.batch.clone();
+                    let mut buf: Vec<u8> = Vec::new();
+                    let write_result = (|| -> Result<(), arrow::error::ArrowError> {
+                        let mut writer = StreamWriter::try_new(&mut buf, &batch.schema())?;
+                        writer.write(&batch)?;
+                        writer.finish()?;
+                        Ok(())
+                    })();
 
-            // Send binary IPC data over WebSocket
-            tracing::debug!("Pushing {} bytes to WebSocket", buf.len());
-            if sender.send(Message::Binary(buf.into())).await.is_err() {
-                break; // Connection lost
+                    if let Err(error) = write_result {
+                        tracing::error!("Failed to serialize batch for WebSocket: {}", error);
+                        continue;
+                    }
+
+                    tracing::debug!("Pushing {} bytes to WebSocket", buf.len());
+                    if sender.send(Message::Binary(buf.into())).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!("WebSocket subscriber lagged and skipped {} batches", skipped);
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });

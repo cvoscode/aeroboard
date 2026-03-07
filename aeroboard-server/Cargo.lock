@@ -9,6 +9,7 @@ dependencies = [
  "arrow",
  "arrow-flight",
  "arrow-ipc",
+ "async-trait",
  "axum",
  "axum-extra",
  "base64",

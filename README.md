@@ -7,7 +7,7 @@ Aeroboard is a high-performance, real-time machine learning training evaluation 
 1. **Client SDK (Python/PyArrow)**
 2. **"T-Junction" Server (Rust/Axum/Tonic)**
 3. **Web Dashboard (React/Vite/uPlot/Arrow-JS)**
-4. **Time-Series DB (GreptimeDB - Path A)**
+4. **Persistence Backend (Filesystem by default, GreptimeDB optional)**
 
 ---
 
@@ -15,15 +15,27 @@ Aeroboard is a high-performance, real-time machine learning training evaluation 
 
 To install the Aeroboard CLI and build all components (Web + Server):
 
+First, install `uv`. Then run:
+
 ```bash
 chmod +x setup.sh
 ./setup.sh
 ```
 
 This will:
-1. Install the `aeroboard` python package and CLI.
-2. Build the React frontend (`npm run build`).
-3. Build the Rust server (`cargo build --release`).
+1. Create or update the local `.venv` with `uv`.
+2. Install the `aeroboard` Python package, dev dependencies, and example dependencies.
+3. Build the React frontend (`npm run build`).
+4. Build the Rust server (`cargo build --release`).
+
+If you prefer the manual flow, use `uv` directly:
+
+```bash
+uv sync --extra examples --dev
+uv run aeroboard setup
+```
+
+This keeps Python environment creation, dependency resolution, and command execution under `uv`.
 
 ---
 
@@ -37,10 +49,23 @@ uv run aeroboard start
 ```
 Go to `http://localhost:3000` to see your metrics!
 
+Filesystem persistence is the default. Useful options:
+
+```bash
+uv run aeroboard start --storage filesystem --data-dir .aeroboard
+uv run aeroboard start --storage greptime
+uv run aeroboard start --port 3100 --flight-port 51051
+```
+
 ### 2. Start GreptimeDB (Optional)
 If you want persistence, ensure Docker is running and execute:
 ```bash
 uv run aeroboard db
+```
+
+### 3. Run Python tests
+```bash
+uv run pytest
 ```
 
 ---
@@ -54,6 +79,9 @@ import aeroboard
 
 # Initialize
 aeroboard.init(run_id="my_experiment")
+
+# Or set the API base explicitly when the HTTP server is not on localhost:3000
+# aeroboard.init(run_id="my_experiment", url="grpc://localhost:51051", api_base_url="http://localhost:3100")
 
 # Manual hyperparameters for comparison table / parallel coordinates
 aeroboard.log_hyperparameters({
@@ -125,6 +153,27 @@ class LitModel(pl.LightningModule):
 ```
 
 Logged hyperparameters appear in the comparison table and can be selected as axes in the parallel-coordinates view. Logged images are persisted and can be scrubbed over time with the image timeline slider.
+
+### Evaluate filesystem vs Greptime with the Lightning example
+
+Run the same example workflow against either backend and compare the resulting runs in the UI.
+
+Filesystem:
+
+```bash
+uv run aeroboard start --storage filesystem --data-dir .aeroboard/examples/fs
+uv run examples/lightning_example.py --backend filesystem --run-prefix backend-eval
+```
+
+Greptime:
+
+```bash
+uv run aeroboard db
+uv run aeroboard start --storage greptime
+uv run examples/lightning_example.py --backend greptime --run-prefix backend-eval
+```
+
+The example tags each run with `storage/backend`, the API base, and the Flight endpoint so the comparison table can be used to verify which backend produced each run.
 
 ### Ray Tune Integration
 For Ray Tune distributed hyperparameter searching, you can use the `LoggerCallback`.

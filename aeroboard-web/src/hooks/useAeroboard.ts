@@ -51,13 +51,32 @@ type MetricSummaryInternal = MetricSummary & { __ts?: number };
 
 function makeEmptySeries(): TimeSeriesData {
     return {
-        wallTimes: new Float64Array(200000),
-        relTimes: new Float64Array(200000),
-        steps: new Float64Array(200000).fill(-1),
-        plotX: new Float64Array(200000),
-        values: new Float64Array(200000),
+        wallTimes: new Float64Array(4096),
+        relTimes: new Float64Array(4096),
+        steps: new Float64Array(4096).fill(-1),
+        plotX: new Float64Array(4096),
+        values: new Float64Array(4096),
         count: 0,
     };
+}
+
+function growFloat64Array(source: Float64Array, nextSize: number, fillValue?: number): Float64Array {
+    const next = new Float64Array(nextSize);
+    next.set(source);
+    if (fillValue !== undefined && nextSize > source.length) {
+        next.fill(fillValue, source.length);
+    }
+    return next;
+}
+
+function ensureSeriesCapacity(series: TimeSeriesData) {
+    if (series.count < series.values.length) return;
+    const nextSize = Math.max(1024, series.values.length * 2);
+    series.wallTimes = growFloat64Array(series.wallTimes, nextSize);
+    series.relTimes = growFloat64Array(series.relTimes, nextSize);
+    series.steps = growFloat64Array(series.steps, nextSize, -1);
+    series.plotX = growFloat64Array(series.plotX, nextSize);
+    series.values = growFloat64Array(series.values, nextSize);
 }
 
 function ensureRunSummary(summaryStore: RunSummaryStore, runId: string): RunSummary {
@@ -104,7 +123,7 @@ function ingestPoint(
     if (!runStore[name]) runStore[name] = makeEmptySeries();
     const series = runStore[name];
 
-    if (series.count >= series.values.length) return false;
+    ensureSeriesCapacity(series);
 
     const i = series.count;
     series.wallTimes[i] = wallTime;
@@ -116,6 +135,30 @@ function ingestPoint(
 
     updateMetricSummary(ensureRunSummary(summaryStore, runId), name, tsMs, val);
     return true;
+}
+
+async function fetchPagedJson<T>(url: string): Promise<T[]> {
+    const rows: T[] = [];
+    let cursor: number | null = 0;
+    const limit = 10000;
+
+    while (cursor !== null) {
+        const separator = url.includes('?') ? '&' : '?';
+        const resp = await fetch(`${url}${separator}limit=${limit}&cursor=${cursor}`);
+        if (!resp.ok) {
+            throw new Error(`Request failed with status ${resp.status}`);
+        }
+
+        const json = await resp.json() as { rows?: T[]; next_cursor?: number | null };
+        rows.push(...(json.rows ?? []));
+        cursor = json.next_cursor ?? null;
+
+        if ((json.rows ?? []).length === 0 && json.next_cursor == null) {
+            break;
+        }
+    }
+
+    return rows;
 }
 
 function setHyperparameter(summaryStore: RunSummaryStore, runId: string, key: string, value: string, valueType: string) {
@@ -162,7 +205,18 @@ function bytesToBase64(bytes: Uint8Array): string {
     return btoa(binary);
 }
 
-export function useAeroboard(wsUrl: string = 'ws://localhost:3000/ws/live') {
+function getDefaultApiBase(): string {
+    if (typeof window === 'undefined') return 'http://localhost:3000';
+    return window.location.origin;
+}
+
+function getDefaultWsUrl(): string {
+    if (typeof window === 'undefined') return 'ws://localhost:3000/ws/live';
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    return `${protocol}://${window.location.host}/ws/live`;
+}
+
+export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string = getDefaultApiBase()) {
     const [connected, setConnected] = useState(false);
     const storeRef = useRef<Store>({});
     const summaryRef = useRef<RunSummaryStore>({});
@@ -185,32 +239,46 @@ export function useAeroboard(wsUrl: string = 'ws://localhost:3000/ws/live') {
     useEffect(() => {
         const loadHistory = async () => {
             try {
-                const [historyResp, imageResp] = await Promise.all([
-                    fetch('http://localhost:3000/api/history'),
-                    fetch('http://localhost:3000/api/history/images'),
+                const [historyResp, imageRows] = await Promise.all([
+                    fetch(`${apiBase}/api/history?limit=10000&cursor=0`),
+                    fetchPagedJson<ImageFrame>(`${apiBase}/api/history/images`),
                 ]);
 
                 if (historyResp.ok) {
-                    const json = await historyResp.json() as {
+                    const firstPage = await historyResp.json() as {
                         rows: { ts_ms: number; run_id: string; name: string; value: number }[];
                         run_summaries?: RunSummary[];
+                        next_cursor?: number | null;
                     };
+                    const allRows = [...(firstPage.rows ?? [])];
 
-                    for (const summary of json.run_summaries ?? []) {
+                    let nextCursor = firstPage.next_cursor ?? null;
+                    while (nextCursor !== null) {
+                        const pageResp = await fetch(`${apiBase}/api/history?limit=10000&cursor=${nextCursor}`);
+                        if (!pageResp.ok) break;
+                        const page = await pageResp.json() as {
+                            rows?: { ts_ms: number; run_id: string; name: string; value: number }[];
+                            next_cursor?: number | null;
+                        };
+                        allRows.push(...(page.rows ?? []));
+                        nextCursor = page.next_cursor ?? null;
+                    }
+
+                    for (const summary of firstPage.run_summaries ?? []) {
                         summaryRef.current[summary.run_id] = summary;
                     }
 
-                    if (json.rows?.length) {
-                        json.rows.sort((a, b) => a.ts_ms - b.ts_ms);
+                    if (allRows.length) {
+                        allRows.sort((a, b) => a.ts_ms - b.ts_ms);
                         const stepMap: Record<string, Map<number, number>> = {};
-                        for (const row of json.rows) {
+                        for (const row of allRows) {
                             if (row.name === 'step' || row.name.endsWith('/step')) {
                                 if (!stepMap[row.run_id]) stepMap[row.run_id] = new Map();
                                 stepMap[row.run_id].set(row.ts_ms, row.value);
                             }
                         }
 
-                        for (const row of json.rows) {
+                        for (const row of allRows) {
                             if (row.name === 'step' || row.name.endsWith('/step')) continue;
                             const step = stepMap[row.run_id]?.get(row.ts_ms) ?? null;
                             ingestPoint(storeRef.current, summaryRef.current, startTimes.current, row.run_id, row.name, row.ts_ms, row.value, step);
@@ -218,11 +286,8 @@ export function useAeroboard(wsUrl: string = 'ws://localhost:3000/ws/live') {
                     }
                 }
 
-                if (imageResp.ok) {
-                    const json = await imageResp.json() as { rows: ImageFrame[] };
-                    for (const frame of json.rows ?? []) {
-                        upsertImageFrame(imageStoreRef.current, frame);
-                    }
+                for (const frame of imageRows) {
+                    upsertImageFrame(imageStoreRef.current, frame);
                 }
 
                 refreshRuns();
@@ -232,7 +297,7 @@ export function useAeroboard(wsUrl: string = 'ws://localhost:3000/ws/live') {
         };
 
         loadHistory();
-    }, [refreshRuns, reloadToken]);
+    }, [apiBase, refreshRuns, reloadToken]);
 
     useEffect(() => {
         const ws = new WebSocket(wsUrl);
@@ -377,7 +442,7 @@ export function useAeroboard(wsUrl: string = 'ws://localhost:3000/ws/live') {
 
     const deleteAllRuns = useCallback(async (): Promise<{ ok: boolean; reason?: string }> => {
         try {
-            const resp = await fetch('http://localhost:3000/api/history', { method: 'DELETE' });
+            const resp = await fetch(`${apiBase}/api/history`, { method: 'DELETE' });
             if (!resp.ok) {
                 if (resp.status === 404 || resp.status === 405) {
                     return { ok: false, reason: 'server-restart-required' };
@@ -401,7 +466,7 @@ export function useAeroboard(wsUrl: string = 'ws://localhost:3000/ws/live') {
             console.error('Failed to delete runs:', err);
             return { ok: false, reason: err instanceof Error ? err.message : 'network-error' };
         }
-    }, []);
+    }, [apiBase]);
 
     return {
         connected,

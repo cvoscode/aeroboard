@@ -1,6 +1,6 @@
 from unittest.mock import Mock, patch
 
-from aeroboard.client import resolve_run_id, _fetch_existing_run_ids, _normalize_run_id
+from aeroboard.client import AeroboardClient, resolve_run_id, _fetch_existing_run_ids, _normalize_run_id
 
 
 def test_resolve_run_id_keeps_base_when_unused():
@@ -29,10 +29,29 @@ def test_normalize_run_id_replaces_missing_default():
 
 
 def test_fetch_existing_run_ids_uses_server_fallback():
-    greptime_error = RuntimeError("unavailable")
-
     runs_response = Mock(status_code=200)
     runs_response.json.return_value = {"runs": ["experiment", "experiment-v2", "other-run"]}
 
-    with patch("requests.get", side_effect=[greptime_error, runs_response]):
+    with patch("requests.get", return_value=runs_response):
         assert _fetch_existing_run_ids("experiment") == {"experiment", "experiment-v2"}
+
+
+def test_client_prefers_server_side_run_resolution():
+    resolve_response = Mock(status_code=200)
+    resolve_response.json.return_value = {"run_id": "experiment-v3"}
+
+    with patch("aeroboard.client.fl.FlightClient"):
+        with patch("requests.post", return_value=resolve_response):
+            client = AeroboardClient(run_id="experiment")
+            assert client.run_id == "experiment-v3"
+
+
+def test_client_falls_back_to_live_run_listing_when_resolve_endpoint_unavailable():
+    runs_response = Mock(status_code=200)
+    runs_response.json.return_value = {"runs": ["experiment", "experiment-v2"]}
+
+    with patch("aeroboard.client.fl.FlightClient"):
+        with patch("requests.post", side_effect=RuntimeError("unavailable")):
+            with patch("requests.get", return_value=runs_response):
+                client = AeroboardClient(run_id="experiment")
+                assert client.run_id == "experiment-v3"

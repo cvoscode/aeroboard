@@ -2,9 +2,10 @@ use std::sync::Arc;
 use std::collections::BTreeSet;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
-use arrow::record_batch::RecordBatch;
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::DataType;
+
+use crate::telemetry::TelemetryBatch;
 
 /// T-Junction: The central hub for distributing incoming Flight batches
 /// to the WebSocket streamers and the Database persistence layer.
@@ -12,7 +13,7 @@ use arrow::datatypes::DataType;
 pub struct TJunction {
     /// Broadcast channel where producers dump RecordBatches.
     /// Clones of RecordBatch are cheap (Arc-backed arrays).
-    pub sender: broadcast::Sender<Arc<RecordBatch>>,
+    pub sender: broadcast::Sender<Arc<TelemetryBatch>>,
     live_run_ids: Arc<RwLock<BTreeSet<String>>>,
 }
 
@@ -26,12 +27,12 @@ impl TJunction {
     }
 
     /// Subscribe to the live stream
-    pub fn subscribe(&self) -> broadcast::Receiver<Arc<RecordBatch>> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<TelemetryBatch>> {
         self.sender.subscribe()
     }
 
     /// Broadcast a batch
-    pub fn publish(&self, batch: Arc<RecordBatch>) -> Result<usize, broadcast::error::SendError<Arc<RecordBatch>>> {
+    pub fn publish(&self, batch: Arc<TelemetryBatch>) -> Result<usize, broadcast::error::SendError<Arc<TelemetryBatch>>> {
         self.register_batch_runs(&batch);
         self.sender.send(batch)
     }
@@ -40,7 +41,8 @@ impl TJunction {
         self.live_run_ids.read().await.iter().cloned().collect()
     }
 
-    fn register_batch_runs(&self, batch: &RecordBatch) {
+    fn register_batch_runs(&self, telemetry: &TelemetryBatch) {
+        let batch = &telemetry.batch;
         let Some(run_id_index) = batch.schema().fields().iter().position(|field| field.name() == "run_id") else {
             return;
         };

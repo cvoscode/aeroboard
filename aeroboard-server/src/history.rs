@@ -1,11 +1,11 @@
-use axum::{extract::State, http::StatusCode, Json};
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use axum::{extract::{Query, State}, http::StatusCode, Json};
+use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Value;
-use std::sync::Arc;
-use crate::t_junction::TJunction;
+use std::collections::BTreeSet;
 
-/// A single scalar data point returned from GreptimeDB history
+use crate::app_state::AppState;
+
+/// A single scalar data point returned from persisted history
 #[derive(Serialize)]
 pub struct HistoryPoint {
     pub ts_ms: i64,
@@ -19,6 +19,7 @@ pub struct HistoryPoint {
 pub struct HistoryResponse {
     pub rows: Vec<HistoryPoint>,
     pub run_summaries: Vec<RunSummary>,
+    pub next_cursor: Option<usize>,
     pub error: Option<String>,
 }
 
@@ -56,6 +57,7 @@ pub struct ImageHistoryPoint {
 #[derive(Serialize)]
 pub struct ImageHistoryResponse {
     pub rows: Vec<ImageHistoryPoint>,
+    pub next_cursor: Option<usize>,
     pub error: Option<String>,
 }
 
@@ -70,54 +72,116 @@ pub struct RunsResponse {
     pub runs: Vec<String>,
 }
 
+#[derive(Serialize)]
+pub struct ResolveRunIdResponse {
+    pub run_id: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct HistoryQuery {
+    pub run_id: Option<String>,
+    pub metric: Option<String>,
+    pub start_ms: Option<i64>,
+    pub end_ms: Option<i64>,
+    pub limit: Option<usize>,
+    pub cursor: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResolveRunIdRequest {
+    pub base_run_id: String,
+}
+
 /// GET /api/history
 pub async fn history_handler(
-    State(_t_junction): State<Arc<TJunction>>,
+    State(state): State<AppState>,
+    Query(query): Query<HistoryQuery>,
 ) -> Json<HistoryResponse> {
-    match query_history().await {
-        Ok((rows, run_summaries)) => Json(HistoryResponse { rows, run_summaries, error: None }),
-        Err(e) => {
-            let msg = e.to_string();
+    match state.storage.query_history().await {
+        Ok(rows) => match state.storage.query_hyperparameters().await {
+            Ok(hyperparameters) => {
+                let filtered_rows = apply_history_filters(rows, &query);
+                let filtered_hyperparameters = filter_hyperparameters(hyperparameters, &query);
+                let run_summaries = build_run_summaries(&filtered_rows, filtered_hyperparameters.clone());
+                let (page_rows, next_cursor) = page_vec(filtered_rows, query.cursor, query.limit);
+                Json(HistoryResponse { rows: page_rows, run_summaries, next_cursor, error: None })
+            }
+            Err(error) => {
+                let msg = error.to_string();
+                tracing::error!("Failed to query hyperparameters: {}", msg);
+                Json(HistoryResponse { rows: vec![], run_summaries: vec![], next_cursor: None, error: Some(msg) })
+            }
+        },
+        Err(error) => {
+            let msg = error.to_string();
             tracing::error!("Failed to query history: {}", msg);
-            Json(HistoryResponse { rows: vec![], run_summaries: vec![], error: Some(msg) })
+            Json(HistoryResponse { rows: vec![], run_summaries: vec![], next_cursor: None, error: Some(msg) })
         }
     }
 }
 
 /// GET /api/history/images
 pub async fn image_history_handler(
-    State(_t_junction): State<Arc<TJunction>>,
+    State(state): State<AppState>,
+    Query(query): Query<HistoryQuery>,
 ) -> Json<ImageHistoryResponse> {
-    match query_image_history().await {
-        Ok(rows) => Json(ImageHistoryResponse { rows, error: None }),
-        Err(e) => {
-            let msg = e.to_string();
+    match state.storage.query_image_history().await {
+        Ok(rows) => {
+            let filtered_rows = apply_image_filters(rows, &query);
+            let (page_rows, next_cursor) = page_vec(filtered_rows, query.cursor, query.limit);
+            Json(ImageHistoryResponse { rows: page_rows, next_cursor, error: None })
+        }
+        Err(error) => {
+            let msg = error.to_string();
             tracing::error!("Failed to query image history: {}", msg);
-            Json(ImageHistoryResponse { rows: vec![], error: Some(msg) })
+            Json(ImageHistoryResponse { rows: vec![], next_cursor: None, error: Some(msg) })
         }
     }
 }
 
 /// GET /api/runs
 pub async fn runs_handler(
-    State(t_junction): State<Arc<TJunction>>,
+    State(state): State<AppState>,
 ) -> Json<RunsResponse> {
+    let mut runs: BTreeSet<String> = state.t_junction.current_runs().await.into_iter().collect();
+    match state.storage.list_runs().await {
+        Ok(stored_runs) => runs.extend(stored_runs),
+        Err(error) => tracing::warn!("Failed to list persisted runs: {}", error),
+    }
+
     Json(RunsResponse {
-        runs: t_junction.current_runs().await,
+        runs: runs.into_iter().collect(),
+    })
+}
+
+/// POST /api/runs/resolve
+pub async fn resolve_run_id_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<ResolveRunIdRequest>,
+) -> Json<ResolveRunIdResponse> {
+    let requested = normalize_run_id(&payload.base_run_id);
+    let mut existing: BTreeSet<String> = state.t_junction.current_runs().await.into_iter().collect();
+    match state.storage.list_runs().await {
+        Ok(stored_runs) => existing.extend(stored_runs),
+        Err(error) => tracing::warn!("Failed to list persisted runs while resolving run id: {}", error),
+    }
+
+    Json(ResolveRunIdResponse {
+        run_id: resolve_run_id(&requested, &existing),
     })
 }
 
 /// DELETE /api/history
 pub async fn delete_history_handler(
-    State(_t_junction): State<Arc<TJunction>>,
+    State(state): State<AppState>,
 ) -> (StatusCode, Json<DeleteRunsResponse>) {
-    match clear_history().await {
+    match state.storage.clear_history().await {
         Ok(()) => (
             StatusCode::OK,
             Json(DeleteRunsResponse { deleted: true, error: None })
         ),
-        Err(e) => {
-            let msg = e.to_string();
+        Err(error) => {
+            let msg = error.to_string();
             tracing::error!("Failed to delete history: {}", msg);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -125,227 +189,6 @@ pub async fn delete_history_handler(
             )
         }
     }
-}
-
-async fn query_history() -> Result<(Vec<HistoryPoint>, Vec<RunSummary>), Box<dyn std::error::Error>> {
-    let client = reqwest::Client::new();
-
-    // Use SELECT * to avoid crashing on missing columns (e.g. if run_id hasn't been created yet)
-    let sql = "SELECT * FROM scalars ORDER BY ts ASC LIMIT 1000000";
-    let url = format!(
-        "http://localhost:4000/v1/sql?sql={}&db=public",
-        urlencoding::encode(sql)
-    );
-
-    let resp = match client.get(&url).send().await {
-        Ok(resp) => resp,
-        Err(error) if error.is_connect() => {
-            tracing::warn!("GreptimeDB unavailable, serving live-only scalar history");
-            return Ok((vec![], vec![]));
-        }
-        Err(error) => return Err(error.into()),
-    };
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body: String = resp.text().await.unwrap_or_default();
-        return Err(format!("GreptimeDB SQL error {}: {}", status, body).into());
-    }
-
-    let body: Value = resp.json().await?;
-    let rows_raw = extract_rows(&body)?;
-    let col_idx = extract_column_indices(&body)?;
-
-    // Support both old schema (name, value, ts) and new schema (metric, run_id, value, ts)
-    let ts_idx      = col_idx.get("ts");
-    let name_idx    = col_idx.get("metric").or_else(|| col_idx.get("name"));
-    let run_id_idx  = col_idx.get("run_id");
-    let value_idx   = col_idx.get("value");
-
-    let (Some(&ts_idx), Some(&name_idx), Some(&value_idx)) = (ts_idx, name_idx, value_idx) else {
-        tracing::warn!("history: column schema mismatch: {:?}", col_idx.keys().collect::<Vec<_>>());
-        return Ok((vec![], vec![]));
-    };
-
-    let mut points = Vec::with_capacity(rows_raw.len());
-    for row in rows_raw {
-        let arr = match row.as_array() {
-            Some(a) => a,
-            None => continue,
-        };
-        if arr.len() <= ts_idx || arr.len() <= name_idx || arr.len() <= value_idx { continue; }
-
-        // Timestamp is nanoseconds in new schema, parse accordingly
-        let ts_ns: i64 = match &arr[ts_idx] {
-            serde_json::Value::Number(n) => n.as_i64().unwrap_or(0),
-            serde_json::Value::String(s) => s.parse::<i64>().unwrap_or(0),
-            _ => 0,
-        };
-        let ts_ms = ts_ns / 1_000_000; // ns → ms
-
-        let name   = arr[name_idx].as_str().unwrap_or("").to_string();
-        let run_id = run_id_idx
-            .and_then(|&i| arr.get(i))
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown_run")
-            .to_string();
-        let value = match &arr[value_idx] {
-            serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0),
-            _ => 0.0,
-        };
-
-        if name.is_empty() { continue; }
-        points.push(HistoryPoint { ts_ms, run_id, name, value });
-    }
-
-    let run_summaries = build_run_summaries(&points, query_hyperparameters().await?);
-
-    tracing::info!("Loaded {} historical data points from GreptimeDB", points.len());
-    Ok((points, run_summaries))
-}
-
-async fn query_hyperparameters() -> Result<Vec<(String, HyperparameterEntry)>, Box<dyn std::error::Error>> {
-    let client = reqwest::Client::new();
-    let sql = "SELECT * FROM hyperparameters ORDER BY ts ASC LIMIT 100000";
-    let url = format!(
-        "http://localhost:4000/v1/sql?sql={}&db=public",
-        urlencoding::encode(sql)
-    );
-
-    let resp = match client.get(&url).send().await {
-        Ok(resp) => resp,
-        Err(error) if error.is_connect() => {
-            tracing::warn!("GreptimeDB unavailable, skipping persisted hyperparameters");
-            return Ok(vec![]);
-        }
-        Err(error) => return Err(error.into()),
-    };
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body: String = resp.text().await.unwrap_or_default();
-        tracing::warn!("Hyperparameter query failed {}: {}", status, body);
-        return Ok(vec![]);
-    }
-
-    let body: Value = resp.json().await?;
-    let rows = extract_rows(&body)?;
-    let col_idx = extract_column_indices(&body)?;
-
-    let ts_idx = col_idx.get("ts");
-    let run_id_idx = col_idx.get("run_id");
-    let key_idx = col_idx.get("key");
-    let value_idx = col_idx.get("value");
-    let value_type_idx = col_idx.get("value_type");
-    let (Some(&_ts_idx), Some(&run_id_idx), Some(&key_idx), Some(&value_idx), Some(&value_type_idx)) = (ts_idx, run_id_idx, key_idx, value_idx, value_type_idx) else {
-        return Ok(vec![]);
-    };
-
-    let mut entries = Vec::new();
-    for row in rows {
-        let Some(arr) = row.as_array() else { continue; };
-        let run_id = arr.get(run_id_idx).and_then(Value::as_str).unwrap_or_default();
-        let key = arr.get(key_idx).and_then(Value::as_str).unwrap_or_default();
-        let value = arr.get(value_idx).and_then(Value::as_str).unwrap_or_default();
-        let value_type = arr.get(value_type_idx).and_then(Value::as_str).unwrap_or("string");
-        if run_id.is_empty() || key.is_empty() {
-            continue;
-        }
-        entries.push((
-            run_id.to_string(),
-            HyperparameterEntry {
-                key: key.to_string(),
-                value: value.to_string(),
-                value_type: value_type.to_string(),
-            },
-        ));
-    }
-
-    Ok(entries)
-}
-
-async fn query_image_history() -> Result<Vec<ImageHistoryPoint>, Box<dyn std::error::Error>> {
-    let client = reqwest::Client::new();
-    let sql = "SELECT * FROM images ORDER BY ts ASC LIMIT 100000";
-    let url = format!(
-        "http://localhost:4000/v1/sql?sql={}&db=public",
-        urlencoding::encode(sql)
-    );
-
-    let resp = match client.get(&url).send().await {
-        Ok(resp) => resp,
-        Err(error) if error.is_connect() => {
-            tracing::warn!("GreptimeDB unavailable, serving live-only image history");
-            return Ok(vec![]);
-        }
-        Err(error) => return Err(error.into()),
-    };
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body: String = resp.text().await.unwrap_or_default();
-        return Err(format!("GreptimeDB image SQL error {}: {}", status, body).into());
-    }
-
-    let body: Value = resp.json().await?;
-    let rows = extract_rows(&body)?;
-    let col_idx = extract_column_indices(&body)?;
-
-    let ts_idx = col_idx.get("ts");
-    let run_id_idx = col_idx.get("run_id");
-    let name_idx = col_idx.get("name");
-    let format_idx = col_idx.get("format");
-    let image_hex_idx = col_idx.get("image_hex");
-    let (Some(&ts_idx), Some(&run_id_idx), Some(&name_idx), Some(&format_idx), Some(&image_hex_idx)) = (ts_idx, run_id_idx, name_idx, format_idx, image_hex_idx) else {
-        return Ok(vec![]);
-    };
-
-    let mut decoded = Vec::new();
-    for row in rows {
-        let Some(arr) = row.as_array() else { continue; };
-
-        let ts_ns = parse_i64(arr.get(ts_idx));
-        let run_id = arr.get(run_id_idx).and_then(Value::as_str).unwrap_or_default();
-        let name = arr.get(name_idx).and_then(Value::as_str).unwrap_or_default();
-        let format = arr.get(format_idx).and_then(Value::as_str).unwrap_or_default();
-        let image_hex = arr.get(image_hex_idx).and_then(Value::as_str).unwrap_or_default();
-
-        if run_id.is_empty() || name.is_empty() || format.is_empty() || image_hex.is_empty() {
-            continue;
-        }
-
-        let bytes = decode_hex(image_hex)?;
-        decoded.push(ImageHistoryPoint {
-            ts_ms: ts_ns / 1_000_000,
-            run_id: run_id.to_string(),
-            name: name.to_string(),
-            format: format.to_string(),
-            image_base64: BASE64_STANDARD.encode(bytes),
-        });
-    }
-
-    Ok(decoded)
-}
-
-fn extract_rows(body: &Value) -> Result<&Vec<Value>, Box<dyn std::error::Error>> {
-    body.get("output")
-        .and_then(|o| o.get(0))
-        .and_then(|o| o.get("records"))
-        .and_then(|r| r.get("rows"))
-        .and_then(Value::as_array)
-    .ok_or_else(|| Box::<dyn std::error::Error>::from("Unexpected GreptimeDB response shape"))
-}
-
-fn extract_column_indices(body: &Value) -> Result<std::collections::HashMap<&str, usize>, Box<dyn std::error::Error>> {
-    let cols = body.get("output")
-        .and_then(|o| o.get(0))
-        .and_then(|o| o.get("records"))
-        .and_then(|r| r.get("schema"))
-        .and_then(|s| s.get("column_schemas"))
-        .and_then(Value::as_array)
-        .ok_or_else(|| Box::<dyn std::error::Error>::from("Unexpected GreptimeDB response schema"))?;
-
-    Ok(cols.iter().enumerate()
-        .filter_map(|(i, c)| c.get("name").and_then(Value::as_str).map(|n| (n, i)))
-        .collect())
 }
 
 pub(crate) fn build_run_summaries(points: &[HistoryPoint], hyperparameters: Vec<(String, HyperparameterEntry)>) -> Vec<RunSummary> {
@@ -401,114 +244,120 @@ impl MetricStatAccumulator {
     }
 }
 
-fn parse_i64(value: Option<&Value>) -> i64 {
-    match value {
-        Some(Value::Number(n)) => n.as_i64().unwrap_or(0),
-        Some(Value::String(s)) => s.parse::<i64>().unwrap_or(0),
-        _ => 0,
-    }
-}
-
-fn decode_hex(hex: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    if !hex.len().is_multiple_of(2) {
-        return Err("Invalid hex payload length".into());
-    }
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    let chars: Vec<char> = hex.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let part = [chars[i], chars[i + 1]].iter().collect::<String>();
-        bytes.push(u8::from_str_radix(&part, 16)?);
-        i += 2;
-    }
-    Ok(bytes)
-}
-
-async fn clear_history() -> Result<(), Box<dyn std::error::Error>> {
-    let client = reqwest::Client::new();
-    let mut failures = Vec::new();
-
-    for table in ["scalars", "images", "hyperparameters"] {
-        match clear_table(&client, table).await {
-            Ok(ClearTableOutcome::Cleared) => {
-                tracing::info!("Cleared `{}` history", table);
-            }
-            Ok(ClearTableOutcome::SkippedMissing) => {
-                tracing::info!("Skipping missing table `{}` while deleting history", table);
-            }
-            Ok(ClearTableOutcome::PersistenceUnavailable) => {
-                tracing::warn!("GreptimeDB unavailable while deleting history; clearing UI state only");
-                return Ok(());
-            }
-            Err(error) => failures.push(format!("{}: {}", table, error)),
-        }
-    }
-
-    if failures.is_empty() {
-        Ok(())
+fn normalize_run_id(run_id: &str) -> String {
+    let cleaned = run_id.trim();
+    if cleaned.is_empty() {
+        format!("run-{}", chrono_like_unix_seconds())
     } else {
-        Err(format!("GreptimeDB could not clear history: {}", failures.join(" | ")).into())
+        cleaned.to_string()
     }
 }
 
-enum ClearTableOutcome {
-    Cleared,
-    SkippedMissing,
-    PersistenceUnavailable,
-}
+pub(crate) fn resolve_run_id(base: &str, existing: &BTreeSet<String>) -> String {
+    let (base_without_suffix, framework_suffix) = split_framework_suffix(base);
+    let existing_versions: BTreeSet<usize> = existing
+        .iter()
+        .filter_map(|candidate| extract_version(candidate, base))
+        .collect();
 
-async fn clear_table(
-    client: &reqwest::Client,
-    table: &str,
-) -> Result<ClearTableOutcome, String> {
-    let statements = [
-        format!("DELETE FROM {}", table),
-        format!("TRUNCATE TABLE {}", table),
-        format!("DELETE FROM {} WHERE true", table),
-    ];
-
-    let mut last_error = String::new();
-
-    for sql in statements {
-        let url = format!(
-            "http://localhost:4000/v1/sql?sql={}&db=public",
-            urlencoding::encode(&sql)
-        );
-
-        let resp = match client.get(&url).send().await {
-            Ok(resp) => resp,
-            Err(error) => {
-                if error.is_connect() {
-                    return Ok(ClearTableOutcome::PersistenceUnavailable);
-                }
-                return Err(format!("request failed for `{}`: {}", sql, error));
-            }
-        };
-
-        if resp.status().is_success() {
-            return Ok(ClearTableOutcome::Cleared);
-        }
-
-        let status = resp.status();
-        let body: String = resp.text().await.unwrap_or_default();
-        if is_missing_table_error(status, &body) {
-            return Ok(ClearTableOutcome::SkippedMissing);
-        }
-
-        last_error = format!("statement `{}` failed with {}: {}", sql, status, body);
-        tracing::warn!("Failed to clear `{}` using `{}`: {} {}", table, sql, status, body);
+    if !existing_versions.contains(&1) {
+        return base.to_string();
     }
 
-    Err(last_error)
+    let next_version = existing_versions.iter().copied().max().unwrap_or(1) + 1;
+    format!("{base_without_suffix}-v{next_version}{framework_suffix}")
 }
 
-fn is_missing_table_error(status: StatusCode, body: &str) -> bool {
-    if status == StatusCode::NOT_FOUND {
-        return true;
+fn split_framework_suffix(candidate: &str) -> (String, String) {
+    match candidate.rsplit_once("-pl") {
+        Some((prefix, suffix)) if !suffix.is_empty() => (prefix.to_string(), format!("-pl{}", suffix)),
+        _ => (candidate.to_string(), String::new()),
+    }
+}
+
+fn extract_version(candidate: &str, base: &str) -> Option<usize> {
+    let (candidate_base, candidate_suffix) = split_framework_suffix(candidate);
+    let (base_without_suffix, base_suffix) = split_framework_suffix(base);
+    if candidate_suffix != base_suffix {
+        return None;
     }
 
-    let normalized = body.to_ascii_lowercase();
-    normalized.contains("table not found")
-        || normalized.contains("does not exist")
-        || normalized.contains("unknown table")
+    if candidate_base == base_without_suffix {
+        return Some(1);
+    }
+
+    let version_prefix = format!("{base_without_suffix}-v");
+    candidate_base
+        .strip_prefix(&version_prefix)
+        .and_then(|suffix| suffix.parse::<usize>().ok())
+}
+
+fn apply_history_filters(rows: Vec<HistoryPoint>, query: &HistoryQuery) -> Vec<HistoryPoint> {
+    let run_ids = csv_set(query.run_id.as_deref());
+    let metrics = csv_set(query.metric.as_deref());
+
+    rows.into_iter()
+        .filter(|row| {
+            (run_ids.is_empty() || run_ids.contains(&row.run_id))
+                && (metrics.is_empty() || metrics.contains(&row.name))
+                && query.start_ms.is_none_or(|start| row.ts_ms >= start)
+                && query.end_ms.is_none_or(|end| row.ts_ms <= end)
+        })
+        .collect()
+}
+
+fn apply_image_filters(rows: Vec<ImageHistoryPoint>, query: &HistoryQuery) -> Vec<ImageHistoryPoint> {
+    let run_ids = csv_set(query.run_id.as_deref());
+    let metrics = csv_set(query.metric.as_deref());
+
+    rows.into_iter()
+        .filter(|row| {
+            (run_ids.is_empty() || run_ids.contains(&row.run_id))
+                && (metrics.is_empty() || metrics.contains(&row.name))
+                && query.start_ms.is_none_or(|start| row.ts_ms >= start)
+                && query.end_ms.is_none_or(|end| row.ts_ms <= end)
+        })
+        .collect()
+}
+
+fn filter_hyperparameters(
+    rows: Vec<(String, HyperparameterEntry)>,
+    query: &HistoryQuery,
+) -> Vec<(String, HyperparameterEntry)> {
+    let run_ids = csv_set(query.run_id.as_deref());
+    rows.into_iter()
+        .filter(|(run_id, _)| run_ids.is_empty() || run_ids.contains(run_id))
+        .collect()
+}
+
+fn page_vec<T>(rows: Vec<T>, cursor: Option<usize>, limit: Option<usize>) -> (Vec<T>, Option<usize>) {
+    let start = cursor.unwrap_or(0);
+    let limit = limit.unwrap_or(rows.len().max(1));
+    let total = rows.len();
+
+    let paged: Vec<T> = rows.into_iter().skip(start).take(limit).collect();
+    let next_cursor = if start + paged.len() < total {
+        Some(start + paged.len())
+    } else {
+        None
+    };
+
+    (paged, next_cursor)
+}
+
+fn csv_set(value: Option<&str>) -> BTreeSet<String> {
+    value
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn chrono_like_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }

@@ -1,6 +1,6 @@
 import pyarrow as pa
 
-# Define strict Arrow schemas for scalars
+from aeroboard.schema import *  # noqa: F403
 
 scalar_schema = pa.schema([
     ("timestamp", pa.timestamp('ms')),

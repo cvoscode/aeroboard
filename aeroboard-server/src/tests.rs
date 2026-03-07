@@ -2,11 +2,14 @@
 mod tests {
     use arrow::array::{BinaryArray, Float64Array, StringArray, TimestampMillisecondArray};
     use arrow::record_batch::RecordBatch;
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     use crate::history::{HyperparameterEntry, HistoryPoint};
     use crate::persistence::record_batch_to_line_protocol;
     use crate::schema::{hyperparameter_schema, image_schema, scalar_schema};
+    use crate::storage::{FilesystemStore, StorageEngine};
+    use crate::telemetry::{TelemetryBatch, TelemetryKind};
 
     #[tokio::test]
     async fn test_mock_insert() {
@@ -99,5 +102,45 @@ mod tests {
         assert_eq!(loss_summary.last, 0.5);
         assert_eq!(loss_summary.min, 0.5);
         assert_eq!(loss_summary.max, 0.9);
+    }
+
+    #[test]
+    fn test_server_side_run_resolution() {
+        let existing = BTreeSet::from([
+            "experiment".to_string(),
+            "experiment-v2".to_string(),
+            "experiment-v4".to_string(),
+        ]);
+
+        let resolved = super::super::history::resolve_run_id("experiment", &existing);
+        assert_eq!(resolved, "experiment-v5");
+    }
+
+    #[tokio::test]
+    async fn test_filesystem_store_persists_images_as_files() {
+        let temp_dir = std::env::temp_dir().join(format!("aeroboard-test-{}", uuid::Uuid::new_v4()));
+        let store = FilesystemStore::new(temp_dir.clone()).unwrap();
+
+        let batch = RecordBatch::try_new(
+            image_schema(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![1_700_000_000_000])),
+                Arc::new(StringArray::from(vec!["run-image"])),
+                Arc::new(StringArray::from(vec!["samples/generated"])),
+                Arc::new(BinaryArray::from(vec![b"img".as_slice()])),
+                Arc::new(StringArray::from(vec!["png"])),
+            ],
+        ).unwrap();
+
+        store.append_batch(Arc::new(TelemetryBatch::new(TelemetryKind::Images, Arc::new(batch)))).await.unwrap();
+
+        let rows = store.query_image_history().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].run_id, "run-image");
+        assert_eq!(rows[0].name, "samples/generated");
+        assert_eq!(rows[0].format, "png");
+        assert_eq!(rows[0].image_base64, "aW1n");
+
+        std::fs::remove_dir_all(temp_dir).unwrap();
     }
 }

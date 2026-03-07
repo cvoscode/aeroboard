@@ -2,7 +2,6 @@ import click
 import subprocess
 import os
 import sys
-import signal
 
 
 def project_root() -> str:
@@ -47,7 +46,20 @@ def setup():
 
 @main.command()
 @click.option("--port", default=3000, help="Port to run the server on")
-def start(port):
+@click.option("--flight-port", default=50051, help="Port to run the Flight ingestion server on")
+@click.option(
+    "--storage",
+    type=click.Choice(["filesystem", "greptime", "live"], case_sensitive=False),
+    default="filesystem",
+    show_default=True,
+    help="Persistence backend to use",
+)
+@click.option(
+    "--data-dir",
+    default=None,
+    help="Filesystem data directory used when storage=filesystem",
+)
+def start(port, flight_port, storage, data_dir):
     """Start the Aeroboard server (and web UI)"""
     root_dir = project_root()
     server_dir = os.path.join(root_dir, "aeroboard-server")
@@ -61,18 +73,27 @@ def start(port):
         sys.exit(1)
 
     click.echo(f"🚀 Starting Aeroboard on http://localhost:{port}")
+    click.echo(f"   Storage backend: {storage}")
+    click.echo(f"   Flight endpoint: grpc://localhost:{flight_port}")
     click.echo("   (Serving metrics stream and live dashboard)")
+
+    env = os.environ.copy()
+    env["AEROBOARD_HTTP_PORT"] = str(port)
+    env["AEROBOARD_FLIGHT_PORT"] = str(flight_port)
+    env["AEROBOARD_STORAGE"] = storage.lower()
+    if data_dir:
+        env["AEROBOARD_DATA_DIR"] = os.path.abspath(data_dir)
     
     try:
         # Run the compiled binary directly
-        result = subprocess.run([binary_path], cwd=server_dir, check=False)
+        result = subprocess.run([binary_path], cwd=server_dir, env=env, check=False)
         if result.returncode != 0:
             click.echo(f"Error: Aeroboard server exited with code {result.returncode}", err=True)
             sys.exit(result.returncode)
     except FileNotFoundError:
         # Fallback to cargo run if for some reason binary_path didn't work but we are in dev
         click.echo("⚠️ Release binary not found, falling back to 'cargo run'...")
-        result = subprocess.run(["cargo", "run", "--release"], cwd=server_dir, check=False)
+        result = subprocess.run(["cargo", "run", "--release"], cwd=server_dir, env=env, check=False)
         if result.returncode != 0:
             click.echo(f"Error: Aeroboard cargo server exited with code {result.returncode}", err=True)
             sys.exit(result.returncode)

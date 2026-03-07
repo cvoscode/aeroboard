@@ -1,4 +1,20 @@
+"""Aeroboard Lightning example for comparing storage backends.
+
+Typical usage with the new uv-based workflow:
+
+Filesystem:
+    uv run aeroboard start --storage filesystem --data-dir .aeroboard/examples/fs
+    uv run examples/lightning_example.py --backend filesystem
+
+Greptime:
+    uv run aeroboard db
+    uv run aeroboard start --storage greptime
+    uv run examples/lightning_example.py --backend greptime
+"""
+
+import argparse
 import io
+import os
 import time
 
 import matplotlib
@@ -54,7 +70,6 @@ class GradientFigureCallback(pl.Callback):
         self.client.log_image(self.image_name, buffer.getvalue(), format='png')
         self.client.flush()
 
-# 2. Lightning Module
 class SimpleModel(pl.LightningModule):
     def __init__(self, hidden_size: int = 5, learning_rate: float = 0.02):
         super().__init__()
@@ -86,28 +101,44 @@ class SimpleModel(pl.LightningModule):
     def configure_optimizers(self):
         return optim.Adam(self.parameters(), lr=self.hparams.learning_rate)
 
-# 3. Data & Training Execution
-def run_lightning_example(run_name="experiment_A"):
-    # Create synthetic data
+def run_lightning_example(
+    run_name: str,
+    *,
+    backend: str,
+    url: str,
+    api_base_url: str,
+    batch_size: int,
+    max_epochs: int,
+):
     X = torch.randn(1000, 10)
     Y = (X[:, 0] > 0).long()
-    dataset    = TensorDataset(X, Y)
+    dataset = TensorDataset(X, Y)
     train_loader = DataLoader(dataset, batch_size=32)
-    val_loader   = DataLoader(dataset, batch_size=32)
+    val_loader = DataLoader(dataset, batch_size=32)
 
     model = SimpleModel(hidden_size=8 if 'high' in run_name else 5, learning_rate=0.05 if 'high' in run_name else 0.02)
 
-    client = aeroboard.init(run_id=run_name, url="grpc://localhost:50051", batch_size=10)
+    client = aeroboard.init(
+        run_id=run_name,
+        url=url,
+        api_base_url=api_base_url,
+        batch_size=batch_size,
+    )
     logger_cb = client.attach_lightning()
 
     client.log_hyperparameters({
         'manual/tag': 'lightning',
         'augmentation': 'gaussian-noise',
+        'storage/backend': backend,
+        'example/workflow': 'uv',
+        'example/flight_url': url,
+        'example/api_base_url': api_base_url,
+        'example/run_name': run_name,
     })
     gradient_cb = GradientFigureCallback(client=client)
 
     trainer = pl.Trainer(
-        max_epochs=20,
+        max_epochs=max_epochs,
         callbacks=[logger_cb, gradient_cb],
         enable_progress_bar=True,
         enable_checkpointing=False,
@@ -119,9 +150,88 @@ def run_lightning_example(run_name="experiment_A"):
     client.flush()
     print(f"✅ {run_name} Complete.")
 
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run the Aeroboard Lightning example against a selected storage backend.",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=["filesystem", "greptime"],
+        default="filesystem",
+        help="Storage backend currently used by the Aeroboard server.",
+    )
+    parser.add_argument(
+        "--url",
+        default=os.getenv("AEROBOARD_EXAMPLE_FLIGHT_URL", "grpc://localhost:50051"),
+        help="Arrow Flight endpoint used by the Python client.",
+    )
+    parser.add_argument(
+        "--api-base-url",
+        default=os.getenv("AEROBOARD_EXAMPLE_API_BASE_URL", "http://localhost:3000"),
+        help="HTTP API base used for run resolution and history endpoints.",
+    )
+    parser.add_argument(
+        "--run-prefix",
+        default="lightning-eval",
+        help="Prefix used for generated run names.",
+    )
+    parser.add_argument(
+        "--variants",
+        nargs="+",
+        choices=["baseline", "high-lr"],
+        default=["baseline", "high-lr"],
+        help="Which training variants to execute for side-by-side evaluation.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=10,
+        help="Aeroboard client batch size.",
+    )
+    parser.add_argument(
+        "--max-epochs",
+        type=int,
+        default=20,
+        help="Number of Lightning epochs to train per run.",
+    )
+    parser.add_argument(
+        "--sleep-between",
+        type=float,
+        default=2.0,
+        help="Delay between sequential runs so timelines separate cleanly.",
+    )
+    return parser.parse_args()
+
+
+def build_run_names(run_prefix: str, backend: str, variants: list[str]) -> list[str]:
+    names: list[str] = []
+    for variant in variants:
+        suffix = "lr-high" if variant == "high-lr" else variant
+        names.append(f"{run_prefix}-{backend}-{suffix}")
+    return names
+
+
 if __name__ == "__main__":
-    # Simulate two different experiments
-    # If run twice, Aeroboard will now automatically version them: baseline, baseline-v2, etc.
-    run_lightning_example("resnet_baseline")
-    time.sleep(2)
-    run_lightning_example("resnet_lr_high")
+    args = parse_args()
+
+    pl.seed_everything(7, workers=True)
+
+    print("🔎 Aeroboard backend evaluation")
+    print(f"   backend: {args.backend}")
+    print(f"   flight:  {args.url}")
+    print(f"   api:     {args.api_base_url}")
+    print(f"   variants: {', '.join(args.variants)}")
+
+    run_names = build_run_names(args.run_prefix, args.backend, args.variants)
+    for index, run_name in enumerate(run_names):
+        run_lightning_example(
+            run_name,
+            backend=args.backend,
+            url=args.url,
+            api_base_url=args.api_base_url,
+            batch_size=args.batch_size,
+            max_epochs=args.max_epochs,
+        )
+        if index < len(run_names) - 1 and args.sleep_between > 0:
+            time.sleep(args.sleep_between)
