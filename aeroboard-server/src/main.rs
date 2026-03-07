@@ -32,6 +32,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/ws/live", get(streaming::ws_handler))
         .route("/api/history", get(history::history_handler).delete(history::delete_history_handler))
+        .route("/api/history/images", get(history::image_history_handler))
+        .route("/api/runs", get(history::runs_handler))
         .fallback_service(tower_http::services::ServeDir::new("../aeroboard-web/dist").fallback(tower_http::services::ServeFile::new("../aeroboard-web/dist/index.html")))
         // Allow the Vite dev server to call /api/history
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))

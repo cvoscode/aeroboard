@@ -38,3 +38,15 @@ pub fn distribution_schema() -> Arc<Schema> {
         ),
     ]))
 }
+
+/// Schema for run-level hyperparameters / metadata.
+#[allow(dead_code)]
+pub fn hyperparameter_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        Field::new("run_id", DataType::Utf8, false),
+        Field::new("key", DataType::Utf8, false),
+        Field::new("value", DataType::Utf8, false),
+        Field::new("value_type", DataType::Utf8, false),
+    ]))
+}

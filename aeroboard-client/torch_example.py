@@ -3,10 +3,18 @@ import torch.nn as nn
 import torch.optim as optim
 import aeroboard_client
 import time
+from PIL import Image
 
 # 1. Initialize Aeroboard Client
 print("Initializing Aeroboard Client...")
 aeroboard = aeroboard_client.init("grpc://localhost:50051", batch_size=20)
+aeroboard.log_hyperparameters({
+    "model": "mlp",
+    "input_size": 10,
+    "hidden_size": 32,
+    "optimizer": "adam",
+    "learning_rate": 0.01,
+})
 
 # 2. Setup a Simple PyTorch Model (MLP)
 class SimpleMLP(nn.Module):
@@ -67,12 +75,16 @@ for epoch in range(epochs):
         
         # Log metrics to Aeroboard every step
         aeroboard_client.log({
-            "train_loss": loss.item(),
-            "train_accuracy": batch_acc,
+            "train/loss": loss.item(),
+            "train/accuracy": batch_acc,
             "epoch": epoch,
-            "global_step": global_step,
-            "learning_rate": optimizer.param_groups[0]['lr']
+            "step": global_step,
+            "optimizer/lr": optimizer.param_groups[0]['lr']
         })
+
+        if i % 25 == 0:
+            image = Image.new('RGB', (96, 96), color=(int(batch_acc * 255), 40, 120))
+            aeroboard.log_image('samples/model-state', image, format='png')
         
         global_step += 1
         

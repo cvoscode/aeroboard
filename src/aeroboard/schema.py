@@ -23,3 +23,11 @@ distribution_schema = pa.schema([
     ("name", pa.string()),
     ("values", pa.list_(pa.float64()))
 ])
+
+hyperparameter_schema = pa.schema([
+    ("timestamp", pa.timestamp('ms')),
+    ("run_id", pa.string()),
+    ("key", pa.string()),
+    ("value", pa.string()),
+    ("value_type", pa.string())
+])

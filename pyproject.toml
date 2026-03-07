@@ -15,10 +15,13 @@ dependencies = [
     "pyarrow",
     "requests",
     "click",
+    "pillow",
+    "matplotlib>=3.9.4",
 ]
 
 [project.optional-dependencies]
 examples = [
+  "matplotlib",
     "torch",
     "pytorch-lightning",
 ]
@@ -31,3 +34,8 @@ packages = ["src/aeroboard"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+]

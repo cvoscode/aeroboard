@@ -11,6 +11,7 @@ dependencies = [
  "arrow-ipc",
  "axum",
  "axum-extra",
+ "base64",
  "futures",
  "prost",
  "reqwest",

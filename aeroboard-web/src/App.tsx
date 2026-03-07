@@ -1,5 +1,4 @@
-import { useMemo, useState, useRef } from 'react';
-import { createPortal } from 'react-dom';
+import { lazy, Suspense, useMemo, useState } from 'react';
 import {
   Activity, List, Clock, RotateCcw, Hash,
   GripVertical, ChevronDown, ChevronRight, Sliders,
@@ -19,159 +18,12 @@ import { useAeroboard } from './hooks/useAeroboard';
 import type { TimeSeriesData } from './hooks/useAeroboard';
 import { LineChart } from './components/LineChart';
 import type { XAxisType } from './components/LineChart';
+import { ColorPicker } from './components/ColorPicker';
+import { DualRangeSlider } from './components/DualRangeSlider';
 import './App.css';
 
-// --- Custom Color Picker (Portal Modal) ---
-
-const PALETTE = [
-  '#00d2ff', '#00e676', '#ff4c6b', '#ffeb3b', '#e040fb',
-  '#ff9800', '#9c27b0', '#60efff', '#ff6b9d', '#c3f584',
-  '#ffd166', '#06d6a0', '#ef476f', '#118ab2', '#5d7af6',
-  '#f8edeb', '#b7b7a4', '#a8dadc', '#e76f51', '#ffffff',
-];
-
-interface ColorPickerProps {
-  color: string;
-  onChange: (color: string) => void;
-}
-
-function ColorPicker({ color, onChange }: ColorPickerProps) {
-  const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState({ top: 0, left: 0 });
-  const triggerRef = useRef<HTMLButtonElement>(null);
-
-  const openPicker = () => {
-    if (triggerRef.current) {
-      const r = triggerRef.current.getBoundingClientRect();
-      setPos({ top: r.bottom + 8, left: r.right + 8 });
-    }
-    setOpen(true);
-  };
-
-  const modal = open ? createPortal(
-    <>
-      <div className="color-modal-backdrop" onClick={() => setOpen(false)} />
-      <div
-        className="color-modal"
-        style={{ top: pos.top, left: pos.left }}
-        onClick={e => e.stopPropagation()}
-      >
-        <p className="color-modal-title">Trace Color</p>
-        <div className="color-swatch-grid">
-          {PALETTE.map(c => (
-            <button
-              key={c}
-              className={`swatch-btn ${c === color ? 'active' : ''}`}
-              style={{ backgroundColor: c }}
-              onClick={() => { onChange(c); setOpen(false); }}
-              title={c}
-            />
-          ))}
-        </div>
-        <label className="custom-hex-row">
-          <span>Custom HEX</span>
-          <input type="color" value={color} onChange={e => onChange(e.target.value)} />
-        </label>
-      </div>
-    </>,
-    document.body
-  ) : null;
-
-  return (
-    <div className="color-picker-root">
-      <button ref={triggerRef} className="color-trigger" onClick={openPicker}>
-        <span className="color-trigger-dot" style={{ backgroundColor: color }} />
-      </button>
-      {modal}
-    </div>
-  );
-}
-
-// --- Custom Dual Range Slider (JS-driven, no CSS overlap issues) ---
-
-interface DualRangeSliderProps {
-  min: number;
-  max: number;
-  value: [number, number];
-  onChange: (range: [number, number]) => void;
-}
-
-function DualRangeSlider({ min, max, value, onChange }: DualRangeSliderProps) {
-  const trackRef = useRef<HTMLDivElement>(null);
-  const dragging = useRef<'left' | 'right' | null>(null);
-
-  const toPercent = (v: number) => ((v - min) / (max - min)) * 100;
-  const fromPercent = (pct: number) => min + (max - min) * Math.max(0, Math.min(1, pct / 100));
-
-  const getEventPct = (e: MouseEvent | TouchEvent) => {
-    if (!trackRef.current) return 0;
-    const rect = trackRef.current.getBoundingClientRect();
-    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
-    return ((clientX - rect.left) / rect.width) * 100;
-  };
-
-  const startDrag = (thumb: 'left' | 'right') => (e: React.MouseEvent | React.TouchEvent) => {
-    e.preventDefault();
-    dragging.current = thumb;
-
-    const onMove = (ev: MouseEvent | TouchEvent) => {
-      if (!dragging.current) return;
-      const pct = getEventPct(ev);
-      const rawVal = fromPercent(pct);
-      if (dragging.current === 'left') {
-        onChange([Math.min(rawVal, value[1] - (max - min) * 0.005), value[1]]);
-      } else {
-        onChange([value[0], Math.max(rawVal, value[0] + (max - min) * 0.005)]);
-      }
-    };
-
-    const onUp = () => {
-      dragging.current = null;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('touchmove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      window.removeEventListener('touchend', onUp);
-    };
-
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('touchmove', onMove);
-    window.addEventListener('mouseup', onUp);
-    window.addEventListener('touchend', onUp);
-  };
-
-  const leftPct = toPercent(value[0]);
-  const rightPct = toPercent(value[1]);
-
-  const fmt = (v: number) => {
-    if (max > 10000) return v.toFixed(0);
-    if (max > 100) return v.toFixed(1);
-    return v.toFixed(2);
-  };
-
-  return (
-    <div className="dual-slider">
-      <div className="dual-slider-track" ref={trackRef}>
-        <div className="dual-slider-fill" style={{ left: `${leftPct}%`, right: `${100 - rightPct}%` }} />
-        <div
-          className="dual-slider-thumb"
-          style={{ left: `${leftPct}%` }}
-          onMouseDown={startDrag('left')}
-          onTouchStart={startDrag('left')}
-        />
-        <div
-          className="dual-slider-thumb"
-          style={{ left: `${rightPct}%` }}
-          onMouseDown={startDrag('right')}
-          onTouchStart={startDrag('right')}
-        />
-      </div>
-      <div className="dual-slider-labels">
-        <span>{fmt(value[0])}</span>
-        <span>{fmt(value[1])}</span>
-      </div>
-    </div>
-  );
-}
+const ComparePanels = lazy(() => import('./components/ComparePanels'));
+const ImagePanel = lazy(() => import('./components/ImagePanel'));
 
 // --- SortableChart ---
 
@@ -203,6 +55,8 @@ interface ExperimentGroup {
   runs: RunEntry[];
   latestRunId: string;
 }
+
+type DashboardTab = 'scalars' | 'images' | 'analysis';
 
 function parseRun(runId: string): RunEntry {
   const versionMatch = runId.match(/^(.*?)(?:-v(\d+))?$/);
@@ -301,7 +155,19 @@ const STAGE_COLORS: Record<string, string> = {
 };
 
 export default function App() {
-  const { connected, getChartData, getMetricsForRun, getGlobalXBounds, runs, deleteAllRuns } = useAeroboard();
+  const {
+    connected,
+    getChartData,
+    getMetricsForRun,
+    getGlobalXBounds,
+    getRunSummaries,
+    getHyperparameterKeys,
+    getMetricSummaryKeys,
+    getImageSeriesForRun,
+    getImageSeries,
+    runs,
+    deleteAllRuns,
+  } = useAeroboard();
 
   const [mode, setMode] = useState<'single' | 'compare'>('single');
   const [selectedRuns, setSelectedRuns] = useState<string[]>([]);
@@ -318,6 +184,10 @@ export default function App() {
   const [favoriteCharts, setFavoriteCharts] = useState<Record<string, boolean>>({});
   const [orderedMetrics, setOrderedMetrics] = useState<string[]>([]);
   const [collapsedExperiments, setCollapsedExperiments] = useState<Record<string, boolean>>({});
+  const [selectedCompareHyperparameters, setSelectedCompareHyperparameters] = useState<string[]>([]);
+  const [selectedCompareMetrics, setSelectedCompareMetrics] = useState<string[]>([]);
+  const [selectedImageName, setSelectedImageName] = useState('');
+  const [activeTab, setActiveTab] = useState<DashboardTab>('scalars');
 
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -367,6 +237,51 @@ export default function App() {
     () => getGlobalXBounds(effectiveSelectedRuns, xAxisType),
     [effectiveSelectedRuns, xAxisType, getGlobalXBounds]
   );
+
+  const runSummaries = useMemo(
+    () => getRunSummaries(effectiveSelectedRuns),
+    [effectiveSelectedRuns, getRunSummaries]
+  );
+
+  const availableHyperparameters = useMemo(
+    () => getHyperparameterKeys(effectiveSelectedRuns),
+    [effectiveSelectedRuns, getHyperparameterKeys]
+  );
+
+  const availableMetricSummaries = useMemo(
+    () => getMetricSummaryKeys(effectiveSelectedRuns),
+    [effectiveSelectedRuns, getMetricSummaryKeys]
+  );
+
+  const imageSeriesOptions = useMemo(() => {
+    const selectedRun = effectiveSelectedRuns[0];
+    return selectedRun ? getImageSeriesForRun(selectedRun) : [];
+  }, [effectiveSelectedRuns, getImageSeriesForRun]);
+
+  const hasAnyImages = useMemo(
+    () => runs.some((runId) => getImageSeriesForRun(runId).length > 0),
+    [runs, getImageSeriesForRun]
+  );
+
+  const selectedRunsHaveImages = useMemo(
+    () => effectiveSelectedRuns.some((runId) => getImageSeriesForRun(runId).length > 0),
+    [effectiveSelectedRuns, getImageSeriesForRun]
+  );
+
+  const effectiveActiveTab = activeTab === 'images' && !hasAnyImages ? 'scalars' : activeTab;
+
+  const resolvedImageName = useMemo(() => {
+    if (imageSeriesOptions.length === 0) return '';
+    return imageSeriesOptions.some((series) => series.name === selectedImageName)
+      ? selectedImageName
+      : imageSeriesOptions[0].name;
+  }, [imageSeriesOptions, selectedImageName]);
+
+  const activeImageSeries = useMemo(() => {
+    const selectedRun = effectiveSelectedRuns[0];
+    if (!selectedRun) return null;
+    return resolvedImageName ? getImageSeries(selectedRun, resolvedImageName) : null;
+  }, [effectiveSelectedRuns, resolvedImageName, getImageSeries]);
 
   // Effective window = user-set globalXRange, else full bounds
   const xRangeToUse = globalXRange;
@@ -418,11 +333,12 @@ export default function App() {
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
     if (over && active.id !== over.id) {
-      setOrderedMetrics(items => {
-        const oldIdx = items.indexOf(active.id as string);
-        const newIdx = items.indexOf(over.id as string);
-        return arrayMove(items, oldIdx, newIdx);
-      });
+      const currentOrder = [...visibleMetricKeys];
+      const oldIdx = currentOrder.indexOf(active.id as string);
+      const newIdx = currentOrder.indexOf(over.id as string);
+      if (oldIdx >= 0 && newIdx >= 0) {
+        setOrderedMetrics(arrayMove(currentOrder, oldIdx, newIdx));
+      }
     }
   };
 
@@ -433,6 +349,13 @@ export default function App() {
 
   const toggleExperimentCollapsed = (experimentName: string) => {
     setCollapsedExperiments(prev => ({ ...prev, [experimentName]: !prev[experimentName] }));
+  };
+
+  const toggleSelection = (
+    value: string,
+    setSelected: React.Dispatch<React.SetStateAction<string[]>>
+  ) => {
+    setSelected((prev) => prev.includes(value) ? prev.filter((entry) => entry !== value) : [...prev, value]);
   };
 
   const changeMode = (m: 'single' | 'compare') => {
@@ -465,6 +388,118 @@ export default function App() {
 
     setSelectedRuns([]);
     setGlobalXRange(null);
+  };
+
+  const visibleTabs: { id: DashboardTab; label: string }[] = [
+    { id: 'scalars', label: 'Scalar Values' },
+    ...(hasAnyImages ? [{ id: 'images' as const, label: 'Images / Plots' }] : []),
+    { id: 'analysis', label: 'Hyperparameter Analysis' },
+  ];
+
+  const renderActiveTab = () => {
+    if (effectiveSelectedRuns.length === 0) {
+      return (
+        <div className="placeholder-hero">
+          <Activity size={64} className="floating-icon" />
+          <h2>Awaiting Telemetry...</h2>
+          <p>Start a training run to see metrics here.</p>
+        </div>
+      );
+    }
+
+    if (effectiveActiveTab === 'analysis') {
+      if (mode !== 'compare') {
+        return (
+          <div className="comparison-card empty-state-card">
+            <h3>Hyperparameter Analysis</h3>
+            <p>Switch to compare mode to inspect the run table and parallel coordinates.</p>
+          </div>
+        );
+      }
+
+      return (
+        <Suspense fallback={<div className="comparison-card empty-state-card"><h3>Loading analysis view…</h3></div>}>
+          <ComparePanels
+            runs={runSummaries}
+            selectedHyperparameters={selectedCompareHyperparameters}
+            selectedMetrics={selectedCompareMetrics}
+            runColors={mergedRunColors}
+          />
+        </Suspense>
+      );
+    }
+
+    if (effectiveActiveTab === 'images') {
+      if (!selectedRunsHaveImages || !activeImageSeries) {
+        return (
+          <div className="comparison-card empty-state-card">
+            <h3>Images / Plots</h3>
+            <p>Select a run with logged images to view visual outputs.</p>
+          </div>
+        );
+      }
+
+      return (
+        <Suspense fallback={<div className="comparison-card empty-state-card"><h3>Loading image view…</h3></div>}>
+          <ImagePanel series={activeImageSeries} />
+        </Suspense>
+      );
+    }
+
+    if (orderedMetricKeys.length === 0) {
+      return (
+        <div className="placeholder-hero">
+          <h2>Ingesting Metrics...</h2>
+        </div>
+      );
+    }
+
+    return (
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+        <SortableContext items={visibleMetricKeys} strategy={rectSortingStrategy}>
+          <div className="grid-layout">
+            {visibleMetricKeys.map((groupKey) => {
+              const targets = groupedMetrics[groupKey];
+              if (!targets) return null;
+
+              let seriesData: { name: string; fullData: TimeSeriesData; color?: string }[] = [];
+              if (mode === 'single') {
+                const run = effectiveSelectedRuns[0];
+                seriesData = targets.map(m => {
+                  const stage = m.split('/')[0];
+                  const data = getChartData(run, m);
+                  if (!data) return null;
+                  return { name: stage, fullData: data, color: STAGE_COLORS[stage] };
+                }).filter((s): s is { name: string; fullData: TimeSeriesData; color: string } => s !== null);
+              } else {
+                seriesData = effectiveSelectedRuns.map(runId => {
+                  const data = getChartData(runId, groupKey);
+                  if (!data) return null;
+                  return { name: runId, fullData: data, color: mergedRunColors[runId] };
+                }).filter((s): s is { name: string; fullData: TimeSeriesData; color: string } => s !== null);
+              }
+
+              if (seriesData.length === 0) return null;
+
+              return (
+                <SortableChart
+                  key={groupKey} id={groupKey} groupKey={groupKey}
+                  seriesData={seriesData} xAxisType={xAxisType}
+                  smoothing={smoothing} removeOutliers={removeOutliers}
+                  xRange={xRangeToUse}
+                  widthMode={widthMode}
+                  revisionKey={`${singleRunRevision}:${groupKey}:${xAxisType}:${removeOutliers ? 'trim' : 'full'}`}
+                  favorite={!!favoriteCharts[groupKey]}
+                  onToggleFavorite={() => setFavoriteCharts(p => ({ ...p, [groupKey]: !p[groupKey] }))}
+                  collapsed={isChartCollapsed(groupKey)}
+                        onToggleCollapse={() => setCollapsedCharts((p) => ({ ...p, [groupKey]: !isChartCollapsed(groupKey) }))}
+                />
+              );
+            })}
+          </div>
+        </SortableContext>
+      </DndContext>
+    );
   };
 
   return (
@@ -539,135 +574,157 @@ export default function App() {
           </div>
         </div>
 
-        <div className="sidebar-section">
-          <div className="section-header"><Settings2 size={14} /><h3>View Configuration</h3></div>
-          <div className="control-card glass-card">
-            <label>X-Axis Mode</label>
-            <div className="axis-tabs">
-              <button className={xAxisType === 'wall' ? 'active' : ''} onClick={() => handleXAxisTypeChange('wall')}><Clock size={14} /></button>
-              <button className={xAxisType === 'rel' ? 'active' : ''} onClick={() => handleXAxisTypeChange('rel')}><RotateCcw size={14} /></button>
-              <button className={xAxisType === 'step' ? 'active' : ''} onClick={() => handleXAxisTypeChange('step')}><Hash size={14} /></button>
-            </div>
-
-            <div className="control-item">
-              <div className="label-row">
-                <Sliders size={12} /> smoothing <span className="val">{Math.round(smoothing * 100)}%</span>
+        {effectiveActiveTab === 'scalars' && (
+          <div className="sidebar-section">
+            <div className="section-header"><Settings2 size={14} /><h3>View Configuration</h3></div>
+            <div className="control-card glass-card">
+              <label>X-Axis Mode</label>
+              <div className="axis-tabs">
+                <button className={xAxisType === 'wall' ? 'active' : ''} onClick={() => handleXAxisTypeChange('wall')}><Clock size={14} /></button>
+                <button className={xAxisType === 'rel' ? 'active' : ''} onClick={() => handleXAxisTypeChange('rel')}><RotateCcw size={14} /></button>
+                <button className={xAxisType === 'step' ? 'active' : ''} onClick={() => handleXAxisTypeChange('step')}><Hash size={14} /></button>
               </div>
-              <input type="range" min="0" max="0.95" step="0.05" value={smoothing} onChange={e => setSmoothing(parseFloat(e.target.value))} className="styled-slider" />
-            </div>
 
-            <div className="control-item row">
-              <label className="checkbox-wrap">
-                <input type="checkbox" checked={removeOutliers} onChange={e => setRemoveOutliers(e.target.checked)} />
-                <div className={`check-box ${removeOutliers ? 'checked' : ''}`}><div className="inner" /></div>
-                <span>Remove Outliers</span>
-              </label>
-            </div>
-
-            <div className="control-item">
-              <div className="label-row">
-                <Columns size={12} /> plot width <span className="val">{widthMode}</span>
+              <div className="control-item">
+                <div className="label-row">
+                  <Sliders size={12} /> smoothing <span className="val">{Math.round(smoothing * 100)}%</span>
+                </div>
+                <input type="range" min="0" max="0.95" step="0.05" value={smoothing} onChange={e => setSmoothing(parseFloat(e.target.value))} className="styled-slider" />
               </div>
-              <div className="axis-tabs width-tabs">
-                <button className={widthMode === 'compact' ? 'active' : ''} onClick={() => setWidthMode('compact')}>Compact</button>
-                <button className={widthMode === 'wide' ? 'active' : ''} onClick={() => setWidthMode('wide')}>Wide</button>
-                <button className={widthMode === 'full' ? 'active' : ''} onClick={() => setWidthMode('full')}>Full</button>
+
+              <div className="control-item row">
+                <label className="checkbox-wrap">
+                  <input type="checkbox" checked={removeOutliers} onChange={e => setRemoveOutliers(e.target.checked)} />
+                  <div className={`check-box ${removeOutliers ? 'checked' : ''}`}><div className="inner" /></div>
+                  <span>Remove Outliers</span>
+                </label>
+              </div>
+
+              <div className="control-item">
+                <div className="label-row">
+                  <Columns size={12} /> plot width <span className="val">{widthMode}</span>
+                </div>
+                <div className="axis-tabs width-tabs">
+                  <button className={widthMode === 'compact' ? 'active' : ''} onClick={() => setWidthMode('compact')}>Compact</button>
+                  <button className={widthMode === 'wide' ? 'active' : ''} onClick={() => setWidthMode('wide')}>Wide</button>
+                  <button className={widthMode === 'full' ? 'active' : ''} onClick={() => setWidthMode('full')}>Full</button>
+                </div>
               </div>
             </div>
           </div>
-        </div>
+        )}
 
-        <div className="sidebar-section">
-          <div className="section-header"><Maximize2 size={14} /><h3>Active Window</h3></div>
-          <div className="control-card glass-card">
-            {bounds[0] !== Infinity ? (
-              <>
-                <DualRangeSlider
-                  min={bounds[0]} max={bounds[1]}
-                  value={globalXRange ?? bounds}
-                  onChange={setGlobalXRange}
-                />
-                <button className="reset-range-btn" onClick={() => { setGlobalXRange(null); }}>
-                  Reset Window
-                </button>
-              </>
-            ) : (
-              <p className="empty-hint">Waiting for data...</p>
-            )}
+        {effectiveActiveTab === 'scalars' && (
+          <div className="sidebar-section">
+            <div className="section-header"><Maximize2 size={14} /><h3>Active Window</h3></div>
+            <div className="control-card glass-card">
+              {bounds[0] !== Infinity ? (
+                <>
+                  <DualRangeSlider
+                    min={bounds[0]} max={bounds[1]}
+                    value={globalXRange ?? bounds}
+                    onChange={setGlobalXRange}
+                  />
+                  <button className="reset-range-btn" onClick={() => { setGlobalXRange(null); }}>
+                    Reset Window
+                  </button>
+                </>
+              ) : (
+                <p className="empty-hint">Waiting for data...</p>
+              )}
+            </div>
           </div>
-        </div>
+        )}
+
+        {effectiveActiveTab === 'analysis' && mode === 'compare' && (
+          <div className="sidebar-section">
+            <div className="section-header"><Columns size={14} /><h3>Comparison Axes</h3></div>
+            <div className="control-card glass-card selector-card">
+              <label>Hyperparameters</label>
+              <div className="chip-list">
+                {availableHyperparameters.map((key) => (
+                  <button
+                    key={key}
+                    className={selectedCompareHyperparameters.includes(key) ? 'chip-btn active' : 'chip-btn'}
+                    onClick={() => toggleSelection(key, setSelectedCompareHyperparameters)}
+                  >
+                    {key}
+                  </button>
+                ))}
+                {availableHyperparameters.length === 0 && <p className="empty-hint">No hyperparameters logged yet.</p>}
+              </div>
+
+              <label>Metrics</label>
+              <div className="chip-list">
+                {availableMetricSummaries.map((key) => (
+                  <button
+                    key={key}
+                    className={selectedCompareMetrics.includes(key) ? 'chip-btn active' : 'chip-btn'}
+                    onClick={() => toggleSelection(key, setSelectedCompareMetrics)}
+                  >
+                    {key}
+                  </button>
+                ))}
+                {availableMetricSummaries.length === 0 && <p className="empty-hint">No summary metrics available.</p>}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {hasAnyImages && effectiveActiveTab === 'images' && (
+          <div className="sidebar-section">
+            <div className="section-header"><List size={14} /><h3>Image Streams</h3></div>
+            <div className="control-card glass-card selector-card">
+              {imageSeriesOptions.length > 0 ? (
+                <select
+                  className="image-series-select"
+                  value={resolvedImageName}
+                  onChange={(event) => setSelectedImageName(event.target.value)}
+                >
+                  {imageSeriesOptions.map((series) => (
+                    <option key={series.name} value={series.name}>{series.name}</option>
+                  ))}
+                </select>
+              ) : (
+                <p className="empty-hint">Select a run with logged images.</p>
+              )}
+            </div>
+          </div>
+        )}
       </aside>
 
       <div className="main-viewport">
         <header className="main-header">
-          <div className="header-info">
-            <h2 className="viewport-title">
-              {mode === 'single' ? (effectiveSelectedRuns[0] ?? 'No run selected') : `${effectiveSelectedRuns.length} Runs Compared`}
-            </h2>
-            <div className={`connection-badge ${connected ? 'is-live' : ''}`}>
-              <div className="pulse-dot" />
-              <span>{connected ? 'LIVE' : 'OFFLINE'}</span>
+          <div className="main-header-content">
+            <div className="header-info">
+              <h2 className="viewport-title">
+                {mode === 'single' ? (effectiveSelectedRuns[0] ?? 'No run selected') : `${effectiveSelectedRuns.length} Runs Compared`}
+              </h2>
+              <div className={`connection-badge ${connected ? 'is-live' : ''}`}>
+                <div className="pulse-dot" />
+                <span>{connected ? 'LIVE' : 'OFFLINE'}</span>
+              </div>
+            </div>
+
+            <div className="page-tabs" role="tablist" aria-label="Dashboard pages">
+              {visibleTabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={effectiveActiveTab === tab.id}
+                  className={`page-tab-btn ${effectiveActiveTab === tab.id ? 'active' : ''}`}
+                  onClick={() => setActiveTab(tab.id)}
+                >
+                  {tab.label}
+                </button>
+              ))}
             </div>
           </div>
         </header>
 
         <section className="dashboard-content">
-          {effectiveSelectedRuns.length === 0 ? (
-            <div className="placeholder-hero">
-              <Activity size={64} className="floating-icon" />
-              <h2>Awaiting Telemetry...</h2>
-              <p>Start a training run to see metrics here.</p>
-            </div>
-          ) : orderedMetricKeys.length === 0 ? (
-            <div className="placeholder-hero">
-              <h2>Ingesting Metrics...</h2>
-            </div>
-          ) : (
-            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-              <SortableContext items={visibleMetricKeys} strategy={rectSortingStrategy}>
-                <div className="grid-layout">
-                  {visibleMetricKeys.map((groupKey) => {
-                    const targets = groupedMetrics[groupKey];
-                    if (!targets) return null;
-
-                    let seriesData: { name: string; fullData: TimeSeriesData; color?: string }[] = [];
-                    if (mode === 'single') {
-                      const run = effectiveSelectedRuns[0];
-                      seriesData = targets.map(m => {
-                        const stage = m.split('/')[0];
-                        const data = getChartData(run, m);
-                        if (!data) return null;
-                        return { name: stage, fullData: data, color: STAGE_COLORS[stage] };
-                      }).filter((s): s is { name: string; fullData: TimeSeriesData; color: string } => s !== null);
-                    } else {
-                      seriesData = effectiveSelectedRuns.map(runId => {
-                        const data = getChartData(runId, groupKey);
-                        if (!data) return null;
-                        return { name: runId, fullData: data, color: mergedRunColors[runId] };
-                      }).filter((s): s is { name: string; fullData: TimeSeriesData; color: string } => s !== null);
-                    }
-
-                    if (seriesData.length === 0) return null;
-
-                    return (
-                      <SortableChart
-                        key={groupKey} id={groupKey} groupKey={groupKey}
-                        seriesData={seriesData} xAxisType={xAxisType}
-                        smoothing={smoothing} removeOutliers={removeOutliers}
-                        xRange={xRangeToUse}
-                        widthMode={widthMode}
-                        revisionKey={`${singleRunRevision}:${groupKey}:${xAxisType}:${removeOutliers ? 'trim' : 'full'}`}
-                        favorite={!!favoriteCharts[groupKey]}
-                        onToggleFavorite={() => setFavoriteCharts(p => ({ ...p, [groupKey]: !p[groupKey] }))}
-                        collapsed={isChartCollapsed(groupKey)}
-                        onToggleCollapse={() => setCollapsedCharts(p => ({ ...p, [groupKey]: !p[groupKey] }))}
-                      />
-                    );
-                  })}
-                </div>
-              </SortableContext>
-            </DndContext>
-          )}
+          {renderActiveTab()}
         </section>
       </div>
     </div>

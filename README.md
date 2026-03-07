@@ -55,8 +55,18 @@ import aeroboard
 # Initialize
 aeroboard.init(run_id="my_experiment")
 
+# Manual hyperparameters for comparison table / parallel coordinates
+aeroboard.log_hyperparameters({
+    "learning_rate": 0.001,
+    "dropout": 0.2,
+    "optimizer": "adamw",
+})
+
 # Log metrics
-aeroboard.log({"loss": 0.01, "accuracy": 0.99})
+aeroboard.log({"train/loss": 0.01, "train/accuracy": 0.99, "step": 1})
+
+# Log an image for the historized timeline viewer
+aeroboard.log_image("samples/prediction", open("preview.png", "rb").read(), format="png")
 
 # Flush at the end
 aeroboard.flush()
@@ -94,40 +104,27 @@ aeroboard_client.flush()
 ```
 
 ### PyTorch Lightning Integration
-To use Aeroboard with PyTorch Lightning, create a custom `Callback` to stream metrics on each batch or epoch.
+Aeroboard now ships with a reusable Lightning callback that captures both manually logged hyperparameters and `LightningModule.save_hyperparameters()` values.
 
 ```python
 import pytorch_lightning as pl
-import aeroboard_client
+import aeroboard
 
-class AeroboardLightningCallback(pl.Callback):
-    def __init__(self, backend_url="grpc://localhost:50051", batch_size=50):
+client = aeroboard.init(run_id="lightning-demo", batch_size=50)
+client.log_hyperparameters({"manual/tag": "baseline"})
+
+class LitModel(pl.LightningModule):
+    def __init__(self, hidden_size: int = 64, learning_rate: float = 0.001):
         super().__init__()
-        aeroboard_client.init(url=backend_url, batch_size=batch_size)
-
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        # Ensure loss exists
-        loss = outputs.get('loss')
-        if loss is not None:
-            aeroboard_client.log({
-                "train_loss": loss.item(),
-                "epoch": trainer.current_epoch,
-                "global_step": trainer.global_step
-            })
-
-    def on_validation_epoch_end(self, trainer, pl_module):
-        # Log validation metrics
-        val_metrics = {k: v.item() for k, v in trainer.callback_metrics.items() if "val" in k}
-        aeroboard_client.log(val_metrics)
-        aeroboard_client.flush()
-        
-    def on_train_end(self, trainer, pl_module):
-        aeroboard_client.flush()
+        self.save_hyperparameters()
+        ...
 
 # Usage:
-# trainer = pl.Trainer(callbacks=[AeroboardLightningCallback()])
+# trainer = pl.Trainer(callbacks=[aeroboard.AeroboardLightningCallback(run_id="lightning-demo")])
 # trainer.fit(model)
 ```
+
+Logged hyperparameters appear in the comparison table and can be selected as axes in the parallel-coordinates view. Logged images are persisted and can be scrubbed over time with the image timeline slider.
 
 ### Ray Tune Integration
 For Ray Tune distributed hyperparameter searching, you can use the `LoggerCallback`.

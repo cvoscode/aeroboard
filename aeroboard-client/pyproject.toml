@@ -11,6 +11,8 @@ authors = [
 ]
 dependencies = [
     "pyarrow",
+  "requests",
+  "pillow",
 ]
 
 [tool.setuptools.packages.find]

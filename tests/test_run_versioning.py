@@ -1,4 +1,6 @@
-from aeroboard.client import resolve_run_id, _normalize_run_id
+from unittest.mock import Mock, patch
+
+from aeroboard.client import resolve_run_id, _fetch_existing_run_ids, _normalize_run_id
 
 
 def test_resolve_run_id_keeps_base_when_unused():
@@ -24,3 +26,13 @@ def test_normalize_run_id_replaces_missing_default():
     resolved = _normalize_run_id("   ")
     assert resolved.startswith("run-")
     assert resolved != "default_run"
+
+
+def test_fetch_existing_run_ids_uses_server_fallback():
+    greptime_error = RuntimeError("unavailable")
+
+    runs_response = Mock(status_code=200)
+    runs_response.json.return_value = {"runs": ["experiment", "experiment-v2", "other-run"]}
+
+    with patch("requests.get", side_effect=[greptime_error, runs_response]):
+        assert _fetch_existing_run_ids("experiment") == {"experiment", "experiment-v2"}

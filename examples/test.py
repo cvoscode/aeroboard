@@ -1,13 +1,19 @@
 import time
 import math
-from aeroboard_client import init, log, flush
+from aeroboard_client import init, log, log_hyperparameters, log_image, flush
 
 def main():
     print("Initialize Aeroboard Client...")
-    init("grpc://localhost:50051", batch_size=10) # Small batch size to see live effects
+    init(run_id="simulated_compare_demo", url="grpc://localhost:50051", batch_size=10) # Small batch size to see live effects
+    log_hyperparameters({
+        "learning_rate": 0.01,
+        "dropout": 0.15,
+        "scheduler": "cosine",
+        "batch_size": 16,
+    })
     
     print("Starting simulated training loop...")
-    epochs = 100
+    epochs = 30
     steps_per_epoch = 10
     
     try:
@@ -20,12 +26,17 @@ def main():
                 
                 # Log metrics
                 log({
-                    "loss": loss,
-                    "accuracy": accuracy,
+                    "train/loss": loss,
+                    "train/accuracy": accuracy,
                     "epoch": epoch,
-                    "step": step,
-                    "learning_rate": 0.01 * math.exp(-epoch / 10.0)
+                    "step": global_step,
+                    "optimizer/lr": 0.01 * math.exp(-epoch / 10.0)
                 })
+
+                if step in {0, steps_per_epoch // 2, steps_per_epoch - 1}:
+                    shade = int(255 * min(1.0, accuracy))
+                    image_bytes = bytes([137, 80, 78, 71, 13, 10, 26, 10]) + bytes([shade]) * 32
+                    log_image("samples/qualitative", image_bytes, format="png")
                 
                 # Sleep a tiny bit to simulate computation
                 time.sleep(0.05)
