@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aeroboard"
+version = "0.1.0"
+description = "Arrow-Native Real-Time ML Dashboard"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+  { name="Aeroboard Team" }
+]
+dependencies = [
+    "pyarrow",
+    "requests",
+    "click",
+]
+
+[project.optional-dependencies]
+examples = [
+    "torch",
+    "pytorch-lightning",
+]
+
+[project.scripts]
+aeroboard = "aeroboard.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aeroboard"]
+
+[tool.hatch.metadata]
+allow-direct-references = true

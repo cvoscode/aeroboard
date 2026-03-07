@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  greptimedb:
+    image: greptime/greptimedb:v0.12.0
+    ports:
+      - "4000:4000" # HTTP
+      - "4001:4001" # gRPC
+      - "4002:4002" # MySQL
+      - "4003:4003" # PostgreSQL
+    command: standalone start --http-addr 0.0.0.0:4000 --rpc-addr 0.0.0.0:4001
+    volumes:
+      - greptimedb-data:/tmp/greptimedb
+
+volumes:
+  greptimedb-data:

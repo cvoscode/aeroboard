@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aeroboard_client"
+version = "0.1.0"
+description = "A Python client for Aeroboard (Arrow-Native TSDB Dashboard)"
+authors = [
+  { name="Aeroboard Author" }
+]
+dependencies = [
+    "pyarrow",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
