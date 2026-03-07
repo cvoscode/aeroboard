@@ -7,7 +7,6 @@ use arrow_flight::{
     HandshakeRequest, HandshakeResponse, PutResult, SchemaResult, Ticket, PollInfo,
 };
 use arrow_flight::flight_service_server::FlightService;
-use arrow::record_batch::RecordBatch;
 
 use crate::t_junction::TJunction;
 
@@ -82,9 +81,8 @@ impl FlightService for AeroboardFlightServer {
         tokio::spawn(async move {
             use arrow_flight::utils::flight_data_to_arrow_batch;
             use arrow::datatypes::Schema;
-            use std::convert::TryFrom;
 
-            let mut dictionaries_by_id = std::collections::HashMap::new();
+            let dictionaries_by_id = std::collections::HashMap::new();
             let mut schema: Option<Arc<Schema>> = None;
 
             while let Some(msg) = stream.message().await.unwrap_or(None) {
@@ -102,7 +100,7 @@ impl FlightService for AeroboardFlightServer {
                         schema = Some(Arc::new(parsed_schema));
                     }
                     arrow::ipc::MessageHeader::DictionaryBatch => {
-                        let batch = message.header_as_dictionary_batch().unwrap();
+                        let _batch = message.header_as_dictionary_batch().unwrap();
                         if let Some(ref schem) = schema {
                             arrow_flight::utils::flight_data_to_arrow_batch(
                                 &msg,

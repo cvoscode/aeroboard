@@ -90,7 +90,7 @@ def run_lightning_example(run_name="experiment_A"):
     logger_cb = AeroboardLogger(url="grpc://localhost:50051", batch_size=10)
 
     trainer = pl.Trainer(
-        max_epochs=5,
+        max_epochs=20,
         callbacks=[logger_cb],
         enable_progress_bar=True,
         enable_checkpointing=False,

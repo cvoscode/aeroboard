@@ -1,9 +1,9 @@
-import { useMemo, useState, useEffect, useRef, useCallback } from 'react';
+import { useMemo, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Activity, List, Clock, RotateCcw, Hash,
   GripVertical, ChevronDown, ChevronRight, Sliders,
-  Maximize2, Layers, Search, Settings2, Columns, Link2
+  Maximize2, Layers, Search, Settings2, Columns, Trash2, Star
 } from 'lucide-react';
 import {
   DndContext, closestCenter, KeyboardSensor, PointerSensor,
@@ -11,7 +11,7 @@ import {
 } from '@dnd-kit/core';
 import {
   arrayMove, SortableContext, sortableKeyboardCoordinates,
-  verticalListSortingStrategy, useSortable
+  rectSortingStrategy, useSortable
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
@@ -183,24 +183,56 @@ interface SortableChartProps {
   smoothing: number;
   removeOutliers: boolean;
   xRange: [number, number] | null;
-  sharedXRange: [number, number] | null;
-  onRangeChange: (range: [number, number]) => void;
+  widthMode: 'compact' | 'wide' | 'full';
+  revisionKey: string;
   onToggleCollapse: () => void;
   collapsed: boolean;
+  favorite: boolean;
+  onToggleFavorite: () => void;
 }
 
-function SortableChart({ id, groupKey, seriesData, xAxisType, smoothing, removeOutliers, xRange, sharedXRange, onRangeChange, onToggleCollapse, collapsed }: SortableChartProps) {
+interface RunEntry {
+  fullRunId: string;
+  experimentName: string;
+  versionLabel: string;
+  versionNumber: number;
+}
+
+interface ExperimentGroup {
+  experimentName: string;
+  runs: RunEntry[];
+  latestRunId: string;
+}
+
+function parseRun(runId: string): RunEntry {
+  const versionMatch = runId.match(/^(.*?)(?:-v(\d+))?$/);
+  const baseWithoutVersion = versionMatch?.[1] ?? runId;
+  const versionNumber = versionMatch?.[2] ? Number(versionMatch[2]) : 1;
+  const lightningMatch = baseWithoutVersion.match(/^(.*?)(-pl.+)$/);
+  const experimentName = (lightningMatch?.[1] ?? baseWithoutVersion).trim() || runId;
+  const versionLabel = versionMatch?.[2] ? `v${versionMatch[2]}` : 'v1';
+
+  return {
+    fullRunId: runId,
+    experimentName,
+    versionLabel,
+    versionNumber,
+  };
+}
+
+function SortableChart({ id, groupKey, seriesData, xAxisType, smoothing, removeOutliers, xRange, widthMode, revisionKey, onToggleCollapse, collapsed, favorite, onToggleFavorite }: SortableChartProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
 
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
     zIndex: isDragging ? 100 : 1,
-    opacity: isDragging ? 0.8 : 1
+    opacity: isDragging ? 0.8 : 1,
+    gridColumn: widthMode === 'full' ? 'span 12' : widthMode === 'wide' ? 'span 6' : 'span 4'
   };
 
   return (
-    <div ref={setNodeRef} style={style} className={`chart-card ${collapsed ? 'collapsed' : ''}`}>
+    <div ref={setNodeRef} style={style} className={`chart-card width-${widthMode} ${collapsed ? 'collapsed' : ''} ${favorite ? 'favorite' : ''}`}>
       <div className="chart-card-glow" />
       <div className="chart-header">
         <div className="chart-header-left">
@@ -225,22 +257,32 @@ function SortableChart({ id, groupKey, seriesData, xAxisType, smoothing, removeO
           ))}
         </div>
 
-        <div className="drag-handle-subtle" {...attributes} {...listeners}>
-          <GripVertical size={16} />
+        <div className="chart-actions">
+          <button
+            className={`favorite-toggle ${favorite ? 'is-favorite' : ''}`}
+            type="button"
+            onClick={onToggleFavorite}
+            title={favorite ? 'Unfavorite chart' : 'Favorite chart'}
+            aria-pressed={favorite}
+          >
+            <Star size={16} fill={favorite ? 'currentColor' : 'none'} />
+          </button>
+          <div className="drag-handle-subtle" {...attributes} {...listeners}>
+            <GripVertical size={16} />
+          </div>
         </div>
       </div>
 
       {!collapsed && (
         <div className="plot-container">
           <LineChart
+            key={revisionKey}
             title={groupKey}
             seriesData={seriesData}
             xAxisType={xAxisType}
             smoothing={smoothing}
             removeOutliers={removeOutliers}
             xRange={xRange}
-            sharedXRange={sharedXRange}
-            onRangeChange={onRangeChange}
             height={280}
           />
         </div>
@@ -259,7 +301,7 @@ const STAGE_COLORS: Record<string, string> = {
 };
 
 export default function App() {
-  const { connected, getChartData, getMetricsForRun, getGlobalXBounds, runs, tick } = useAeroboard();
+  const { connected, getChartData, getMetricsForRun, getGlobalXBounds, runs, deleteAllRuns } = useAeroboard();
 
   const [mode, setMode] = useState<'single' | 'compare'>('single');
   const [selectedRuns, setSelectedRuns] = useState<string[]>([]);
@@ -269,57 +311,71 @@ export default function App() {
   const [smoothing, setSmoothing] = useState(0);
   const [removeOutliers, setRemoveOutliers] = useState(false);
   const [globalXRange, setGlobalXRange] = useState<[number, number] | null>(null);
-  const [syncXAxis, setSyncXAxis] = useState(false);
-  const [syncedRange, setSyncedRange] = useState<[number, number] | null>(null);
+  const [isDeletingRuns, setIsDeletingRuns] = useState(false);
+  const [widthMode, setWidthMode] = useState<'compact' | 'wide' | 'full'>('wide');
 
   const [collapsedCharts, setCollapsedCharts] = useState<Record<string, boolean>>({});
+  const [favoriteCharts, setFavoriteCharts] = useState<Record<string, boolean>>({});
   const [orderedMetrics, setOrderedMetrics] = useState<string[]>([]);
+  const [collapsedExperiments, setCollapsedExperiments] = useState<Record<string, boolean>>({});
 
   const sensors = useSensors(
     useSensor(PointerSensor),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
 
-  // Assign default colors to runs
-  useEffect(() => {
-    setRunColors(prev => {
-      const next = { ...prev };
-      let changed = false;
-      runs.forEach((r, i) => {
-        if (!next[r]) { next[r] = DEFAULT_COLORS[i % DEFAULT_COLORS.length]; changed = true; }
-      });
-      return changed ? next : prev;
+  const mergedRunColors = useMemo(() => {
+    const next = { ...runColors };
+    runs.forEach((r, i) => {
+      if (!next[r]) next[r] = DEFAULT_COLORS[i % DEFAULT_COLORS.length];
     });
+    return next;
+  }, [runColors, runs]);
+
+  const effectiveSelectedRuns = useMemo(
+    () => selectedRuns.filter(run => runs.includes(run)),
+    [selectedRuns, runs]
+  );
+
+  const experimentGroups = useMemo(() => {
+    const grouped = new Map<string, RunEntry[]>();
+
+    runs.forEach(runId => {
+      const entry = parseRun(runId);
+      const bucket = grouped.get(entry.experimentName) ?? [];
+      bucket.push(entry);
+      grouped.set(entry.experimentName, bucket);
+    });
+
+    return Array.from(grouped.entries())
+      .map(([experimentName, entries]) => {
+        const sortedRuns = [...entries].sort((a, b) => {
+          if (b.versionNumber !== a.versionNumber) return b.versionNumber - a.versionNumber;
+          return b.fullRunId.localeCompare(a.fullRunId);
+        });
+
+        return {
+          experimentName,
+          runs: sortedRuns,
+          latestRunId: sortedRuns[0]?.fullRunId ?? experimentName,
+        } satisfies ExperimentGroup;
+      })
+      .sort((a, b) => a.experimentName.localeCompare(b.experimentName));
   }, [runs]);
 
-  useEffect(() => {
-    if (selectedRuns.length === 0 && runs.length > 0) setSelectedRuns([runs[0]]);
-  }, [runs, selectedRuns]);
-
-  // Reset range when axis mode changes
-  useEffect(() => {
-    setGlobalXRange(null);
-    setSyncedRange(null);
-  }, [xAxisType]);
-
   const bounds = useMemo(
-    () => getGlobalXBounds(selectedRuns, xAxisType),
-    [selectedRuns, xAxisType, getGlobalXBounds, tick]
+    () => getGlobalXBounds(effectiveSelectedRuns, xAxisType),
+    [effectiveSelectedRuns, xAxisType, getGlobalXBounds]
   );
 
   // Effective window = user-set globalXRange, else full bounds
   const xRangeToUse = globalXRange;
 
-  // Callback for charts to broadcast their zoom to all others
-  const handleRangeChange = useCallback((range: [number, number]) => {
-    if (syncXAxis) setSyncedRange(range);
-  }, [syncXAxis]);
-
   const groupedMetrics = useMemo(() => {
-    if (selectedRuns.length === 0) return {};
+    if (effectiveSelectedRuns.length === 0) return {};
     const groups: Record<string, string[]> = {};
     if (mode === 'single') {
-      const run = selectedRuns[0];
+      const run = effectiveSelectedRuns[0];
       getMetricsForRun(run).forEach(m => {
         const parts = m.split('/');
         const base = parts.length > 1 ? parts[1] : parts[0];
@@ -328,7 +384,7 @@ export default function App() {
         groups[base].push(m);
       });
     } else {
-      selectedRuns.forEach(run => {
+      effectiveSelectedRuns.forEach(run => {
         getMetricsForRun(run).forEach(m => {
           if (m === 'step' || m.endsWith('/step')) return;
           if (!groups[m]) groups[m] = [];
@@ -337,16 +393,27 @@ export default function App() {
       });
     }
     return groups;
-  }, [mode, selectedRuns, getMetricsForRun, tick]);
+  }, [mode, effectiveSelectedRuns, getMetricsForRun]);
 
   const groupKeys = useMemo(() => Object.keys(groupedMetrics).sort(), [groupedMetrics]);
 
-  useEffect(() => {
-    setOrderedMetrics(prev => {
-      const keys = new Set(groupKeys);
-      return [...prev.filter(k => keys.has(k)), ...groupKeys.filter(k => !new Set(prev).has(k))];
-    });
-  }, [groupKeys]);
+  const orderedMetricKeys = useMemo(() => {
+    const keys = new Set(groupKeys);
+    return [
+      ...orderedMetrics.filter(k => keys.has(k)),
+      ...groupKeys.filter(k => !orderedMetrics.includes(k))
+    ];
+  }, [groupKeys, orderedMetrics]);
+
+  const visibleMetricKeys = useMemo(() => {
+    const favorites = orderedMetricKeys.filter(key => favoriteCharts[key]);
+    const nonFavorites = orderedMetricKeys.filter(key => !favoriteCharts[key]);
+    return [...favorites, ...nonFavorites];
+  }, [favoriteCharts, orderedMetricKeys]);
+
+  const singleRunRevision = mode === 'single' ? (effectiveSelectedRuns[0] ?? 'none') : 'compare';
+
+  const isChartCollapsed = (groupKey: string) => collapsedCharts[groupKey] ?? !favoriteCharts[groupKey];
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
@@ -364,9 +431,40 @@ export default function App() {
     else setSelectedRuns(prev => prev.includes(runId) ? prev.filter(r => r !== runId) : [...prev, runId]);
   };
 
+  const toggleExperimentCollapsed = (experimentName: string) => {
+    setCollapsedExperiments(prev => ({ ...prev, [experimentName]: !prev[experimentName] }));
+  };
+
   const changeMode = (m: 'single' | 'compare') => {
     setMode(m);
-    if (m === 'single') setSelectedRuns(runs.slice(0, 1));
+    setSelectedRuns(prev => (m === 'single' ? prev.slice(0, 1) : prev));
+  };
+
+  const handleXAxisTypeChange = (nextType: XAxisType) => {
+    setXAxisType(nextType);
+    setGlobalXRange(null);
+  };
+
+  const handleDeleteAllRuns = async () => {
+    if (runs.length === 0 || isDeletingRuns) return;
+    const confirmed = window.confirm('Delete all runs and clear persisted history? This cannot be undone.');
+    if (!confirmed) return;
+
+    setIsDeletingRuns(true);
+    const result = await deleteAllRuns();
+    setIsDeletingRuns(false);
+
+    if (!result.ok) {
+      if (result.reason === 'server-restart-required') {
+        window.alert('Delete All Runs needs the updated server route. Please restart `uv run aeroboard start` and try again.');
+      } else {
+        window.alert(`Failed to delete all runs. ${result.reason ?? 'Make sure the Aeroboard server and GreptimeDB are running.'}`);
+      }
+      return;
+    }
+
+    setSelectedRuns([]);
+    setGlobalXRange(null);
   };
 
   return (
@@ -391,21 +489,52 @@ export default function App() {
 
         <div className="sidebar-section">
           <div className="section-header"><List size={14} /><h3>Experiments</h3></div>
+          <div className="run-actions-row">
+            <button className="danger-btn" onClick={handleDeleteAllRuns} disabled={runs.length === 0 || isDeletingRuns}>
+              <Trash2 size={13} /> {isDeletingRuns ? 'Deleting…' : 'Delete All Runs'}
+            </button>
+          </div>
           <div className="run-list scrollbar-hidden">
-            {runs.map(run => (
-              <div key={run} className={`run-card-wrapper ${selectedRuns.includes(run) ? 'active' : ''}`}>
-                <button className="run-card-btn" onClick={() => toggleRun(run)}>
-                  <div className="run-card-indicator" style={{ backgroundColor: runColors[run] }} />
-                  <span className="run-name">{run}</span>
-                </button>
-                {mode === 'compare' && (
-                  <ColorPicker
-                    color={runColors[run] || '#00d2ff'}
-                    onChange={c => setRunColors(p => ({ ...p, [run]: c }))}
-                  />
-                )}
-              </div>
-            ))}
+            {experimentGroups.map(group => {
+              const isCollapsed = !!collapsedExperiments[group.experimentName];
+              const selectedCount = group.runs.filter(run => effectiveSelectedRuns.includes(run.fullRunId)).length;
+              return (
+                <div key={group.experimentName} className="experiment-group">
+                  <button className="experiment-group-header" onClick={() => toggleExperimentCollapsed(group.experimentName)}>
+                    <div className="experiment-group-title-wrap">
+                      {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                      <div className="experiment-group-copy">
+                        <span className="experiment-group-title">{group.experimentName}</span>
+                        <small className="experiment-group-meta">{group.runs.length} version{group.runs.length === 1 ? '' : 's'}{selectedCount ? ` • ${selectedCount} selected` : ''}</small>
+                      </div>
+                    </div>
+                    <span className="experiment-group-latest">latest {group.runs[0]?.versionLabel}</span>
+                  </button>
+
+                  {!isCollapsed && (
+                    <div className="experiment-runs">
+                      {group.runs.map(run => (
+                        <div key={run.fullRunId} className={`run-card-wrapper ${effectiveSelectedRuns.includes(run.fullRunId) ? 'active' : ''}`}>
+                          <button className="run-card-btn" onClick={() => toggleRun(run.fullRunId)}>
+                            <div className="run-card-indicator" style={{ backgroundColor: mergedRunColors[run.fullRunId] }} />
+                            <div className="run-card-copy">
+                              <span className="run-name">{run.fullRunId}</span>
+                              <small className="run-version-label">{run.versionLabel}</small>
+                            </div>
+                          </button>
+                          {mode === 'compare' && (
+                            <ColorPicker
+                              color={mergedRunColors[run.fullRunId] || '#00d2ff'}
+                              onChange={c => setRunColors(p => ({ ...p, [run.fullRunId]: c }))}
+                            />
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
             {runs.length === 0 && <p className="empty-hint">No runs detected</p>}
           </div>
         </div>
@@ -415,9 +544,9 @@ export default function App() {
           <div className="control-card glass-card">
             <label>X-Axis Mode</label>
             <div className="axis-tabs">
-              <button className={xAxisType === 'wall' ? 'active' : ''} onClick={() => setXAxisType('wall')}><Clock size={14} /></button>
-              <button className={xAxisType === 'rel' ? 'active' : ''} onClick={() => setXAxisType('rel')}><RotateCcw size={14} /></button>
-              <button className={xAxisType === 'step' ? 'active' : ''} onClick={() => setXAxisType('step')}><Hash size={14} /></button>
+              <button className={xAxisType === 'wall' ? 'active' : ''} onClick={() => handleXAxisTypeChange('wall')}><Clock size={14} /></button>
+              <button className={xAxisType === 'rel' ? 'active' : ''} onClick={() => handleXAxisTypeChange('rel')}><RotateCcw size={14} /></button>
+              <button className={xAxisType === 'step' ? 'active' : ''} onClick={() => handleXAxisTypeChange('step')}><Hash size={14} /></button>
             </div>
 
             <div className="control-item">
@@ -435,12 +564,15 @@ export default function App() {
               </label>
             </div>
 
-            <div className="control-item row">
-              <label className="checkbox-wrap">
-                <input type="checkbox" checked={syncXAxis} onChange={e => setSyncXAxis(e.target.checked)} />
-                <div className={`check-box ${syncXAxis ? 'checked' : ''}`}><div className="inner" /></div>
-                <span><Link2 size={12} style={{ marginRight: 4 }} />Sync X Axis</span>
-              </label>
+            <div className="control-item">
+              <div className="label-row">
+                <Columns size={12} /> plot width <span className="val">{widthMode}</span>
+              </div>
+              <div className="axis-tabs width-tabs">
+                <button className={widthMode === 'compact' ? 'active' : ''} onClick={() => setWidthMode('compact')}>Compact</button>
+                <button className={widthMode === 'wide' ? 'active' : ''} onClick={() => setWidthMode('wide')}>Wide</button>
+                <button className={widthMode === 'full' ? 'active' : ''} onClick={() => setWidthMode('full')}>Full</button>
+              </div>
             </div>
           </div>
         </div>
@@ -455,7 +587,7 @@ export default function App() {
                   value={globalXRange ?? bounds}
                   onChange={setGlobalXRange}
                 />
-                <button className="reset-range-btn" onClick={() => { setGlobalXRange(null); setSyncedRange(null); }}>
+                <button className="reset-range-btn" onClick={() => { setGlobalXRange(null); }}>
                   Reset Window
                 </button>
               </>
@@ -470,7 +602,7 @@ export default function App() {
         <header className="main-header">
           <div className="header-info">
             <h2 className="viewport-title">
-              {mode === 'single' ? (selectedRuns[0] ?? 'No run selected') : `${selectedRuns.length} Runs Compared`}
+              {mode === 'single' ? (effectiveSelectedRuns[0] ?? 'No run selected') : `${effectiveSelectedRuns.length} Runs Compared`}
             </h2>
             <div className={`connection-badge ${connected ? 'is-live' : ''}`}>
               <div className="pulse-dot" />
@@ -480,27 +612,27 @@ export default function App() {
         </header>
 
         <section className="dashboard-content">
-          {selectedRuns.length === 0 ? (
+          {effectiveSelectedRuns.length === 0 ? (
             <div className="placeholder-hero">
               <Activity size={64} className="floating-icon" />
               <h2>Awaiting Telemetry...</h2>
               <p>Start a training run to see metrics here.</p>
             </div>
-          ) : orderedMetrics.length === 0 ? (
+          ) : orderedMetricKeys.length === 0 ? (
             <div className="placeholder-hero">
               <h2>Ingesting Metrics...</h2>
             </div>
           ) : (
             <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-              <SortableContext items={orderedMetrics} strategy={verticalListSortingStrategy}>
+              <SortableContext items={visibleMetricKeys} strategy={rectSortingStrategy}>
                 <div className="grid-layout">
-                  {orderedMetrics.map((groupKey) => {
+                  {visibleMetricKeys.map((groupKey) => {
                     const targets = groupedMetrics[groupKey];
                     if (!targets) return null;
 
                     let seriesData: { name: string; fullData: TimeSeriesData; color?: string }[] = [];
                     if (mode === 'single') {
-                      const run = selectedRuns[0];
+                      const run = effectiveSelectedRuns[0];
                       seriesData = targets.map(m => {
                         const stage = m.split('/')[0];
                         const data = getChartData(run, m);
@@ -508,10 +640,10 @@ export default function App() {
                         return { name: stage, fullData: data, color: STAGE_COLORS[stage] };
                       }).filter((s): s is { name: string; fullData: TimeSeriesData; color: string } => s !== null);
                     } else {
-                      seriesData = selectedRuns.map(runId => {
+                      seriesData = effectiveSelectedRuns.map(runId => {
                         const data = getChartData(runId, groupKey);
                         if (!data) return null;
-                        return { name: runId, fullData: data, color: runColors[runId] };
+                        return { name: runId, fullData: data, color: mergedRunColors[runId] };
                       }).filter((s): s is { name: string; fullData: TimeSeriesData; color: string } => s !== null);
                     }
 
@@ -523,9 +655,11 @@ export default function App() {
                         seriesData={seriesData} xAxisType={xAxisType}
                         smoothing={smoothing} removeOutliers={removeOutliers}
                         xRange={xRangeToUse}
-                        sharedXRange={syncXAxis ? syncedRange : null}
-                        onRangeChange={handleRangeChange}
-                        collapsed={collapsedCharts[groupKey]}
+                        widthMode={widthMode}
+                        revisionKey={`${singleRunRevision}:${groupKey}:${xAxisType}:${removeOutliers ? 'trim' : 'full'}`}
+                        favorite={!!favoriteCharts[groupKey]}
+                        onToggleFavorite={() => setFavoriteCharts(p => ({ ...p, [groupKey]: !p[groupKey] }))}
+                        collapsed={isChartCollapsed(groupKey)}
                         onToggleCollapse={() => setCollapsedCharts(p => ({ ...p, [groupKey]: !p[groupKey] }))}
                       />
                     );

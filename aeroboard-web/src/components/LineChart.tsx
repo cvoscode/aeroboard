@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
 import type { TimeSeriesData } from '../hooks/useAeroboard';
@@ -12,8 +12,6 @@ interface LineChartProps {
     smoothing?: number;
     removeOutliers?: boolean;
     xRange?: [number, number] | null;
-    sharedXRange?: [number, number] | null;
-    onRangeChange?: (range: [number, number]) => void;
     height?: number;
 }
 
@@ -29,22 +27,42 @@ const xRelFormat = (v: number) => {
 export function LineChart({
     title, seriesData, xAxisType,
     smoothing = 0, removeOutliers = false,
-    xRange = null, sharedXRange = null, onRangeChange,
+    xRange = null,
     height = 250
 }: LineChartProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const plotRef = useRef<uPlot | null>(null);
     const suppressSyncRef = useRef(false);  // prevent feedback loop
     const [localXRange, setLocalXRange] = useState<[number, number] | null>(null);
+    const [seriesSignature, setSeriesSignature] = useState('');
 
     const colorKey = seriesData.map(s => s.color ?? '').join(',');
     const hasSmoothingKey = smoothing > 0;
+    const dataSignature = seriesData.map(s => `${s.name}:${s.fullData.count}`).join('|');
+    const axisRevisionKey = `${xAxisType}:${removeOutliers ? 'trim' : 'full'}`;
+
+    const processedData = useMemo(
+        () => buildProcessedData(seriesData, xAxisType, smoothing, xRange),
+        [seriesData, xAxisType, smoothing, xRange]
+    );
+
+    const focusedRange = useMemo(
+        () => getFocusedRanges(processedData, removeOutliers),
+        [processedData, removeOutliers]
+    );
+
+    const defaultRange = focusedRange.defaultXRange;
 
     // Reset EVERYTHING when axis type changes.
     // This is crucial to avoid applying e.g. "step 100" zoom to "wall time" axis.
     useEffect(() => {
         setLocalXRange(null);
-    }, [xAxisType]);
+    }, [axisRevisionKey]);
+
+    useEffect(() => {
+        setLocalXRange(null);
+        setSeriesSignature(dataSignature);
+    }, [dataSignature, axisRevisionKey]);
 
     // ── Effect 1: Create & destroy the uPlot instance ────────────────────────
     useEffect(() => {
@@ -89,6 +107,16 @@ export function LineChart({
             width: containerRef.current.clientWidth,
             height,
             padding: [10, 10, 0, 10],
+            scales: {
+                y: {
+                    auto: true,
+                    range: (_u, min, max) => {
+                        const range = focusedRange.focusedYRange;
+                        if (range) return range;
+                        return [min, max];
+                    }
+                }
+            },
             axes: [
                 {
                     stroke: '#9ba1a6',
@@ -109,12 +137,25 @@ export function LineChart({
                 drag: { setScale: true },
                 points: { show: false }
             },
+            select: {
+                show: true,
+                over: true,
+                left: 0,
+                width: 0,
+                top: 0,
+                height: 0,
+            },
             legend: { show: false },
             hooks: {
                 ready: [
                     u => {
                         u.over.addEventListener('dblclick', () => {
                             setLocalXRange(null);
+                            if (!xRange && defaultRange && defaultRange[0] !== defaultRange[1]) {
+                                suppressSyncRef.current = true;
+                                u.setScale('x', { min: defaultRange[0], max: defaultRange[1] });
+                                suppressSyncRef.current = false;
+                            }
                         });
                     }
                 ],
@@ -126,9 +167,6 @@ export function LineChart({
                                 // If uPlot's internal auto-resize triggered (not from drag),
                                 // it might report full range. We usually want to know if it's user-driven.
                                 setLocalXRange([min, max]);
-                                if (onRangeChange) {
-                                    onRangeChange([min, max]);
-                                }
                             }
                         }
                     }
@@ -136,8 +174,7 @@ export function LineChart({
             }
         };
 
-        const data = buildData(seriesData, xAxisType, smoothing, removeOutliers, null);
-        const plot = new uPlot(opts, data, containerRef.current);
+        const plot = new uPlot(opts, processedData.alignedData, containerRef.current);
         plotRef.current = plot;
 
         const onResize = () => {
@@ -151,7 +188,7 @@ export function LineChart({
             plotRef.current = null;
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [title, seriesData.length, colorKey, xAxisType, height, hasSmoothingKey]);
+    }, [title, seriesData.length, colorKey, xAxisType, height, hasSmoothingKey, axisRevisionKey, processedData.alignedData, focusedRange.focusedYRange]);
 
     // ── Effect 2: Update data whenever filter/data changes ────────────────────
     useEffect(() => {
@@ -159,56 +196,60 @@ export function LineChart({
         if (!plot || seriesData.length === 0) return;
 
         // Data is only filtered by the global master window (xRange from slider)
-        const data = buildData(seriesData, xAxisType, smoothing, removeOutliers, xRange);
-        plot.setData(data, false); // Don't reset scales automatically
+        plot.setData(processedData.alignedData, false); // Don't reset scales automatically
 
         // Final effective range preference: 
         // 1. Mandatory Global Window (xRange)
-        // 2. Synchronized shared range from another chart (sharedXRange)
-        // 3. User's manual local zoom (localXRange)
-        const effRange = xRange || sharedXRange || localXRange;
+        // 2. User's manual local zoom (localXRange)
+        const effRange = xRange || localXRange || (removeOutliers ? focusedRange.focusedXRange : null);
+        const shouldResetToDefault = seriesSignature !== dataSignature;
 
         if (effRange && effRange[0] !== effRange[1]) {
             suppressSyncRef.current = true;
             plot.setScale('x', { min: effRange[0], max: effRange[1] });
             suppressSyncRef.current = false;
-        } else if (!xRange && !sharedXRange && !localXRange) {
-            // Auto-fit mode
-            const xs = data[0] as number[];
-            if (xs.length > 0) {
-                suppressSyncRef.current = true;
-                plot.setScale('x', { min: xs[0], max: xs[xs.length - 1] });
-                suppressSyncRef.current = false;
-            }
+        } else if ((shouldResetToDefault || (!xRange && !localXRange)) && defaultRange && defaultRange[0] !== defaultRange[1]) {
+            suppressSyncRef.current = true;
+            plot.setScale('x', { min: defaultRange[0], max: defaultRange[1] });
+            suppressSyncRef.current = false;
         }
-    }, [seriesData, xAxisType, smoothing, removeOutliers, xRange, sharedXRange, localXRange]);
+        if (focusedRange.focusedYRange) {
+            suppressSyncRef.current = true;
+            plot.setScale('y', { min: focusedRange.focusedYRange[0], max: focusedRange.focusedYRange[1] });
+            suppressSyncRef.current = false;
+        }
 
-    return <div ref={containerRef} className="uplot-wrapper" />;
+        plot.redraw(false, true);
+    }, [processedData, removeOutliers, xRange, localXRange, defaultRange, dataSignature, seriesSignature, focusedRange, seriesData.length]);
+
+    return <div key={axisRevisionKey} ref={containerRef} className="uplot-wrapper" />;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
 // Data Processing
 // ────────────────────────────────────────────────────────────────────────────
-function buildData(
+interface ProcessedSeries {
+    x: number[];
+    raw: number[];
+    smooth: number[];
+}
+
+interface ProcessedChartData {
+    processed: ProcessedSeries[];
+    alignedData: uPlot.AlignedData;
+}
+
+function buildProcessedData(
     seriesData: { fullData: TimeSeriesData }[],
     xAxis: XAxisType,
     smoothing: number,
-    removeOutliers: boolean,
     xRange: [number, number] | null
-): uPlot.AlignedData {
-    if (seriesData.length === 0) return [[]];
+): ProcessedChartData {
+    if (seriesData.length === 0) return { processed: [], alignedData: [[]] };
 
     const processed = seriesData.map(s => {
-        const { wallTimes, relTimes, steps, values, count: n } = s.fullData;
-        const xArr = xAxis === 'wall' ? wallTimes : xAxis === 'rel' ? relTimes : steps;
-
-        let mean = 0, std = Infinity;
-        if (removeOutliers && n > 2) {
-            let sum = 0, sumSq = 0;
-            for (let i = 0; i < n; i++) { sum += values[i]; sumSq += values[i] ** 2; }
-            mean = sum / n;
-            std = Math.sqrt(Math.max(0, sumSq / n - mean ** 2));
-        }
+        const { wallTimes, relTimes, values, count: n } = s.fullData;
+        const xArr = xAxis === 'wall' ? wallTimes : xAxis === 'rel' ? relTimes : s.fullData.plotX;
 
         const resX: number[] = [];
         const rawV: number[] = [];
@@ -219,7 +260,6 @@ function buildData(
             const x = xArr[i];
             const v = values[i];
             if (xAxis === 'step' && x < 0) continue;
-            if (removeOutliers && isFinite(std) && std > 0 && Math.abs(v - mean) > 3 * std) continue;
             resX.push(x);
             rawV.push(v);
             if (smoothing > 0) {
@@ -240,7 +280,7 @@ function buildData(
         ? allX.filter(x => x >= xRange[0] && x <= xRange[1])
         : allX;
 
-    if (filteredX.length === 0) return [filteredX];
+    if (filteredX.length === 0) return { processed, alignedData: [filteredX] };
 
     const result: uPlot.AlignedData = [filteredX];
     for (const p of processed) {
@@ -255,5 +295,54 @@ function buildData(
         if (alignedSmooth) result.push(alignedRaw as number[]);
         result.push((alignedSmooth ?? alignedRaw) as number[]);
     }
-    return result;
+    return { processed, alignedData: result };
+}
+
+function getFocusedRanges(
+    processedData: ProcessedChartData,
+    removeOutliers: boolean
+): { defaultXRange: [number, number] | null; focusedXRange: [number, number] | null; focusedYRange: [number, number] | null } {
+    const visiblePoints: { x: number; y: number }[] = [];
+
+    for (const series of processedData.processed) {
+        for (let i = 0; i < series.x.length; i++) {
+            visiblePoints.push({
+                x: series.x[i],
+                y: series.smooth[i] ?? series.raw[i],
+            });
+        }
+    }
+
+    if (visiblePoints.length === 0) {
+        return { defaultXRange: null, focusedXRange: null, focusedYRange: null };
+    }
+
+    const xValues = visiblePoints.map(point => point.x);
+    const defaultXRange: [number, number] = [Math.min(...xValues), Math.max(...xValues)];
+
+    const sortedY = [...visiblePoints].sort((a, b) => a.y - b.y);
+    const trimFraction = removeOutliers ? 0.1 : 0;
+    const lowIdx = Math.floor((sortedY.length - 1) * trimFraction);
+    const highIdx = Math.ceil((sortedY.length - 1) * (1 - trimFraction));
+    const clippedPoints = sortedY.slice(lowIdx, highIdx + 1);
+
+    if (clippedPoints.length === 0) {
+        return { defaultXRange, focusedXRange: defaultXRange, focusedYRange: null };
+    }
+
+    const ys = clippedPoints.map(point => point.y);
+    const xs = clippedPoints.map(point => point.x);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+
+    const yPad = minY === maxY ? (Math.abs(minY || 1) * 0.05 || 1) : (maxY - minY) * (removeOutliers ? 0.03 : 0.08);
+    const focusedYRange: [number, number] = [minY - yPad, maxY + yPad];
+
+    return {
+        defaultXRange,
+        focusedXRange: removeOutliers ? [minX, maxX] : defaultXRange,
+        focusedYRange,
+    };
 }

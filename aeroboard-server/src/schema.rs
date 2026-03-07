@@ -2,6 +2,7 @@ use std::sync::Arc;
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 
 /// Schema for scalar values (e.g., loss, accuracy)
+#[allow(dead_code)]
 pub fn scalar_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
@@ -12,6 +13,7 @@ pub fn scalar_schema() -> Arc<Schema> {
 }
 
 /// Schema for image data
+#[allow(dead_code)]
 pub fn image_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
@@ -23,6 +25,7 @@ pub fn image_schema() -> Arc<Schema> {
 }
 
 /// Schema for distribution data
+#[allow(dead_code)]
 pub fn distribution_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),

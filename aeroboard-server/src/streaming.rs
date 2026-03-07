@@ -18,7 +18,7 @@ pub async fn ws_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, t_junction))
 }
 
-async fn handle_socket(mut socket: WebSocket, t_junction: Arc<TJunction>) {
+async fn handle_socket(socket: WebSocket, t_junction: Arc<TJunction>) {
     let mut rx = t_junction.subscribe();
     
     // Set up a channel to send messages to the WebSocket

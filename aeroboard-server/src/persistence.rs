@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use crate::t_junction::TJunction;
-use arrow::array::{Array, AsArray, Float64Array, StringArray, TimestampMillisecondArray, BinaryArray, ListArray};
-use arrow::datatypes::DataType;
+use arrow::array::{Array, AsArray};
 use arrow::record_batch::RecordBatch;
 
 pub async fn start_persistence_loop(t_junction: Arc<TJunction>) {
@@ -65,7 +64,7 @@ fn record_batch_to_line_protocol(batch: &RecordBatch) -> Result<String, Box<dyn 
     let is_image = schema.fields().len() == 5 && schema.field(3).name() == "image_data";
     
     // Check if it's the distribution schema: timestamp, run_id, name, values (4 columns)
-    let is_dist = schema.fields().len() == 4 && schema.field(3).name() == "values";
+    let _is_dist = schema.fields().len() == 4 && schema.field(3).name() == "values";
 
     let timestamp_col = batch.column(0).as_primitive::<arrow::datatypes::TimestampMillisecondType>();
     let run_id_col = batch.column(1).as_string::<i32>();

@@ -9,23 +9,20 @@ __all__ = [
 
 _default_client = None
 
-def init(run_id="default_run", url="grpc://localhost:50051", batch_size=100) -> AeroboardClient:
+
+def get_default_client():
+    return _default_client
+
+def init(run_id=None, url="grpc://localhost:50051", batch_size=100) -> AeroboardClient:
     """
     Initialize the Aeroboard globally.
     If multiple connections are needed, construct AeroboardClient directly.
     """
     global _default_client
-    
-    # Auto-detect frameork versions (e.g. PyTorch Lightning)
-    framework_suffix = ""
-    try:
-        import pytorch_lightning as pl
-        if f"pl{pl.__version__}" not in run_id:
-            framework_suffix = f"-pl{pl.__version__}"
-    except ImportError:
-        pass
-    
-    actual_run_id = f"{run_id}{framework_suffix}"
+
+    from .client import _normalize_run_id, _with_lightning_suffix
+
+    actual_run_id = _with_lightning_suffix(_normalize_run_id(run_id))
 
     _default_client = AeroboardClient(run_id=actual_run_id, url=url, batch_size=batch_size)
     return _default_client

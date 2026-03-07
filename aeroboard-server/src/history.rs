@@ -1,4 +1,4 @@
-use axum::{extract::State, Json};
+use axum::{extract::State, http::StatusCode, Json};
 use serde::Serialize;
 use std::sync::Arc;
 use crate::t_junction::TJunction;
@@ -19,6 +19,12 @@ pub struct HistoryResponse {
     pub error: Option<String>,
 }
 
+#[derive(Serialize)]
+pub struct DeleteRunsResponse {
+    pub deleted: bool,
+    pub error: Option<String>,
+}
+
 /// GET /api/history
 pub async fn history_handler(
     State(_t_junction): State<Arc<TJunction>>,
@@ -29,6 +35,26 @@ pub async fn history_handler(
             let msg = e.to_string();
             tracing::error!("Failed to query history: {}", msg);
             Json(HistoryResponse { rows: vec![], error: Some(msg) })
+        }
+    }
+}
+
+/// DELETE /api/history
+pub async fn delete_history_handler(
+    State(_t_junction): State<Arc<TJunction>>,
+) -> (StatusCode, Json<DeleteRunsResponse>) {
+    match clear_history().await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(DeleteRunsResponse { deleted: true, error: None })
+        ),
+        Err(e) => {
+            let msg = e.to_string();
+            tracing::error!("Failed to delete history: {}", msg);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(DeleteRunsResponse { deleted: false, error: Some(msg) })
+            )
         }
     }
 }
@@ -109,7 +135,7 @@ async fn query_history() -> Result<Vec<HistoryPoint>, Box<dyn std::error::Error>
         let run_id = run_id_idx
             .and_then(|&i| arr.get(i))
             .and_then(|v| v.as_str())
-            .unwrap_or("default_run")
+            .unwrap_or("unknown_run")
             .to_string();
         let value = match &arr[value_idx] {
             serde_json::Value::Number(n) => n.as_f64().unwrap_or(0.0),
@@ -122,4 +148,36 @@ async fn query_history() -> Result<Vec<HistoryPoint>, Box<dyn std::error::Error>
 
     tracing::info!("Loaded {} historical data points from GreptimeDB", points.len());
     Ok(points)
+}
+
+async fn clear_history() -> Result<(), Box<dyn std::error::Error>> {
+    let client = reqwest::Client::new();
+    let statements = [
+        "DELETE FROM scalars",
+        "TRUNCATE TABLE scalars",
+        "DELETE FROM scalars WHERE true",
+    ];
+
+    let mut last_error = String::new();
+
+    for sql in statements {
+        let url = format!(
+            "http://localhost:4000/v1/sql?sql={}&db=public",
+            urlencoding::encode(sql)
+        );
+
+        let resp = client.get(&url).send().await?;
+
+        if resp.status().is_success() {
+            tracing::info!("Cleared scalar history using SQL: {}", sql);
+            return Ok(());
+        }
+
+        let status = resp.status();
+        let body: String = resp.text().await.unwrap_or_default();
+        last_error = format!("statement `{}` failed with {}: {}", sql, status, body);
+        tracing::warn!("Failed to clear history using `{}`: {} {}", sql, status, body);
+    }
+
+    Err(format!("GreptimeDB could not clear `scalars`: {}", last_error).into())
 }

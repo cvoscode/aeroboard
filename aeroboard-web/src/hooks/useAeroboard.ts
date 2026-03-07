@@ -5,6 +5,7 @@ export interface TimeSeriesData {
     wallTimes: Float64Array;
     relTimes: Float64Array;
     steps: Float64Array;
+    plotX: Float64Array;
     values: Float64Array;
     count: number;
 }
@@ -16,6 +17,7 @@ function makeEmptySeries(): TimeSeriesData {
         wallTimes: new Float64Array(200000),
         relTimes: new Float64Array(200000),
         steps: new Float64Array(200000).fill(-1),
+        plotX: new Float64Array(200000),
         values: new Float64Array(200000),
         count: 0,
     };
@@ -46,10 +48,16 @@ function ingestPoint(
     const i = series.count;
     series.wallTimes[i] = wallTime;
     series.relTimes[i] = relTime;
+    series.plotX[i] = step ?? relTime;
     series.values[i] = val;
     if (step !== null) series.steps[i] = step;
     series.count = i + 1;
     return true;
+}
+
+function clearStore(store: React.MutableRefObject<Store>, startTimes: React.MutableRefObject<Record<string, number>>) {
+    store.current = {};
+    startTimes.current = {};
 }
 
 export function useAeroboard(wsUrl: string = 'ws://localhost:3000/ws/live') {
@@ -58,6 +66,12 @@ export function useAeroboard(wsUrl: string = 'ws://localhost:3000/ws/live') {
     const startTimes = useRef<Record<string, number>>({});
     const [runs, setRuns] = useState<string[]>([]);
     const [tick, setTick] = useState(0);
+    const [reloadToken, setReloadToken] = useState(0);
+
+    const refreshRuns = useCallback(() => {
+        setRuns(Object.keys(storeRef.current).sort());
+        setTick(t => t + 1);
+    }, []);
 
     // ── Load historical data from GreptimeDB via REST on mount ────────────────
     useEffect(() => {
@@ -91,15 +105,14 @@ export function useAeroboard(wsUrl: string = 'ws://localhost:3000/ws/live') {
                 }
 
                 if (newData) {
-                    setRuns(Object.keys(storeRef.current).sort());
-                    setTick(t => t + 1);
+                    refreshRuns();
                 }
             } catch (e) {
                 console.warn('[Aeroboard] Failed to load history (GreptimeDB may be unavailable):', e);
             }
         };
         loadHistory();
-    }, []);
+    }, [refreshRuns, reloadToken]);
 
     // ── WebSocket for live data ───────────────────────────────────────────────
     useEffect(() => {
@@ -190,5 +203,33 @@ export function useAeroboard(wsUrl: string = 'ws://localhost:3000/ws/live') {
         return min === Infinity ? [0, 100] : [min, max];
     }, []);
 
-    return { connected, getChartData, getMetricsForRun, getGlobalXBounds, runs, tick };
+    const deleteAllRuns = useCallback(async (): Promise<{ ok: boolean; reason?: string }> => {
+        try {
+            const resp = await fetch('http://localhost:3000/api/history', { method: 'DELETE' });
+            if (!resp.ok) {
+                if (resp.status === 404 || resp.status === 405) {
+                    return { ok: false, reason: 'server-restart-required' };
+                }
+
+                let message = `Request failed with status ${resp.status}`;
+                try {
+                    const body = await resp.json() as { error?: string };
+                    if (body.error) message = body.error;
+                } catch {
+                    // ignore parse failures
+                }
+                return { ok: false, reason: message };
+            }
+            clearStore(storeRef, startTimes);
+            setRuns([]);
+            setTick(t => t + 1);
+            setReloadToken(t => t + 1);
+            return { ok: true };
+        } catch (err) {
+            console.error('Failed to delete runs:', err);
+            return { ok: false, reason: err instanceof Error ? err.message : 'network-error' };
+        }
+    }, []);
+
+    return { connected, getChartData, getMetricsForRun, getGlobalXBounds, runs, tick, deleteAllRuns };
 }
