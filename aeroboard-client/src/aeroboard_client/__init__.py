@@ -15,6 +15,8 @@ Example:
 
 from aeroboard_client.client import (
     AeroboardClient,
+    AeroboardLightningLogger,
+    AeroboardRayTuneLoggerCallback,
     AeroboardLightningCallback,
     AeroboardClientError,
     FlightConnectionError,
@@ -48,6 +50,16 @@ def log(metrics: dict[str, float]) -> None:
     client.log(metrics)
 
 
+def log_metrics(
+    metrics: dict[str, object],
+    *,
+    step: int | float | None = None,
+    prefix: str | None = None,
+) -> None:
+    client = _default_client or init()
+    client.log_metrics(metrics, step=step, prefix=prefix)
+
+
 def log_hyperparameters(hyperparameters: dict, step: int | float | None = None) -> None:
     client = _default_client or init()
     client.log_hyperparameters(hyperparameters, step=step)
@@ -64,12 +76,15 @@ def flush() -> None:
 
 __all__ = [
     "AeroboardClient",
+    "AeroboardLightningLogger",
+    "AeroboardRayTuneLoggerCallback",
     "AeroboardLightningCallback",
     "AeroboardClientError",
     "FlightConnectionError",
     "get_default_client",
     "init",
     "log",
+    "log_metrics",
     "log_hyperparameters",
     "log_image",
     "flush",

@@ -27,6 +27,9 @@ examples = [
     "torch",
     "lightning",
 ]
+ray = [
+    "ray[tune]",
+]
 
 [project.scripts]
 aeroboard = "aeroboard_client.cli:main"

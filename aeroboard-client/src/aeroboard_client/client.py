@@ -6,6 +6,8 @@ Rust backend via gRPC Flight protocol, and for querying historical data.
 
 Classes:
     AeroboardClient: Main client for telemetry ingestion and data queries.
+    AeroboardLightningLogger: Logger for PyTorch Lightning integration.
+    AeroboardRayTuneLoggerCallback: Callback for Ray Tune integration.
     AeroboardLightningCallback: Callback for PyTorch Lightning integration.
 
 Example:
@@ -21,12 +23,46 @@ import re
 import time
 import io
 import math
+import warnings
 import pyarrow as pa
 import pyarrow.flight as fl
 from typing import Optional, Dict, Union, List, Any
 from .schema import scalar_schema, image_schema, hyperparameter_schema
 
 MAX_IMAGE_BYTES = 256 * 1024  # 256 KB
+
+
+def _resolve_lightning_integration() -> tuple[type[Any], type[Any], Any, bool]:
+    try:
+        from lightning.pytorch import Callback as lightning_callback_base
+        from lightning.pytorch.loggers.logger import Logger as lightning_logger_base
+        from lightning.pytorch.utilities.rank_zero import rank_zero_only
+        return lightning_callback_base, lightning_logger_base, rank_zero_only, True
+    except ImportError:
+        try:
+            from pytorch_lightning import Callback as lightning_callback_base
+            from pytorch_lightning.loggers.logger import Logger as lightning_logger_base
+            from pytorch_lightning.utilities.rank_zero import rank_zero_only
+            return lightning_callback_base, lightning_logger_base, rank_zero_only, True
+        except ImportError:
+            def passthrough(func):
+                return func
+
+            return object, object, passthrough, False
+
+
+_LightningCallbackBase, _LightningLoggerBase, _rank_zero_only, _LIGHTNING_AVAILABLE = _resolve_lightning_integration()
+
+
+def _resolve_ray_tune_integration() -> tuple[type[Any], bool]:
+    try:
+        from ray.tune.logger import LoggerCallback as ray_logger_callback_base
+        return ray_logger_callback_base, True
+    except ImportError:
+        return object, False
+
+
+_RayTuneLoggerCallbackBase, _RAY_TUNE_AVAILABLE = _resolve_ray_tune_integration()
 
 
 class AeroboardClientError(Exception):
@@ -169,16 +205,54 @@ class AeroboardClient:
 
         ts = int(time.time() * 1000)
         for k, v in metrics.items():
-            if isinstance(v, (int, float)):
+            normalized = _coerce_scalar_metric_value(v)
+            if normalized is not None:
                 self._scalar_buffer.append({
                     "timestamp": ts,
                     "run_id": self.run_id,
                     "name": k,
-                    "value": float(v)
+                    "value": normalized,
                 })
 
         if len(self._scalar_buffer) >= self.batch_size:
             self.flush()
+
+    def log_metrics(
+        self,
+        metrics: Dict[str, Any],
+        *,
+        step: Optional[Union[int, float]] = None,
+        prefix: Optional[str] = None,
+    ) -> None:
+        """
+        Log numeric metrics with optional metric prefixing and shared step injection.
+
+        This is convenient for vanilla training loops where you want to keep code like
+        `client.log_metrics({"loss": loss, "accuracy": acc}, step=global_step, prefix="train")`.
+
+        Args:
+            metrics: Mapping of metric names to numeric values or scalar tensors.
+            step: Optional shared step to attach as `step`.
+            prefix: Optional prefix for metric names that do not already contain `/`.
+        """
+        payload: Dict[str, float] = {}
+        for key, value in metrics.items():
+            normalized = _coerce_scalar_metric_value(value)
+            if normalized is None:
+                continue
+
+            metric_name = str(key)
+            if prefix and metric_name not in {"step", "epoch"} and "/" not in metric_name:
+                metric_name = f"{prefix}/{metric_name}"
+
+            payload[metric_name] = normalized
+
+        resolved_step = _coerce_scalar_metric_value(step)
+        if resolved_step is not None:
+            payload["step"] = resolved_step
+
+        if payload:
+            self.log(payload)
 
     def log_hyperparameters(
         self,
@@ -278,31 +352,60 @@ class AeroboardClient:
         run_name: Optional[str] = None,
         *,
         batch_size: Optional[int] = None,
-    ) -> "AeroboardLightningCallback":
+    ) -> "AeroboardLightningLogger":
         """
-        Attach a PyTorch Lightning callback to automatically log metrics.
+        Compatibility alias for creating a PyTorch Lightning logger.
 
-        The callback automatically logs hyperparameters on fit start, and logs metrics
-        on each training batch end and validation epoch end.
+        Prefer `lightning_logger()` for new code and pass the returned object to
+        `pl.Trainer(logger=...)`.
 
         Args:
             run_name: Run name (uses client's run_id if not provided).
             batch_size: Override the default batch size.
 
         Returns:
-            AeroboardLightningCallback instance to attach to LightningTrainer.
+            AeroboardLightningLogger instance bound to this client.
+
+        Raises:
+            RuntimeError: If Lightning is not installed.
+        """
+        warnings.warn(
+            "attach_lightning() is deprecated; use lightning_logger() and pass it to Trainer(logger=...) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.lightning_logger(run_name=run_name, batch_size=batch_size)
+
+    def lightning_logger(
+        self,
+        run_name: Optional[str] = None,
+        *,
+        batch_size: Optional[int] = None,
+    ) -> "AeroboardLightningLogger":
+        """
+        Create a Lightning-compatible logger that streams metrics to Aeroboard.
+
+        The logger captures Lightning metrics via `self.log(...)` and forwards
+        hyperparameters logged by Lightning's logger interface.
+
+        Args:
+            run_name: Run name (uses client's run_id if not provided).
+            batch_size: Override the default batch size.
+
+        Returns:
+            AeroboardLightningLogger instance to pass to Lightning Trainer.
 
         Example:
-            >>> from lightning.pytorch import LightningModule, Trainer
+            >>> from lightning.pytorch import Trainer
             >>> client = AeroboardClient()
-            >>> callback = client.attach_lightning()
-            >>> trainer = Trainer(callbacks=[callback])
+            >>> logger = client.lightning_logger()
+            >>> trainer = Trainer(logger=logger)
             >>> trainer.fit(model)
 
         Raises:
             RuntimeError: If Lightning is not installed.
         """
-        return AeroboardLightningCallback(
+        return AeroboardLightningLogger(
             client=self,
             run_id=run_name or self.base_run_id,
             url=self.url,
@@ -633,19 +736,14 @@ class AeroboardLightningCallback:
             batch_size: Telemetry batch size.
             client: Pre-created AeroboardClient instance.
         """
-        try:
-            import lightning.pytorch as pl
-        except ImportError:
-            try:
-                import pytorch_lightning as pl
-            except ImportError as exc:
-                raise RuntimeError("lightning is required for AeroboardLightningCallback") from exc
+        if not _LIGHTNING_AVAILABLE:
+            raise RuntimeError("lightning is required for AeroboardLightningCallback")
 
         # Create client if not provided
         self.client = client or AeroboardClient(run_id=run_id, url=url, batch_size=batch_size)
 
         # Create internal callback class
-        class _Callback(pl.Callback):
+        class _Callback(_LightningCallbackBase):
             def __init__(self, outer: "AeroboardLightningCallback"):
                 super().__init__()
                 self._outer = outer
@@ -715,6 +813,205 @@ class AeroboardLightningCallback:
     def __getattr__(self, item: str) -> Any:
         """Delegate attribute access to the internal callback."""
         return getattr(self.callback, item)
+
+
+class AeroboardLightningLogger(_LightningLoggerBase):
+    """
+    Lightning-compatible logger for Aeroboard telemetry.
+
+    This logger forwards metrics emitted by `LightningModule.log(...)` and
+    hyperparameters provided through Lightning's logger interface.
+
+    Example:
+        >>> from lightning.pytorch import Trainer
+        >>> logger = AeroboardLightningLogger(run_id="lightning-demo")
+        >>> trainer = Trainer(logger=logger)
+        >>> trainer.fit(model)
+    """
+
+    def __init__(
+        self,
+        run_id: Optional[str] = None,
+        url: str = "grpc://localhost:50051",
+        batch_size: int = 100,
+        client: Optional[AeroboardClient] = None,
+    ):
+        if not _LIGHTNING_AVAILABLE:
+            raise RuntimeError("lightning is required for AeroboardLightningLogger")
+
+        super().__init__()
+        self.client = client or AeroboardClient(run_id=run_id, url=url, batch_size=batch_size)
+        self._name = "aeroboard"
+        self._version = self.client.run_id
+        self._hparams: Dict[str, Any] = {}
+        self._last_step: Optional[float] = None
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def version(self) -> str:
+        return self._version
+
+    @property
+    def experiment(self) -> AeroboardClient:
+        return self.client
+
+    @property
+    def hparams(self) -> Dict[str, Any]:
+        return dict(self._hparams)
+
+    @_rank_zero_only
+    def log_hyperparams(self, params: Any) -> None:
+        values = _mapping_like(params)
+        if not values:
+            return
+        self._hparams.update(values)
+        self.client.log_hyperparameters(values)
+
+    @_rank_zero_only
+    def log_metrics(self, metrics: Dict[str, Any], step: Optional[int] = None) -> None:
+        payload: Dict[str, Any] = {key: value for key, value in metrics.items() if key != "step"}
+
+        resolved_step = _coerce_scalar_metric_value(step)
+        if resolved_step is None:
+            resolved_step = self._last_step
+        if resolved_step is None and "epoch" in payload:
+            resolved_step = _coerce_scalar_metric_value(payload["epoch"])
+
+        if resolved_step is not None:
+            self._last_step = resolved_step
+
+        self.client.log_metrics(payload, step=resolved_step)
+
+    @_rank_zero_only
+    def save(self) -> None:
+        self.client.flush()
+
+    @_rank_zero_only
+    def finalize(self, status: str) -> None:
+        del status
+        self.client.flush()
+
+
+class AeroboardRayTuneLoggerCallback(_RayTuneLoggerCallbackBase):
+    """
+    Ray Tune callback that creates one Aeroboard run per trial.
+
+    Trial configuration is logged as hyperparameters, and numeric trial results are
+    streamed as scalar metrics to the matching Aeroboard run.
+    """
+
+    def __init__(
+        self,
+        *,
+        url: str = "grpc://localhost:50051",
+        api_base_url: Optional[str] = None,
+        batch_size: int = 100,
+        run_prefix: Optional[str] = None,
+        metric_prefix: Optional[str] = None,
+    ):
+        if not _RAY_TUNE_AVAILABLE:
+            raise RuntimeError("ray[tune] is required for AeroboardRayTuneLoggerCallback")
+
+        super().__init__()
+        self.url = url
+        self.api_base_url = api_base_url
+        self.batch_size = batch_size
+        self.run_prefix = run_prefix
+        self.metric_prefix = metric_prefix
+        self._clients: Dict[str, AeroboardClient] = {}
+
+    def _trial_key(self, trial: Any) -> str:
+        return str(getattr(trial, "trial_id", id(trial)))
+
+    def _trial_run_id(self, trial: Any) -> str:
+        trial_name = (
+            getattr(trial, "trial_name", None)
+            or getattr(trial, "experiment_tag", None)
+            or getattr(trial, "trial_id", None)
+            or "trial"
+        )
+        if self.run_prefix:
+            return f"{self.run_prefix}-{trial_name}"
+        return str(trial_name)
+
+    def _build_trial_hparams(self, trial: Any) -> Dict[str, Any]:
+        payload = _mapping_like(getattr(trial, "config", {}) or {})
+        trial_id = getattr(trial, "trial_id", None)
+        trial_name = getattr(trial, "trial_name", None)
+        experiment_tag = getattr(trial, "experiment_tag", None)
+        if trial_id is not None:
+            payload["ray/trial_id"] = str(trial_id)
+        if trial_name is not None:
+            payload["ray/trial_name"] = str(trial_name)
+        if experiment_tag is not None:
+            payload["ray/experiment_tag"] = str(experiment_tag)
+        return payload
+
+    def _get_client(self, trial: Any) -> AeroboardClient:
+        trial_key = self._trial_key(trial)
+        if trial_key in self._clients:
+            return self._clients[trial_key]
+
+        client = AeroboardClient(
+            run_id=self._trial_run_id(trial),
+            url=self.url,
+            api_base_url=self.api_base_url,
+            batch_size=self.batch_size,
+        )
+        hparams = self._build_trial_hparams(trial)
+        if hparams:
+            client.log_hyperparameters(hparams)
+        self._clients[trial_key] = client
+        return client
+
+    def log_trial_start(self, trial: Any) -> None:
+        self._get_client(trial)
+
+    def log_trial_result(self, iteration: int, trial: Any, result: Dict[str, Any]) -> None:
+        client = self._get_client(trial)
+        step = _coerce_scalar_metric_value(result.get("training_iteration"))
+        if step is None:
+            step = _coerce_scalar_metric_value(iteration)
+
+        filtered = {
+            key: value
+            for key, value in result.items()
+            if key not in {
+                "config",
+                "date",
+                "done",
+                "experiment_id",
+                "hostname",
+                "node_ip",
+                "pid",
+                "timestamp",
+                "time_since_restore",
+                "timesteps_since_restore",
+                "iterations_since_restore",
+                "training_iteration",
+                "trial_id",
+                "should_checkpoint",
+            }
+        }
+        client.log_metrics(filtered, step=step, prefix=self.metric_prefix)
+
+    def log_trial_end(self, trial: Any, failed: bool = False) -> None:
+        client = self._clients.pop(self._trial_key(trial), None)
+        if client is None:
+            return
+        client.log_hyperparameters({"ray/failed": failed})
+        client.flush()
+        client.close()
+
+    def on_experiment_end(self, trials: List[Any], **info: Any) -> None:
+        del trials, info
+        for client in list(self._clients.values()):
+            client.flush()
+            client.close()
+        self._clients.clear()
 
 
 def _normalize_hparam_value(value: Any) -> Optional[tuple[str, str]]:
@@ -899,6 +1196,24 @@ def _mapping_like(value: Any) -> Dict[str, Any]:
     if hasattr(value, "items"):
         return dict(value.items())
     return {k: getattr(value, k) for k in dir(value) if not k.startswith('_') and not callable(getattr(value, k))}
+
+
+def _coerce_scalar_metric_value(value: Any) -> Optional[float]:
+    """Convert Lightning metric values to floats when possible."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if hasattr(value, "detach"):
+        value = value.detach()
+    if hasattr(value, "item"):
+        try:
+            return float(value.item())
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def _quote_sql_string(value: str) -> str:

@@ -109,30 +109,64 @@ The Python SDK was designed to be easily pluggable into any ML Framework.
 ### Vanilla PyTorch / Training Loop
 
 ```python
-import time
 import aeroboard_client as aeroboard
+import torch
+import torch.nn.functional as F
 
-# Initialize the global client
-aeroboard.init(url="grpc://localhost:50051", batch_size=100)
+client = aeroboard.init(run_id="torch-demo", url="grpc://localhost:50051", batch_size=100)
+client.log_hyperparameters({
+    "optimizer": "adamw",
+    "lr": 1e-3,
+    "batch_size": 64,
+})
 
 for epoch in range(100):
     for step in range(500):
-        # ... training log logic
-        loss = 0.5 # Calculate actual loss
-        
-        # Log your metrics seamlessly
-        aeroboard.log({
-            "loss": loss,
-            "epoch": epoch,
-            "step": step
-        })
+        logits = model(inputs)
+        loss = F.cross_entropy(logits, labels)
+        accuracy = (logits.argmax(dim=1) == labels).float().mean()
 
-# Ensure final buffer is emptied
-    aeroboard.flush()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        client.log_metrics(
+            {
+                "loss": loss,
+                "accuracy": accuracy,
+                "epoch": epoch,
+                "optimizer/lr": optimizer.param_groups[0]["lr"],
+            },
+            step=epoch * 500 + step,
+            prefix="train",
+        )
+
+client.flush()
+```
+
+`AeroboardClient.log_metrics(...)` accepts plain numbers and scalar tensors, injects a shared `step`, and prefixes bare names like `loss` to `train/loss` when you pass `prefix="train"`.
+
+See the full runnable example in [examples/torch_example.py](examples/torch_example.py).
+
+### Evaluate filesystem vs Greptime with the vanilla Torch example
+
+Filesystem:
+
+```bash
+uv run aeroboard start --storage filesystem --data-dir .aeroboard/examples/fs
+uv run examples/torch_example.py
+```
+
+Greptime:
+
+```bash
+uv run aeroboard db
+uv run aeroboard start --storage greptime
+uv run examples/torch_example.py
 ```
 
 ### PyTorch Lightning Integration
-Aeroboard now ships with a reusable Lightning callback that captures both manually logged hyperparameters and `LightningModule.save_hyperparameters()` values.
+Aeroboard ships with a Lightning-compatible logger that captures both manually logged hyperparameters and `LightningModule.save_hyperparameters()` values.
 
 ```python
 import lightning.pytorch as pl
@@ -148,7 +182,7 @@ class LitModel(pl.LightningModule):
         ...
 
 # Usage:
-# trainer = pl.Trainer(callbacks=[aeroboard.AeroboardLightningCallback(run_id="lightning-demo")])
+# trainer = pl.Trainer(logger=aeroboard.AeroboardLightningLogger(run_id="lightning-demo"))
 # trainer.fit(model)
 ```
 
@@ -176,45 +210,41 @@ uv run examples/lightning_example.py --backend greptime --run-prefix backend-eva
 The example tags each run with `storage/backend`, the API base, and the Flight endpoint so the comparison table can be used to verify which backend produced each run.
 
 ### Ray Tune Integration
-For Ray Tune distributed hyperparameter searching, you can use the `LoggerCallback`.
+Aeroboard ships with `AeroboardRayTuneLoggerCallback`, which creates one Aeroboard run per Ray trial, logs the trial config as hyperparameters, and streams numeric trial results as scalar metrics.
+
+Install the optional Ray dependency first:
+
+```bash
+uv sync --extra ray --dev
+```
 
 ```python
-from ray.tune.logger import LoggerCallback
+from ray import tune
 import aeroboard_client as aeroboard
 
-class AeroboardRayLogger(LoggerCallback):
-    def __init__(self, url="grpc://localhost:50051", batch_size=50):
-        super().__init__()
-        self.url = url
-        self.batch_size = batch_size
-        self._initialized = False
-        
-    def log_trial_result(self, iteration: int, trial, result: dict):
-        if not self._initialized:
-            aeroboard.init(url=self.url, batch_size=self.batch_size)
-            self._initialized = True
-            
-        # We can prepend the trial ID or experiment name to track overlapping experiments
-        trial_id = trial.trial_id
-        
-        metrics_to_log = {}
-        # Filter purely numerical data
-        for key, value in result.items():
-            if isinstance(value, (int, float)):
-                # Store it as "trial_123_loss" to visually segment channels on the frontend
-                metrics_to_log[f"{trial_id}_{key}"] = value 
-                
-        aeroboard.log(metrics_to_log)
+def objective(config):
+    for step in range(20):
+        tune.report(loss=1.0 / (step + 1) + config["lr"], accuracy=step / 20)
 
-    def on_experiment_end(self, trials, **info):
-        aeroboard.flush()
+tuner = tune.Tuner(
+    objective,
+    param_space={"lr": tune.grid_search([1e-2, 5e-2]), "hidden_size": tune.choice([32, 64])},
+    run_config=tune.RunConfig(
+        callbacks=[
+            aeroboard.AeroboardRayTuneLoggerCallback(
+                url="grpc://localhost:50051",
+                api_base_url="http://localhost:3000",
+                run_prefix="ray-demo",
+                metric_prefix="train",
+            )
+        ]
+    ),
+)
 
-# Usage:
-# tune.run(
-#    trainable,
-#    callbacks=[AeroboardRayLogger()]
-# )
+tuner.fit()
 ```
+
+See the full runnable example in [examples/ray_tune_example.py](examples/ray_tune_example.py).
 
 ---
 

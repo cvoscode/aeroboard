@@ -85,8 +85,8 @@ class SimpleModel(pl.LightningModule):
         y_hat = self(x)
         loss = F.cross_entropy(y_hat, y)
         acc = (y_hat.argmax(dim=1) == y).float().mean()
-        self.log('train_loss', loss)
-        self.log('train_acc', acc)
+        self.log('train/loss', loss)
+        self.log('train/acc', acc)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -94,8 +94,8 @@ class SimpleModel(pl.LightningModule):
         y_hat = self(x)
         loss = F.cross_entropy(y_hat, y)
         acc = (y_hat.argmax(dim=1) == y).float().mean()
-        self.log('val_loss', loss)
-        self.log('val_acc', acc)
+        self.log('val/loss', loss)
+        self.log('val/acc', acc)
         return loss
 
     def configure_optimizers(self):
@@ -124,7 +124,7 @@ def run_lightning_example(
         api_base_url=api_base_url,
         batch_size=batch_size,
     )
-    logger_cb = client.attach_lightning()
+    lightning_logger = client.lightning_logger()
 
     client.log_hyperparameters({
         'manual/tag': 'lightning',
@@ -139,10 +139,10 @@ def run_lightning_example(
 
     trainer = pl.Trainer(
         max_epochs=max_epochs,
-        callbacks=[logger_cb, gradient_cb],
+        callbacks=[gradient_cb],
         enable_progress_bar=True,
         enable_checkpointing=False,
-        logger=False
+        logger=lightning_logger,
     )
 
     print(f"🚀 Starting {run_name} with Aeroboard Logic...")

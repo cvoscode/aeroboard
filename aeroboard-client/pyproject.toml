@@ -25,12 +25,16 @@ torch = [
 lightning = [
     "lightning",
 ]
+ray = [
+    "ray[tune]",
+]
 pil = [
     "pillow",
 ]
 all = [
     "torch",
     "lightning",
+    "ray[tune]",
     "pillow",
 ]
 
