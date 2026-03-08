@@ -6,9 +6,8 @@ mod tests {
     use std::sync::Arc;
 
     use crate::history::{HyperparameterEntry, HistoryPoint};
-    use crate::persistence::record_batch_to_line_protocol;
     use crate::schema::{hyperparameter_schema, image_schema, scalar_schema};
-    use crate::storage::{FilesystemStore, StorageEngine};
+    use crate::storage::{FilesystemStore, StorageEngine, record_batch_to_line_protocol};
     use crate::telemetry::{TelemetryBatch, TelemetryKind};
 
     #[tokio::test]
@@ -33,6 +32,8 @@ mod tests {
 
     #[test]
     fn test_scalar_and_hparams_line_protocol() {
+        use crate::telemetry::TelemetryKind;
+
         let scalar_batch = RecordBatch::try_new(
             scalar_schema(),
             vec![
@@ -43,7 +44,7 @@ mod tests {
             ],
         ).unwrap();
 
-        let scalar_lp = record_batch_to_line_protocol(&scalar_batch).unwrap();
+        let scalar_lp = record_batch_to_line_protocol(&scalar_batch, &TelemetryKind::Scalars).unwrap();
         assert!(scalar_lp.contains("scalars,name=train/loss"));
         assert!(scalar_lp.contains("run_id=\"run-a\""));
 
@@ -58,13 +59,15 @@ mod tests {
             ],
         ).unwrap();
 
-        let hparam_lp = record_batch_to_line_protocol(&hparam_batch).unwrap();
+        let hparam_lp = record_batch_to_line_protocol(&hparam_batch, &TelemetryKind::Hyperparameters).unwrap();
         assert!(hparam_lp.contains("hyperparameters,key=learning_rate"));
         assert!(hparam_lp.contains("value=\"0.01\""));
     }
 
     #[test]
     fn test_image_line_protocol() {
+        use crate::telemetry::TelemetryKind;
+
         let batch = RecordBatch::try_new(
             image_schema(),
             vec![
@@ -76,7 +79,7 @@ mod tests {
             ],
         ).unwrap();
 
-        let lp = record_batch_to_line_protocol(&batch).unwrap();
+        let lp = record_batch_to_line_protocol(&batch, &TelemetryKind::Images).unwrap();
         assert!(lp.contains("images,name=samples/generated"));
         assert!(lp.contains("image_hex=\"696d67\""));
     }

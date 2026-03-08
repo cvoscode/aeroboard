@@ -15,6 +15,7 @@ mod persistence;
 mod schema;
 mod history;
 mod storage;
+mod retry;
 mod tests;
 
 use crate::app_state::AppState;

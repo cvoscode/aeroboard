@@ -17,20 +17,22 @@ dependencies = [
     "click",
     "pillow",
     "matplotlib>=3.9.4",
+    "torch>=2.8.0",
+    "lightning>=2.6.0",
 ]
 
 [project.optional-dependencies]
 examples = [
   "matplotlib",
     "torch",
-    "pytorch-lightning",
+    "lightning",
 ]
 
 [project.scripts]
-aeroboard = "aeroboard.main:main"
+aeroboard = "aeroboard_client.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/aeroboard"]
+packages = ["aeroboard-client/src/aeroboard_client"]
 
 [tool.hatch.metadata]
 allow-direct-references = true

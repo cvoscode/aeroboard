@@ -1,14 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import aeroboard_client
+import aeroboard_client as aeroboard
 import time
 from PIL import Image
 
 # 1. Initialize Aeroboard Client
 print("Initializing Aeroboard Client...")
-aeroboard = aeroboard_client.init("grpc://localhost:50051", batch_size=20)
-aeroboard.log_hyperparameters({
+client = aeroboard.init(url="grpc://localhost:50051", batch_size=20)
+client.log_hyperparameters({
     "model": "mlp",
     "input_size": 10,
     "hidden_size": 32,
@@ -74,7 +74,7 @@ for epoch in range(epochs):
         batch_acc = (predicted == labels).sum().item() / labels.size(0)
         
         # Log metrics to Aeroboard every step
-        aeroboard_client.log({
+        aeroboard.log({
             "train/loss": loss.item(),
             "train/accuracy": batch_acc,
             "epoch": epoch,
@@ -84,7 +84,7 @@ for epoch in range(epochs):
 
         if i % 25 == 0:
             image = Image.new('RGB', (96, 96), color=(int(batch_acc * 255), 40, 120))
-            aeroboard.log_image('samples/model-state', image, format='png')
+            client.log_image('samples/model-state', image, format='png')
         
         global_step += 1
         
@@ -96,5 +96,5 @@ for epoch in range(epochs):
     print(f'Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f}, Accuracy: {epoch_acc:.4f}')
 
 # Ensure all remaining buffered metrics are sent at the end
-aeroboard_client.flush()
+aeroboard.flush()
 print("Training complete! Flushed all data to Aeroboard.")

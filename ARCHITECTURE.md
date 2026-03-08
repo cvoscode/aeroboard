@@ -136,7 +136,7 @@ Frontend rendering strategy:
 - persistence concerns leak into the client through direct GreptimeDB lookups
 - duplicated implementation exists in two Python package trees
 - schema selection is implicit by batch shape rather than explicit message typing metadata
-- distributions are not surfaced through the public client flush path in practice
+- distributions remain an internal/server concern and are intentionally not exposed by the public Python client yet
 
 ---
 
@@ -360,18 +360,17 @@ Consider one of:
 
 Live streaming and durable storage have different failure modes and should not fully share the same buffering path.
 
-## 7. Finish or remove distribution support
+## 7. Distribution support decision
 
-### Problem
+### Decision
 
-Distribution schema exists, but persistence and frontend history handling are incomplete.
+Public Python client distribution support has been removed until persistence, query APIs, and frontend UX are designed end to end.
 
-### Recommendation
+### Current state
 
-Choose one:
-
-- complete end-to-end support with explicit UX and storage design
-- or remove the unfinished surface until it is ready
+- internal server enums/schema still reserve room for future distribution support
+- public client APIs document only scalars, hyperparameters, and images
+- persisted/queryable distributions are not currently supported
 
 ## 8. Add paging and windowed history APIs
 
@@ -484,7 +483,7 @@ flowchart TD
 
 - merge duplicate Python implementations
 - standardize Python environment creation, dependency sync, and command execution on `uv`
-- finalize distribution support decision
+- keep distribution support out of the public client until end-to-end support exists
 - add metrics/observability around drops, persistence failures, and lag
 
 ---

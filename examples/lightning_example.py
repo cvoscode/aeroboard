@@ -20,13 +20,13 @@ import time
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import lightning.pytorch as pl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
-import pytorch_lightning as pl
-import aeroboard
+import aeroboard_client as aeroboard
 
 
 class GradientFigureCallback(pl.Callback):

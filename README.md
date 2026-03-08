@@ -75,7 +75,7 @@ uv run pytest
 Now that the package is installed, you can simply import it in your training scripts:
 
 ```python
-import aeroboard
+import aeroboard_client as aeroboard
 
 # Initialize
 aeroboard.init(run_id="my_experiment")
@@ -110,10 +110,10 @@ The Python SDK was designed to be easily pluggable into any ML Framework.
 
 ```python
 import time
-import aeroboard_client
+import aeroboard_client as aeroboard
 
 # Initialize the global client
-aeroboard_client.init("grpc://localhost:50051", batch_size=100)
+aeroboard.init(url="grpc://localhost:50051", batch_size=100)
 
 for epoch in range(100):
     for step in range(500):
@@ -121,22 +121,22 @@ for epoch in range(100):
         loss = 0.5 # Calculate actual loss
         
         # Log your metrics seamlessly
-        aeroboard_client.log({
+        aeroboard.log({
             "loss": loss,
             "epoch": epoch,
             "step": step
         })
 
 # Ensure final buffer is emptied
-aeroboard_client.flush()
+    aeroboard.flush()
 ```
 
 ### PyTorch Lightning Integration
 Aeroboard now ships with a reusable Lightning callback that captures both manually logged hyperparameters and `LightningModule.save_hyperparameters()` values.
 
 ```python
-import pytorch_lightning as pl
-import aeroboard
+import lightning.pytorch as pl
+import aeroboard_client as aeroboard
 
 client = aeroboard.init(run_id="lightning-demo", batch_size=50)
 client.log_hyperparameters({"manual/tag": "baseline"})
@@ -180,7 +180,7 @@ For Ray Tune distributed hyperparameter searching, you can use the `LoggerCallba
 
 ```python
 from ray.tune.logger import LoggerCallback
-import aeroboard_client
+import aeroboard_client as aeroboard
 
 class AeroboardRayLogger(LoggerCallback):
     def __init__(self, url="grpc://localhost:50051", batch_size=50):
@@ -191,7 +191,7 @@ class AeroboardRayLogger(LoggerCallback):
         
     def log_trial_result(self, iteration: int, trial, result: dict):
         if not self._initialized:
-            aeroboard_client.init(self.url, self.batch_size)
+            aeroboard.init(url=self.url, batch_size=self.batch_size)
             self._initialized = True
             
         # We can prepend the trial ID or experiment name to track overlapping experiments
@@ -204,10 +204,10 @@ class AeroboardRayLogger(LoggerCallback):
                 # Store it as "trial_123_loss" to visually segment channels on the frontend
                 metrics_to_log[f"{trial_id}_{key}"] = value 
                 
-        aeroboard_client.log(metrics_to_log)
+        aeroboard.log(metrics_to_log)
 
     def on_experiment_end(self, trials, **info):
-        aeroboard_client.flush()
+        aeroboard.flush()
 
 # Usage:
 # tune.run(

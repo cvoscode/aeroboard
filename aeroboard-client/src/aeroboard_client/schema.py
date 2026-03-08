@@ -1,6 +1,14 @@
+"""
+Aeroboard Arrow schemas for telemetry data.
+
+These schemas define the structure of telemetry data sent to the Aeroboard
+backend via gRPC Flight protocol.
+"""
+
 import pyarrow as pa
 
-from aeroboard.schema import *  # noqa: F403
+
+# Define strict Arrow schemas for telemetry data
 
 scalar_schema = pa.schema([
     ("timestamp", pa.timestamp('ms')),
@@ -13,15 +21,8 @@ image_schema = pa.schema([
     ("timestamp", pa.timestamp('ms')),
     ("run_id", pa.string()),
     ("name", pa.string()),
-    ("image_data", pa.binary()), # Encoded WebP/JPEG bytes
-    ("format", pa.string())      # "webp", "jpeg", etc.
-])
-
-distribution_schema = pa.schema([
-    ("timestamp", pa.timestamp('ms')),
-    ("run_id", pa.string()),
-    ("name", pa.string()),
-    ("values", pa.list_(pa.float64()))
+    ("image_data", pa.binary()),  # Encoded WebP/JPEG bytes
+    ("format", pa.string())       # "webp", "jpeg", etc.
 ])
 
 hyperparameter_schema = pa.schema([

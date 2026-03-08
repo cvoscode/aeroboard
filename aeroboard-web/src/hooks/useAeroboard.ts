@@ -110,7 +110,7 @@ function ingestPoint(
     name: string,
     tsMs: number,
     val: number,
-    step: number | null
+    step: number | null,
 ): boolean {
     const wallTime = tsMs / 1000;
 
@@ -137,28 +137,43 @@ function ingestPoint(
     return true;
 }
 
-async function fetchPagedJson<T>(url: string): Promise<T[]> {
-    const rows: T[] = [];
-    let cursor: number | null = 0;
-    const limit = 10000;
-
-    while (cursor !== null) {
+async function fetchPagedJson<T>(url: string): Promise<T[] | null> {
+    try {
         const separator = url.includes('?') ? '&' : '?';
-        const resp = await fetch(`${url}${separator}limit=${limit}&cursor=${cursor}`);
+        const resp = await fetch(`${url}${separator}limit=10000&cursor=0`);
         if (!resp.ok) {
             throw new Error(`Request failed with status ${resp.status}`);
         }
 
-        const json = await resp.json() as { rows?: T[]; next_cursor?: number | null };
-        rows.push(...(json.rows ?? []));
-        cursor = json.next_cursor ?? null;
-
-        if ((json.rows ?? []).length === 0 && json.next_cursor == null) {
-            break;
+        const json = await resp.json() as { rows?: T[]; next_cursor?: number | null; error?: string };
+        if (!resp.ok && json.error) {
+            console.error('Aeroboard API error:', json.error);
         }
-    }
 
-    return rows;
+        const rows: T[] = json.rows ?? [];
+        let nextCursor = json.next_cursor ?? null;
+
+        while (nextCursor !== null) {
+            const pageResp = await fetch(`${url}${separator}limit=10000&cursor=${nextCursor}`);
+            if (!pageResp.ok) {
+                console.warn(`Aeroboard API page request failed with status ${pageResp.status}`);
+                break;
+            }
+            const page = await pageResp.json() as { rows?: T[]; next_cursor?: number | null };
+            rows.push(...(page.rows ?? []));
+            nextCursor = page.next_cursor ?? null;
+
+            if ((page.rows ?? []).length === 0 && nextCursor == null) {
+                break;
+            }
+        }
+
+        return rows;
+    } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        console.warn(`[Aeroboard] Failed to fetch history from ${url}:`, error);
+        return null;
+    }
 }
 
 function setHyperparameter(summaryStore: RunSummaryStore, runId: string, key: string, value: string, valueType: string) {
@@ -216,6 +231,22 @@ function getDefaultWsUrl(): string {
     return `${protocol}://${window.location.host}/ws/live`;
 }
 
+export interface UseAeroboardResult {
+    connected: boolean;
+    getChartData: (runId: string, name: string) => TimeSeriesData | null;
+    getMetricsForRun: (runId: string) => string[];
+    getGlobalXBounds: (targetRuns: string[], xAxis: 'wall' | 'rel' | 'step') => [number, number];
+    getRunSummaries: (runIds: string[]) => RunSummary[];
+    getHyperparameterKeys: (runIds: string[]) => string[];
+    getMetricSummaryKeys: (runIds: string[]) => string[];
+    getImageSeriesForRun: (runId: string) => ImageSeries[];
+    getImageSeries: (runId: string, name: string) => ImageSeries | null;
+    runs: string[];
+    tick: number;
+    deleteAllRuns: () => Promise<{ ok: boolean; reason?: string }>;
+    loadHistory: () => Promise<void>;
+}
+
 export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string = getDefaultApiBase()) {
     const [connected, setConnected] = useState(false);
     const storeRef = useRef<Store>({});
@@ -236,68 +267,82 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
         setTick((t) => t + 1);
     }, []);
 
-    useEffect(() => {
-        const loadHistory = async () => {
-            try {
-                const [historyResp, imageRows] = await Promise.all([
-                    fetch(`${apiBase}/api/history?limit=10000&cursor=0`),
-                    fetchPagedJson<ImageFrame>(`${apiBase}/api/history/images`),
-                ]);
+    const loadHistory = useCallback(async () => {
+        try {
+            const [historyResp, imageRows] = await Promise.all([
+                fetch(`${apiBase}/api/history?limit=10000&cursor=0`),
+                fetchPagedJson<ImageFrame>(`${apiBase}/api/history/images`),
+            ]);
 
-                if (historyResp.ok) {
-                    const firstPage = await historyResp.json() as {
-                        rows: { ts_ms: number; run_id: string; name: string; value: number }[];
-                        run_summaries?: RunSummary[];
+            if (!historyResp.ok) {
+                console.warn('[Aeroboard] History request not OK:', historyResp.status);
+            }
+
+            if (historyResp.ok) {
+                const firstPage = await historyResp.json() as {
+                    rows: { ts_ms: number; run_id: string; name: string; value: number }[];
+                    run_summaries?: RunSummary[];
+                    next_cursor?: number | null;
+                    error?: string;
+                };
+                const allRows = [...(firstPage.rows ?? [])];
+
+                let nextCursor = firstPage.next_cursor ?? null;
+                while (nextCursor !== null) {
+                    const pageResp = await fetch(`${apiBase}/api/history?limit=10000&cursor=${nextCursor}`);
+                    if (!pageResp.ok) {
+                        console.warn('[Aeroboard] History page request failed:', pageResp.status);
+                        break;
+                    }
+                    const page = await pageResp.json() as {
+                        rows?: { ts_ms: number; run_id: string; name: string; value: number }[];
                         next_cursor?: number | null;
                     };
-                    const allRows = [...(firstPage.rows ?? [])];
+                    allRows.push(...(page.rows ?? []));
+                    nextCursor = page.next_cursor ?? null;
 
-                    let nextCursor = firstPage.next_cursor ?? null;
-                    while (nextCursor !== null) {
-                        const pageResp = await fetch(`${apiBase}/api/history?limit=10000&cursor=${nextCursor}`);
-                        if (!pageResp.ok) break;
-                        const page = await pageResp.json() as {
-                            rows?: { ts_ms: number; run_id: string; name: string; value: number }[];
-                            next_cursor?: number | null;
-                        };
-                        allRows.push(...(page.rows ?? []));
-                        nextCursor = page.next_cursor ?? null;
-                    }
-
-                    for (const summary of firstPage.run_summaries ?? []) {
-                        summaryRef.current[summary.run_id] = summary;
-                    }
-
-                    if (allRows.length) {
-                        allRows.sort((a, b) => a.ts_ms - b.ts_ms);
-                        const stepMap: Record<string, Map<number, number>> = {};
-                        for (const row of allRows) {
-                            if (row.name === 'step' || row.name.endsWith('/step')) {
-                                if (!stepMap[row.run_id]) stepMap[row.run_id] = new Map();
-                                stepMap[row.run_id].set(row.ts_ms, row.value);
-                            }
-                        }
-
-                        for (const row of allRows) {
-                            if (row.name === 'step' || row.name.endsWith('/step')) continue;
-                            const step = stepMap[row.run_id]?.get(row.ts_ms) ?? null;
-                            ingestPoint(storeRef.current, summaryRef.current, startTimes.current, row.run_id, row.name, row.ts_ms, row.value, step);
-                        }
+                    if ((page.rows ?? []).length === 0 && nextCursor == null) {
+                        break;
                     }
                 }
 
+                for (const summary of firstPage.run_summaries ?? []) {
+                    summaryRef.current[summary.run_id] = summary;
+                }
+
+                if (allRows.length) {
+                    allRows.sort((a, b) => a.ts_ms - b.ts_ms);
+                    const stepMap: Record<string, Map<number, number>> = {};
+                    for (const row of allRows) {
+                        if (row.name === 'step' || row.name.endsWith('/step')) {
+                            if (!stepMap[row.run_id]) stepMap[row.run_id] = new Map();
+                            stepMap[row.run_id].set(row.ts_ms, row.value);
+                        }
+                    }
+
+                    for (const row of allRows) {
+                        if (row.name === 'step' || row.name.endsWith('/step')) continue;
+                        const step = stepMap[row.run_id]?.get(row.ts_ms) ?? null;
+                        ingestPoint(storeRef.current, summaryRef.current, startTimes.current, row.run_id, row.name, row.ts_ms, row.value, step);
+                    }
+                }
+            }
+
+            if (imageRows !== null) {
                 for (const frame of imageRows) {
                     upsertImageFrame(imageStoreRef.current, frame);
                 }
-
-                refreshRuns();
-            } catch (e) {
-                console.warn('[Aeroboard] Failed to load history:', e);
             }
-        };
 
+            refreshRuns();
+        } catch (e) {
+            console.warn('[Aeroboard] Failed to load history:', e);
+        }
+    }, [apiBase, refreshRuns]);
+
+    useEffect(() => {
         loadHistory();
-    }, [apiBase, refreshRuns, reloadToken]);
+    }, [apiBase, reloadToken, loadHistory]);
 
     useEffect(() => {
         const ws = new WebSocket(wsUrl);
@@ -305,6 +350,11 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
 
         ws.onopen = () => setConnected(true);
         ws.onclose = () => setConnected(false);
+
+        ws.onerror = (event) => {
+            console.error('[Aeroboard] WebSocket error:', event);
+            setConnected(false);
+        };
 
         ws.onmessage = async (event) => {
             try {
@@ -374,7 +424,7 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
 
                 if (shouldUpdate) refreshRuns();
             } catch (err) {
-                console.error('Failed to parse Arrow batch from WS:', err);
+                console.error('[Aeroboard] Failed to parse Arrow batch from WS:', err);
             }
         };
 
@@ -463,7 +513,7 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
             setReloadToken((t) => t + 1);
             return { ok: true };
         } catch (err) {
-            console.error('Failed to delete runs:', err);
+            console.error('[Aeroboard] Failed to delete runs:', err);
             return { ok: false, reason: err instanceof Error ? err.message : 'network-error' };
         }
     }, [apiBase]);
@@ -481,5 +531,6 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
         runs,
         tick,
         deleteAllRuns,
+        loadHistory,
     };
 }

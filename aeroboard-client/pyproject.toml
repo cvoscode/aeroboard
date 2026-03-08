@@ -1,19 +1,46 @@
 [build-system]
-requires = ["setuptools>=61.0.0"]
+requires = ["setuptools>=61.0.0", "click"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "aeroboard_client"
 version = "0.1.0"
 description = "A Python client for Aeroboard (Arrow-Native TSDB Dashboard)"
+requires-python = ">=3.9"
 authors = [
-  { name="Aeroboard Author" }
+  { name="Aeroboard Team", email="team@aeroboard.example" }
 ]
 dependencies = [
     "pyarrow",
-  "requests",
-  "pillow",
+    "requests",
+    "click",
+    "pillow",
+    "numpy",
 ]
+
+[project.optional-dependencies]
+torch = [
+    "torch",
+]
+lightning = [
+    "lightning",
+]
+pil = [
+    "pillow",
+]
+all = [
+    "torch",
+    "lightning",
+    "pillow",
+]
+
+[project.scripts]
+aeroboard = "aeroboard_client.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+]

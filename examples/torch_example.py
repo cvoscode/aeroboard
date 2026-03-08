@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import aeroboard
+import aeroboard_client as aeroboard
 import time
 from PIL import Image
 
