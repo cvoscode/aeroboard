@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><link rel="canonical" href="https://aeroboard.readthedocs.io/user-guide/integrations/" />
+      <link rel="shortcut icon" href="../../img/favicon.ico" />
+    <title>Framework Integrations - Aeroboard</title>
+    <link rel="stylesheet" href="../../css/theme.css" />
+    <link rel="stylesheet" href="../../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Framework Integrations";
+        var mkdocs_page_input_path = "user-guide/integrations.md";
+        var mkdocs_page_url = "/user-guide/integrations/";
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href="../.." class="icon icon-home"> Aeroboard
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../..">Home</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Getting Started</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../../getting-started/installation/">Installation</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../getting-started/quickstart/">Quickstart</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">User Guide</span></p>
+              <ul class="current">
+                  <li class="toctree-l1"><a class="reference internal" href="../core-concepts/">Core Concepts</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../logging-data/">Logging Data</a>
+                  </li>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">Framework Integrations</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#plain-python-or-pytorch-loops">Plain Python or PyTorch loops</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#pytorch-lightning-logger">PyTorch Lightning logger</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#pytorch-lightning-callback">PyTorch Lightning callback</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#ray-tune-callback">Ray Tune callback</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#example-workflows-in-this-repository">Example workflows in this repository</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#choosing-an-integration-style">Choosing an integration style</a>
+    </li>
+    </ul>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../dashboard/">Using the Dashboard</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Developer Guide</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../../developer-guide/architecture/">Architecture</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../developer-guide/repository-layout/">Repository Layout</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../developer-guide/development-workflow/">Development Workflow</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../developer-guide/storage-model/">Storage Model</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Reference</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../../reference/cli/">CLI</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../reference/python-sdk/">Python SDK</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../reference/http-api/">HTTP API</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../reference/configuration/">Configuration</a>
+                  </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../..">Aeroboard</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="../.." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">User Guide</li>
+      <li class="breadcrumb-item active">Framework Integrations</li>
+    <li class="wy-breadcrumbs-aside">
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="framework-integrations">Framework Integrations<a class="headerlink" href="#framework-integrations" title="Permanent link">&para;</a></h1>
+<p>Aeroboard is designed to work both with explicit training loops and with common ML framework hooks.</p>
+<h2 id="plain-python-or-pytorch-loops">Plain Python or PyTorch loops<a class="headerlink" href="#plain-python-or-pytorch-loops" title="Permanent link">&para;</a></h2>
+<p>The simplest pattern is to keep an <code>AeroboardClient</code> instance alongside your optimizer and training loop.</p>
+<pre><code class="language-python">import aeroboard_client as aeroboard
+
+client = aeroboard.init(run_id=&quot;torch-demo&quot;, batch_size=50)
+client.log_hyperparameters({&quot;optimizer&quot;: &quot;adam&quot;, &quot;lr&quot;: 1e-3})
+
+for step in range(1000):
+    client.log_metrics({&quot;loss&quot;: loss, &quot;accuracy&quot;: accuracy}, step=step, prefix=&quot;train&quot;)
+
+client.flush()
+</code></pre>
+<p>This pattern gives you the most control over metric names and flush timing.</p>
+<h2 id="pytorch-lightning-logger">PyTorch Lightning logger<a class="headerlink" href="#pytorch-lightning-logger" title="Permanent link">&para;</a></h2>
+<p>For Lightning, the preferred integration is <code>lightning_logger()</code>:</p>
+<pre><code class="language-python">import aeroboard_client as aeroboard
+import lightning.pytorch as pl
+
+client = aeroboard.init(run_id=&quot;lightning-demo&quot;)
+logger = client.lightning_logger()
+
+trainer = pl.Trainer(logger=logger)
+trainer.fit(model)
+</code></pre>
+<p>The logger:</p>
+<ul>
+<li>forwards metrics emitted through <code>LightningModule.log(...)</code></li>
+<li>records hyperparameters passed through Lightning's logger interface</li>
+<li>tracks the most recent step value and reuses it when Lightning omits an explicit step</li>
+<li>flushes remaining telemetry during <code>save()</code> and <code>finalize()</code></li>
+</ul>
+<h2 id="pytorch-lightning-callback">PyTorch Lightning callback<a class="headerlink" href="#pytorch-lightning-callback" title="Permanent link">&para;</a></h2>
+<p>Aeroboard also exposes <code>AeroboardLightningCallback</code>.</p>
+<p>Use it if you want a callback-oriented integration instead of a logger-oriented one.</p>
+<p>The callback attempts to:</p>
+<ul>
+<li>log model and logger hyperparameters at fit start</li>
+<li>emit training metrics at the end of train batches</li>
+<li>emit validation summaries at validation epoch end</li>
+<li>flush data when training ends</li>
+</ul>
+<p>The logger is the cleaner default when your training code already follows Lightning's logging model.</p>
+<h2 id="ray-tune-callback">Ray Tune callback<a class="headerlink" href="#ray-tune-callback" title="Permanent link">&para;</a></h2>
+<p>Aeroboard ships with <code>AeroboardRayTuneLoggerCallback</code>, which creates one Aeroboard run per Ray trial.</p>
+<pre><code class="language-python">from ray import tune
+import aeroboard_client as aeroboard
+
+callback = aeroboard.AeroboardRayTuneLoggerCallback(
+    run_prefix=&quot;ray-demo&quot;,
+    metric_prefix=&quot;train&quot;,
+)
+</code></pre>
+<p>Behavior:</p>
+<ul>
+<li>each trial gets its own Aeroboard run</li>
+<li>trial configuration is logged as hyperparameters</li>
+<li>numeric trial results are streamed as scalar metrics</li>
+<li>standard Ray metadata such as trial identifiers is attached as hyperparameters</li>
+</ul>
+<h2 id="example-workflows-in-this-repository">Example workflows in this repository<a class="headerlink" href="#example-workflows-in-this-repository" title="Permanent link">&para;</a></h2>
+<p>The repository includes runnable examples:</p>
+<ul>
+<li><code>examples/torch_example.py</code></li>
+<li><code>examples/lightning_example.py</code></li>
+<li><code>examples/ray_tune_example.py</code></li>
+</ul>
+<p>The Lightning example is especially useful for comparing filesystem and Greptime-backed runs because it tags each run with storage metadata that appears in comparison views.</p>
+<h2 id="choosing-an-integration-style">Choosing an integration style<a class="headerlink" href="#choosing-an-integration-style" title="Permanent link">&para;</a></h2>
+<p>Use this rule of thumb:</p>
+<ul>
+<li>Prefer direct <code>AeroboardClient</code> calls in plain loops or when you need tight control.</li>
+<li>Prefer <code>lightning_logger()</code> for Lightning projects.</li>
+<li>Prefer <code>AeroboardRayTuneLoggerCallback</code> for Ray Tune experiments.</li>
+</ul>
+<p>When in doubt, start with direct client logging because it makes metric naming and flush behavior explicit.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../logging-data/" class="btn btn-neutral float-left" title="Logging Data"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../dashboard/" class="btn btn-neutral float-right" title="Using the Dashboard">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+      <span><a href="../logging-data/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../dashboard/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "../..";</script>
+    <script src="../../js/theme_extra.js"></script>
+    <script src="../../js/theme.js"></script>
+      <script src="../../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

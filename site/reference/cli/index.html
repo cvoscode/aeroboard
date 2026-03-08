@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><link rel="canonical" href="https://aeroboard.readthedocs.io/reference/cli/" />
+      <link rel="shortcut icon" href="../../img/favicon.ico" />
+    <title>CLI - Aeroboard</title>
+    <link rel="stylesheet" href="../../css/theme.css" />
+    <link rel="stylesheet" href="../../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "CLI";
+        var mkdocs_page_input_path = "reference/cli.md";
+        var mkdocs_page_url = "/reference/cli/";
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href="../.." class="icon icon-home"> Aeroboard
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../..">Home</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Getting Started</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../../getting-started/installation/">Installation</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../getting-started/quickstart/">Quickstart</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">User Guide</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../../user-guide/core-concepts/">Core Concepts</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../user-guide/logging-data/">Logging Data</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../user-guide/integrations/">Framework Integrations</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../user-guide/dashboard/">Using the Dashboard</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Developer Guide</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../../developer-guide/architecture/">Architecture</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../developer-guide/repository-layout/">Repository Layout</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../developer-guide/development-workflow/">Development Workflow</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../developer-guide/storage-model/">Storage Model</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Reference</span></p>
+              <ul class="current">
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">CLI</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#aeroboard-setup">aeroboard setup</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#aeroboard-start">aeroboard start</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#aeroboard-db">aeroboard db</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#aeroboard-stop-db">aeroboard stop-db</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#aeroboard-status">aeroboard status</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#aeroboard-check-run">aeroboard check-run</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#aeroboard-log-run">aeroboard log-run</a>
+    </li>
+    </ul>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../python-sdk/">Python SDK</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../http-api/">HTTP API</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../configuration/">Configuration</a>
+                  </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../..">Aeroboard</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="../.." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">Reference</li>
+      <li class="breadcrumb-item active">CLI</li>
+    <li class="wy-breadcrumbs-aside">
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="cli-reference">CLI Reference<a class="headerlink" href="#cli-reference" title="Permanent link">&para;</a></h1>
+<p>Aeroboard exposes a <code>click</code>-based CLI through the <code>aeroboard</code> command.</p>
+<h2 id="aeroboard-setup"><code>aeroboard setup</code><a class="headerlink" href="#aeroboard-setup" title="Permanent link">&para;</a></h2>
+<p>Builds the frontend and Rust server.</p>
+<p>Behavior:</p>
+<ul>
+<li>installs frontend dependencies with <code>npm install</code></li>
+<li>builds the frontend with <code>npm run build</code></li>
+<li>builds the Rust server with <code>cargo build --release</code></li>
+</ul>
+<p>Typical usage:</p>
+<pre><code class="language-bash">uv run aeroboard setup
+</code></pre>
+<h2 id="aeroboard-start"><code>aeroboard start</code><a class="headerlink" href="#aeroboard-start" title="Permanent link">&para;</a></h2>
+<p>Builds the project and starts the server.</p>
+<pre><code class="language-bash">uv run aeroboard start [OPTIONS]
+</code></pre>
+<p>Options:</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--port</code></td>
+<td><code>3000</code></td>
+<td>HTTP port for the web UI, HTTP API, and WebSocket endpoint</td>
+</tr>
+<tr>
+<td><code>--flight-port</code></td>
+<td><code>50051</code></td>
+<td>Arrow Flight gRPC ingestion port</td>
+</tr>
+<tr>
+<td><code>--storage</code></td>
+<td><code>filesystem</code></td>
+<td>Storage backend: <code>filesystem</code>, <code>greptime</code>, or <code>live</code></td>
+</tr>
+<tr>
+<td><code>--data-dir</code></td>
+<td>unset</td>
+<td>Filesystem storage root when <code>storage=filesystem</code></td>
+</tr>
+</tbody>
+</table>
+<p>Notes:</p>
+<ul>
+<li>the command tries to run the release binary after rebuilding it</li>
+<li>if the binary is missing, it falls back to <code>cargo run --release</code></li>
+<li>storage mode is passed to the server through environment variables</li>
+</ul>
+<h2 id="aeroboard-db"><code>aeroboard db</code><a class="headerlink" href="#aeroboard-db" title="Permanent link">&para;</a></h2>
+<p>Starts GreptimeDB through Docker Compose.</p>
+<pre><code class="language-bash">uv run aeroboard db
+</code></pre>
+<p>Option:</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--greptime-image</code></td>
+<td><code>greptime/greptimedb:latest</code></td>
+<td>Docker image to use</td>
+</tr>
+</tbody>
+</table>
+<h2 id="aeroboard-stop-db"><code>aeroboard stop-db</code><a class="headerlink" href="#aeroboard-stop-db" title="Permanent link">&para;</a></h2>
+<p>Stops the Docker Compose-managed GreptimeDB service.</p>
+<pre><code class="language-bash">uv run aeroboard stop-db
+</code></pre>
+<h2 id="aeroboard-status"><code>aeroboard status</code><a class="headerlink" href="#aeroboard-status" title="Permanent link">&para;</a></h2>
+<p>Checks local Aeroboard services.</p>
+<pre><code class="language-bash">uv run aeroboard status
+</code></pre>
+<p>It attempts to inspect:</p>
+<ul>
+<li><code>http://localhost:3000/api/runs</code></li>
+<li>the Flight endpoint on <code>grpc://localhost:50051</code></li>
+<li>GreptimeDB health on <code>http://localhost:4000/health</code></li>
+</ul>
+<h2 id="aeroboard-check-run"><code>aeroboard check-run</code><a class="headerlink" href="#aeroboard-check-run" title="Permanent link">&para;</a></h2>
+<p>Fetches and prints recent metrics for a run.</p>
+<pre><code class="language-bash">uv run aeroboard check-run [OPTIONS] [RUN_ID]
+</code></pre>
+<p>Options:</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--no-build</code></td>
+<td>Skip rebuilding before the check</td>
+</tr>
+</tbody>
+</table>
+<p>If <code>RUN_ID</code> is omitted, the command first asks the server for <code>/api/runs</code> and uses the first available run.</p>
+<h2 id="aeroboard-log-run"><code>aeroboard log-run</code><a class="headerlink" href="#aeroboard-log-run" title="Permanent link">&para;</a></h2>
+<p>Starts an auxiliary run-logging workflow. This command exists in the CLI surface but should be treated as a utility command rather than the primary instrumentation path.</p>
+<p>For normal logging from training code, prefer the Python SDK directly.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../../developer-guide/storage-model/" class="btn btn-neutral float-left" title="Storage Model"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../python-sdk/" class="btn btn-neutral float-right" title="Python SDK">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+      <span><a href="../../developer-guide/storage-model/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../python-sdk/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "../..";</script>
+    <script src="../../js/theme_extra.js"></script>
+    <script src="../../js/theme.js"></script>
+      <script src="../../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

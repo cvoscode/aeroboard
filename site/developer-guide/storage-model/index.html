@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><link rel="canonical" href="https://aeroboard.readthedocs.io/developer-guide/storage-model/" />
+      <link rel="shortcut icon" href="../../img/favicon.ico" />
+    <title>Storage Model - Aeroboard</title>
+    <link rel="stylesheet" href="../../css/theme.css" />
+    <link rel="stylesheet" href="../../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Storage Model";
+        var mkdocs_page_input_path = "developer-guide/storage-model.md";
+        var mkdocs_page_url = "/developer-guide/storage-model/";
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href="../.." class="icon icon-home"> Aeroboard
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../..">Home</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Getting Started</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../../getting-started/installation/">Installation</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../getting-started/quickstart/">Quickstart</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">User Guide</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../../user-guide/core-concepts/">Core Concepts</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../user-guide/logging-data/">Logging Data</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../user-guide/integrations/">Framework Integrations</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../user-guide/dashboard/">Using the Dashboard</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Developer Guide</span></p>
+              <ul class="current">
+                  <li class="toctree-l1"><a class="reference internal" href="../architecture/">Architecture</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../repository-layout/">Repository Layout</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../development-workflow/">Development Workflow</a>
+                  </li>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">Storage Model</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#why-the-storage-abstraction-matters">Why the storage abstraction matters</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#supported-storage-modes">Supported storage modes</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#filesystem">Filesystem</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#greptimedb">GreptimeDB</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#live-only">Live-only</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#query-semantics-shared-across-backends">Query semantics shared across backends</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#adding-a-new-storage-backend">Adding a new storage backend</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#adding-a-new-telemetry-type">Adding a new telemetry type</a>
+    </li>
+    </ul>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Reference</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../../reference/cli/">CLI</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../reference/python-sdk/">Python SDK</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../reference/http-api/">HTTP API</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../reference/configuration/">Configuration</a>
+                  </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../..">Aeroboard</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="../.." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">Developer Guide</li>
+      <li class="breadcrumb-item active">Storage Model</li>
+    <li class="wy-breadcrumbs-aside">
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="storage-model">Storage Model<a class="headerlink" href="#storage-model" title="Permanent link">&para;</a></h1>
+<p>Aeroboard routes all persistence and history queries through the Rust <code>StorageEngine</code> trait.</p>
+<h2 id="why-the-storage-abstraction-matters">Why the storage abstraction matters<a class="headerlink" href="#why-the-storage-abstraction-matters" title="Permanent link">&para;</a></h2>
+<p>The live telemetry path and the persistence path are intentionally separated. That design only stays clean if storage-specific behavior is isolated behind a narrow server-side interface.</p>
+<p>The storage engine currently exposes operations for:</p>
+<ul>
+<li>appending telemetry batches</li>
+<li>querying scalar history</li>
+<li>querying hyperparameters</li>
+<li>querying image history</li>
+<li>listing runs</li>
+<li>clearing history</li>
+</ul>
+<h2 id="supported-storage-modes">Supported storage modes<a class="headerlink" href="#supported-storage-modes" title="Permanent link">&para;</a></h2>
+<h2 id="filesystem">Filesystem<a class="headerlink" href="#filesystem" title="Permanent link">&para;</a></h2>
+<p>Filesystem storage is the default mode.</p>
+<p>The server writes run-scoped data under the configured data directory, currently defaulting to <code>.aeroboard</code>.</p>
+<p>Conceptually the layout looks like this:</p>
+<pre><code class="language-text">.aeroboard/
+  runs/
+    &lt;encoded-run-id&gt;/
+      manifest.json
+      scalars/
+        &lt;timestamp&gt;-&lt;uuid&gt;.arrow
+      hyperparameters/
+        &lt;timestamp&gt;-&lt;uuid&gt;.arrow
+      images/
+        &lt;encoded-metric-name&gt;/
+          index.json
+          &lt;timestamp&gt;-&lt;uuid&gt;.&lt;format&gt;
+</code></pre>
+<p>Important details:</p>
+<ul>
+<li>a manifest is written per run so the run can be enumerated later</li>
+<li>scalar and hyperparameter data are stored as Arrow files</li>
+<li>images are extracted and stored as individual files plus an index</li>
+</ul>
+<p>Filesystem mode is usually the best place to validate new telemetry behavior because it keeps the persistence path transparent.</p>
+<h2 id="greptimedb">GreptimeDB<a class="headerlink" href="#greptimedb" title="Permanent link">&para;</a></h2>
+<p>Greptime mode routes persistence and historical queries through the configured Greptime HTTP endpoint.</p>
+<p>Use it when you specifically want database-backed persistence or need to validate the Greptime-specific code path.</p>
+<h2 id="live-only">Live-only<a class="headerlink" href="#live-only" title="Permanent link">&para;</a></h2>
+<p>Live-only mode intentionally accepts batches without persisting them.</p>
+<p>Expected semantics:</p>
+<ul>
+<li>ingestion succeeds</li>
+<li>live streaming still works</li>
+<li>history queries return empty collections</li>
+<li>delete-style persistence operations should not pretend they succeeded against nonexistent stored data</li>
+</ul>
+<h2 id="query-semantics-shared-across-backends">Query semantics shared across backends<a class="headerlink" href="#query-semantics-shared-across-backends" title="Permanent link">&para;</a></h2>
+<p>The HTTP history layer applies consistent filters after retrieving rows from storage:</p>
+<ul>
+<li><code>run_id</code> accepts a comma-separated list</li>
+<li><code>metric</code> accepts a comma-separated list</li>
+<li><code>start_ms</code> and <code>end_ms</code> are inclusive</li>
+<li><code>cursor</code> and <code>limit</code> implement position-based pagination</li>
+</ul>
+<p>These semantics need to remain backend-agnostic.</p>
+<h2 id="adding-a-new-storage-backend">Adding a new storage backend<a class="headerlink" href="#adding-a-new-storage-backend" title="Permanent link">&para;</a></h2>
+<p>If you add another storage engine:</p>
+<ol>
+<li>Implement the <code>StorageEngine</code> trait.</li>
+<li>Wire it into backend selection in <code>build_storage</code>.</li>
+<li>Preserve the empty-history contract where appropriate.</li>
+<li>Make sure <code>list_runs()</code> supports run resolution and UI enumeration.</li>
+<li>Verify that failures in persistence do not break the live path.</li>
+</ol>
+<h2 id="adding-a-new-telemetry-type">Adding a new telemetry type<a class="headerlink" href="#adding-a-new-telemetry-type" title="Permanent link">&para;</a></h2>
+<p>A new telemetry type usually requires more than a storage change.</p>
+<p>Checklist:</p>
+<ol>
+<li>Add or extend the Arrow schema in the Python client.</li>
+<li>Teach ingestion to classify the new batch kind.</li>
+<li>Decide whether the storage engine persists it, streams it, or both.</li>
+<li>Extend query APIs if the frontend needs historical access.</li>
+<li>Add examples and tests.</li>
+</ol>
+<p>If you skip the query or storage contract, the UI may appear partially broken even when ingestion itself succeeds.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../development-workflow/" class="btn btn-neutral float-left" title="Development Workflow"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../../reference/cli/" class="btn btn-neutral float-right" title="CLI">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+      <span><a href="../development-workflow/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../../reference/cli/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "../..";</script>
+    <script src="../../js/theme_extra.js"></script>
+    <script src="../../js/theme.js"></script>
+      <script src="../../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

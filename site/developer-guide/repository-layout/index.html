@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><link rel="canonical" href="https://aeroboard.readthedocs.io/developer-guide/repository-layout/" />
+      <link rel="shortcut icon" href="../../img/favicon.ico" />
+    <title>Repository Layout - Aeroboard</title>
+    <link rel="stylesheet" href="../../css/theme.css" />
+    <link rel="stylesheet" href="../../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Repository Layout";
+        var mkdocs_page_input_path = "developer-guide/repository-layout.md";
+        var mkdocs_page_url = "/developer-guide/repository-layout/";
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href="../.." class="icon icon-home"> Aeroboard
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../..">Home</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Getting Started</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../../getting-started/installation/">Installation</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../getting-started/quickstart/">Quickstart</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">User Guide</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../../user-guide/core-concepts/">Core Concepts</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../user-guide/logging-data/">Logging Data</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../user-guide/integrations/">Framework Integrations</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../user-guide/dashboard/">Using the Dashboard</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Developer Guide</span></p>
+              <ul class="current">
+                  <li class="toctree-l1"><a class="reference internal" href="../architecture/">Architecture</a>
+                  </li>
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">Repository Layout</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#top-level-directories">Top-level directories</a>
+        <ul>
+    <li class="toctree-l3"><a class="reference internal" href="#aeroboard-client">aeroboard-client/</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#aeroboard-server">aeroboard-server/</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#aeroboard-web">aeroboard-web/</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#examples">examples/</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#tests">tests/</a>
+    </li>
+    <li class="toctree-l3"><a class="reference internal" href="#docs">docs/</a>
+    </li>
+        </ul>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#package-layout-notes">Package layout notes</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#build-outputs-and-generated-artifacts">Build outputs and generated artifacts</a>
+    </li>
+    </ul>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../development-workflow/">Development Workflow</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../storage-model/">Storage Model</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Reference</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../../reference/cli/">CLI</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../reference/python-sdk/">Python SDK</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../reference/http-api/">HTTP API</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../reference/configuration/">Configuration</a>
+                  </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../..">Aeroboard</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="../.." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">Developer Guide</li>
+      <li class="breadcrumb-item active">Repository Layout</li>
+    <li class="wy-breadcrumbs-aside">
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="repository-layout">Repository Layout<a class="headerlink" href="#repository-layout" title="Permanent link">&para;</a></h1>
+<p>This repository contains multiple language stacks in one workspace.</p>
+<h2 id="top-level-directories">Top-level directories<a class="headerlink" href="#top-level-directories" title="Permanent link">&para;</a></h2>
+<h3 id="aeroboard-client"><code>aeroboard-client/</code><a class="headerlink" href="#aeroboard-client" title="Permanent link">&para;</a></h3>
+<p>Python client package that exposes the telemetry SDK, CLI entrypoints, and integration helpers.</p>
+<p>Important paths:</p>
+<ul>
+<li><code>src/aeroboard_client/client.py</code>: client implementation and framework integrations</li>
+<li><code>src/aeroboard_client/cli.py</code>: top-level <code>aeroboard</code> CLI</li>
+<li><code>src/aeroboard_client/schema.py</code>: Arrow schemas for supported telemetry types</li>
+</ul>
+<h3 id="aeroboard-server"><code>aeroboard-server/</code><a class="headerlink" href="#aeroboard-server" title="Permanent link">&para;</a></h3>
+<p>Rust application that handles Flight ingestion, WebSocket live streaming, storage selection, and history APIs.</p>
+<p>Important paths:</p>
+<ul>
+<li><code>src/main.rs</code>: application bootstrap and routing</li>
+<li><code>src/config.rs</code>: runtime configuration from environment</li>
+<li><code>src/history.rs</code>: HTTP handlers and history query shaping</li>
+<li><code>src/storage.rs</code>: storage abstraction and backend implementations</li>
+<li><code>src/t_junction.rs</code>: broadcast fan-out hub</li>
+</ul>
+<h3 id="aeroboard-web"><code>aeroboard-web/</code><a class="headerlink" href="#aeroboard-web" title="Permanent link">&para;</a></h3>
+<p>React and Vite application for the dashboard.</p>
+<p>Important paths:</p>
+<ul>
+<li><code>src/hooks/useAeroboard.ts</code>: main data ingestion and store logic</li>
+<li><code>src/components/</code>: UI widgets and plots</li>
+</ul>
+<h3 id="examples"><code>examples/</code><a class="headerlink" href="#examples" title="Permanent link">&para;</a></h3>
+<p>Runnable example scripts for plain loops, Lightning, and Ray Tune.</p>
+<h3 id="tests"><code>tests/</code><a class="headerlink" href="#tests" title="Permanent link">&para;</a></h3>
+<p>Python tests covering run versioning, payload generation, and client-level behavior.</p>
+<h3 id="docs"><code>docs/</code><a class="headerlink" href="#docs" title="Permanent link">&para;</a></h3>
+<p>MkDocs source tree for this documentation site.</p>
+<h2 id="package-layout-notes">Package layout notes<a class="headerlink" href="#package-layout-notes" title="Permanent link">&para;</a></h2>
+<p>The repository has both a top-level Python project configuration and a dedicated <code>aeroboard-client</code> package directory. When changing Python packaging or documentation, verify which path is authoritative for the behavior you are describing.</p>
+<h2 id="build-outputs-and-generated-artifacts">Build outputs and generated artifacts<a class="headerlink" href="#build-outputs-and-generated-artifacts" title="Permanent link">&para;</a></h2>
+<p>Common generated output locations include:</p>
+<ul>
+<li><code>aeroboard-server/target/</code> for Rust build artifacts</li>
+<li><code>aeroboard-web/dist/</code> for the frontend bundle</li>
+<li><code>.aeroboard/</code> or custom data directories for filesystem persistence</li>
+<li><code>logs/</code> for captured example runs in this repository snapshot</li>
+</ul>
+<p>Do not document generated artifacts as if they are source-owned unless the workflow explicitly depends on them.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../architecture/" class="btn btn-neutral float-left" title="Architecture"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../development-workflow/" class="btn btn-neutral float-right" title="Development Workflow">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+      <span><a href="../architecture/" style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../development-workflow/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "../..";</script>
+    <script src="../../js/theme_extra.js"></script>
+    <script src="../../js/theme.js"></script>
+      <script src="../../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

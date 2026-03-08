@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" >
+<head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><link rel="canonical" href="https://aeroboard.readthedocs.io/getting-started/installation/" />
+      <link rel="shortcut icon" href="../../img/favicon.ico" />
+    <title>Installation - Aeroboard</title>
+    <link rel="stylesheet" href="../../css/theme.css" />
+    <link rel="stylesheet" href="../../css/theme_extra.css" />
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" />
+    
+      <script>
+        // Current page data
+        var mkdocs_page_name = "Installation";
+        var mkdocs_page_input_path = "getting-started/installation.md";
+        var mkdocs_page_url = "/getting-started/installation/";
+      </script>
+    
+    <!--[if lt IE 9]>
+      <script src="../../js/html5shiv.min.js"></script>
+    <![endif]-->
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+      <script>hljs.highlightAll();</script> 
+</head>
+
+<body class="wy-body-for-nav" role="document">
+
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side stickynav">
+    <div class="wy-side-scroll">
+      <div class="wy-side-nav-search">
+          <a href="../.." class="icon icon-home"> Aeroboard
+        </a><div role="search">
+  <form id ="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+      <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" title="Type search term here" />
+  </form>
+</div>
+      </div>
+
+      <div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <ul>
+                <li class="toctree-l1"><a class="reference internal" href="../..">Home</a>
+                </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Getting Started</span></p>
+              <ul class="current">
+                  <li class="toctree-l1 current"><a class="reference internal current" href="#">Installation</a>
+    <ul class="current">
+    <li class="toctree-l2"><a class="reference internal" href="#prerequisites">Prerequisites</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#full-project-setup">Full project setup</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#manual-setup">Manual setup</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#running-aeroboard">Running Aeroboard</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#running-greptimedb">Running GreptimeDB</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#installing-optional-client-integrations">Installing optional client integrations</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#verifying-the-installation">Verifying the installation</a>
+    </li>
+    <li class="toctree-l2"><a class="reference internal" href="#documentation-dependencies">Documentation dependencies</a>
+    </li>
+    </ul>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../quickstart/">Quickstart</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">User Guide</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../../user-guide/core-concepts/">Core Concepts</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../user-guide/logging-data/">Logging Data</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../user-guide/integrations/">Framework Integrations</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../user-guide/dashboard/">Using the Dashboard</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Developer Guide</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../../developer-guide/architecture/">Architecture</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../developer-guide/repository-layout/">Repository Layout</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../developer-guide/development-workflow/">Development Workflow</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../developer-guide/storage-model/">Storage Model</a>
+                  </li>
+              </ul>
+              <p class="caption"><span class="caption-text">Reference</span></p>
+              <ul>
+                  <li class="toctree-l1"><a class="reference internal" href="../../reference/cli/">CLI</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../reference/python-sdk/">Python SDK</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../reference/http-api/">HTTP API</a>
+                  </li>
+                  <li class="toctree-l1"><a class="reference internal" href="../../reference/configuration/">Configuration</a>
+                  </li>
+              </ul>
+      </div>
+    </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap">
+      <nav class="wy-nav-top" role="navigation" aria-label="Mobile navigation menu">
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../..">Aeroboard</a>
+        
+      </nav>
+      <div class="wy-nav-content">
+        <div class="rst-content"><div role="navigation" aria-label="breadcrumbs navigation">
+  <ul class="wy-breadcrumbs">
+    <li><a href="../.." class="icon icon-home" aria-label="Docs"></a></li>
+          <li class="breadcrumb-item">Getting Started</li>
+      <li class="breadcrumb-item active">Installation</li>
+    <li class="wy-breadcrumbs-aside">
+    </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+            <div class="section" itemprop="articleBody">
+              
+                <h1 id="installation">Installation<a class="headerlink" href="#installation" title="Permanent link">&para;</a></h1>
+<p>This page covers the local setup needed to run Aeroboard and build its documentation.</p>
+<h2 id="prerequisites">Prerequisites<a class="headerlink" href="#prerequisites" title="Permanent link">&para;</a></h2>
+<p>Aeroboard spans Python, Rust, and a React frontend, so the full development setup needs tools from each stack.</p>
+<p>Required for the standard local workflow:</p>
+<ul>
+<li><code>uv</code> for Python dependency management and command execution.</li>
+<li>Python 3.9 or newer.</li>
+<li>Node.js and <code>npm</code> for the dashboard build.</li>
+<li>Rust and <code>cargo</code> for the server build.</li>
+</ul>
+<p>Optional depending on the storage mode you use:</p>
+<ul>
+<li>Docker and Docker Compose for GreptimeDB.</li>
+</ul>
+<h2 id="full-project-setup">Full project setup<a class="headerlink" href="#full-project-setup" title="Permanent link">&para;</a></h2>
+<p>The repository ships with a top-level setup script that installs Python dependencies through <code>uv</code>, builds the frontend bundle, and builds the Rust server.</p>
+<pre><code class="language-bash">chmod +x setup.sh
+./setup.sh
+</code></pre>
+<p>That script performs these steps:</p>
+<ol>
+<li><code>uv sync --extra examples --dev</code></li>
+<li><code>uv run aeroboard setup</code></li>
+<li><code>npm install &amp;&amp; npm run build</code> inside <code>aeroboard-web</code></li>
+<li><code>cargo build --release</code> inside <code>aeroboard-server</code></li>
+</ol>
+<h2 id="manual-setup">Manual setup<a class="headerlink" href="#manual-setup" title="Permanent link">&para;</a></h2>
+<p>If you prefer to run the steps yourself:</p>
+<pre><code class="language-bash">uv sync --extra examples --dev
+uv run aeroboard setup
+</code></pre>
+<p>The CLI setup command will rebuild both the frontend and the Rust server.</p>
+<h2 id="running-aeroboard">Running Aeroboard<a class="headerlink" href="#running-aeroboard" title="Permanent link">&para;</a></h2>
+<p>Start the HTTP server, WebSocket endpoint, and Arrow Flight ingestion server:</p>
+<pre><code class="language-bash">uv run aeroboard start
+</code></pre>
+<p>Default ports:</p>
+<ul>
+<li>HTTP dashboard and API: <code>3000</code></li>
+<li>Arrow Flight ingestion: <code>50051</code></li>
+</ul>
+<p>Useful variants:</p>
+<pre><code class="language-bash">uv run aeroboard start --storage filesystem --data-dir .aeroboard
+uv run aeroboard start --storage greptime
+uv run aeroboard start --storage live
+uv run aeroboard start --port 3100 --flight-port 51051
+</code></pre>
+<h2 id="running-greptimedb">Running GreptimeDB<a class="headerlink" href="#running-greptimedb" title="Permanent link">&para;</a></h2>
+<p>GreptimeDB is optional. Filesystem storage is the default and is usually the simplest local mode.</p>
+<p>If you want database-backed persistence:</p>
+<pre><code class="language-bash">uv run aeroboard db
+uv run aeroboard start --storage greptime
+</code></pre>
+<p>To stop the database:</p>
+<pre><code class="language-bash">uv run aeroboard stop-db
+</code></pre>
+<h2 id="installing-optional-client-integrations">Installing optional client integrations<a class="headerlink" href="#installing-optional-client-integrations" title="Permanent link">&para;</a></h2>
+<p>Some integrations depend on optional extras:</p>
+<ul>
+<li>Ray Tune example: <code>uv sync --extra ray --dev</code></li>
+<li>Lightning examples: included in the root project dependencies</li>
+</ul>
+<h2 id="verifying-the-installation">Verifying the installation<a class="headerlink" href="#verifying-the-installation" title="Permanent link">&para;</a></h2>
+<p>The CLI includes a status check:</p>
+<pre><code class="language-bash">uv run aeroboard status
+</code></pre>
+<p>That command checks:</p>
+<ul>
+<li>The HTTP API on port <code>3000</code></li>
+<li>The Flight endpoint on port <code>50051</code></li>
+<li>The GreptimeDB health endpoint on port <code>4000</code></li>
+</ul>
+<h2 id="documentation-dependencies">Documentation dependencies<a class="headerlink" href="#documentation-dependencies" title="Permanent link">&para;</a></h2>
+<p>The docs site is built with MkDocs and is configured for Read the Docs hosting.</p>
+<pre><code class="language-bash">pip install -r docs/requirements.txt
+mkdocs serve
+</code></pre>
+<p>If you already use <code>uv</code> for everything, you can also run MkDocs through the environment you manage yourself after installing the dependency there.</p>
+              
+            </div>
+          </div><footer>
+    <div class="rst-footer-buttons" role="navigation" aria-label="Footer Navigation">
+        <a href="../.." class="btn btn-neutral float-left" title="Home"><span class="icon icon-circle-arrow-left"></span> Previous</a>
+        <a href="../quickstart/" class="btn btn-neutral float-right" title="Quickstart">Next <span class="icon icon-circle-arrow-right"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <!-- Copyright etc -->
+  </div>
+
+  Built with <a href="https://www.mkdocs.org/">MkDocs</a> using a <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a> provided by <a href="https://readthedocs.org">Read the Docs</a>.
+</footer>
+          
+        </div>
+      </div>
+
+    </section>
+
+  </div>
+
+  <div class="rst-versions" role="note" aria-label="Versions">
+  <span class="rst-current-version" data-toggle="rst-current-version">
+    
+    
+      <span><a href="../.." style="color: #fcfcfc">&laquo; Previous</a></span>
+    
+    
+      <span><a href="../quickstart/" style="color: #fcfcfc">Next &raquo;</a></span>
+    
+  </span>
+</div>
+    <script src="../../js/jquery-3.6.0.min.js"></script>
+    <script>var base_url = "../..";</script>
+    <script src="../../js/theme_extra.js"></script>
+    <script src="../../js/theme.js"></script>
+      <script src="../../search/main.js"></script>
+    <script>
+        jQuery(function () {
+            SphinxRtdTheme.Navigation.enable(true);
+        });
+    </script>
+
+</body>
+</html>

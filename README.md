@@ -255,3 +255,31 @@ See the full runnable example in [examples/ray_tune_example.py](examples/ray_tun
 4. **Path B**: Rust pulls from broadcast -> Formats as `StreamWriter` binary bytes -> WebSockets `/ws/live`.
 5. React Frontend -> Pulls binary `ArrayBuffer` from WS -> Extract native `Float64Array`.
 6. `uPlot` React component -> Paints fast Canvas graphs natively at 60 FPS.
+
+---
+
+## Documentation
+
+The repository now includes a Read the Docs-compatible MkDocs site under `docs/`.
+
+Build or preview it locally with:
+
+```bash
+pip install -r docs/requirements.txt
+mkdocs serve
+```
+
+To generate the static site:
+
+```bash
+mkdocs build
+```
+
+The documentation is organized into:
+
+- Getting Started
+- User Guide
+- Developer Guide
+- Reference
+
+Read the Docs configuration lives in `.readthedocs.yaml`, and the MkDocs navigation is defined in `mkdocs.yml`.

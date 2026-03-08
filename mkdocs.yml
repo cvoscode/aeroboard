@@ -1,0 +1,36 @@
+site_name: Aeroboard
+site_description: Arrow-native telemetry platform for real-time ML experiment monitoring
+site_url: https://aeroboard.readthedocs.io/
+docs_dir: docs
+theme:
+  name: readthedocs
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Installation: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+  - User Guide:
+      - Core Concepts: user-guide/core-concepts.md
+      - Logging Data: user-guide/logging-data.md
+      - Framework Integrations: user-guide/integrations.md
+      - Using the Dashboard: user-guide/dashboard.md
+  - Developer Guide:
+      - Architecture: developer-guide/architecture.md
+      - Repository Layout: developer-guide/repository-layout.md
+      - Development Workflow: developer-guide/development-workflow.md
+      - Storage Model: developer-guide/storage-model.md
+  - Reference:
+      - CLI: reference/cli.md
+      - Python SDK: reference/python-sdk.md
+      - HTTP API: reference/http-api.md
+      - Configuration: reference/configuration.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - fenced_code
+  - tables
+  - toc:
+      permalink: true
