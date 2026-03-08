@@ -11,11 +11,13 @@ function formatTimestamp(tsMs: number): string {
 
 export function ImageTimelineViewer({ series }: ImageTimelineViewerProps) {
   const [index, setIndex] = useState(0);
+  const [followLatest, setFollowLatest] = useState(true);
 
   const clampedIndex = useMemo(() => {
     if (!series || series.frames.length === 0) return 0;
+    if (followLatest) return series.frames.length - 1;
     return Math.min(index, series.frames.length - 1);
-  }, [index, series]);
+  }, [followLatest, index, series]);
 
   if (!series || series.frames.length === 0) {
     return (
@@ -48,7 +50,10 @@ export function ImageTimelineViewer({ series }: ImageTimelineViewerProps) {
           max={Math.max(series.frames.length - 1, 0)}
           step={1}
           value={clampedIndex}
-          onChange={(event) => setIndex(Number(event.target.value))}
+          onChange={(event) => {
+            setFollowLatest(false);
+            setIndex(Number(event.target.value));
+          }}
           className="styled-slider"
         />
         <div className="image-slider-labels">

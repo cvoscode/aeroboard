@@ -8,7 +8,7 @@ interface ImagePanelProps {
 export default function ImagePanel({ series }: ImagePanelProps) {
   return (
     <div className="image-section">
-      <ImageTimelineViewer series={series} />
+      <ImageTimelineViewer key={series ? `${series.run_id}:${series.name}` : 'empty-image-series'} series={series} />
     </div>
   );
 }

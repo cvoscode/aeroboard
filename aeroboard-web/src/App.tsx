@@ -1,8 +1,8 @@
-import { lazy, Suspense, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import {
   Activity, List, Clock, RotateCcw, Hash,
   GripVertical, ChevronDown, ChevronRight, Sliders,
-  Maximize2, Layers, Search, Settings2, Columns, Trash2, Star
+  Maximize2, Layers, Search, Settings2, Columns, Trash2, Star, Sun, Moon
 } from 'lucide-react';
 import {
   DndContext, closestCenter, KeyboardSensor, PointerSensor,
@@ -31,6 +31,7 @@ interface SortableChartProps {
   id: string;
   groupKey: string;
   seriesData: { name: string; fullData: TimeSeriesData; color?: string }[];
+  theme: ThemeMode;
   xAxisType: XAxisType;
   smoothing: number;
   removeOutliers: boolean;
@@ -57,6 +58,9 @@ interface ExperimentGroup {
 }
 
 type DashboardTab = 'scalars' | 'images' | 'analysis';
+type ThemeMode = 'light' | 'dark';
+
+const THEME_STORAGE_KEY = 'aeroboard-theme';
 
 function parseRun(runId: string): RunEntry {
   const versionMatch = runId.match(/^(.*?)(?:-v(\d+))?$/);
@@ -74,7 +78,18 @@ function parseRun(runId: string): RunEntry {
   };
 }
 
-function SortableChart({ id, groupKey, seriesData, xAxisType, smoothing, removeOutliers, xRange, widthMode, revisionKey, onToggleCollapse, collapsed, favorite, onToggleFavorite }: SortableChartProps) {
+function getInitialTheme(): ThemeMode {
+  if (typeof window === 'undefined') return 'dark';
+
+  const savedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+  if (savedTheme === 'light' || savedTheme === 'dark') {
+    return savedTheme;
+  }
+
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function SortableChart({ id, groupKey, seriesData, theme, xAxisType, smoothing, removeOutliers, xRange, widthMode, revisionKey, onToggleCollapse, collapsed, favorite, onToggleFavorite }: SortableChartProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
 
   const style: React.CSSProperties = {
@@ -133,6 +148,7 @@ function SortableChart({ id, groupKey, seriesData, xAxisType, smoothing, removeO
             key={revisionKey}
             title={groupKey}
             seriesData={seriesData}
+            themeKey={theme}
             xAxisType={xAxisType}
             smoothing={smoothing}
             removeOutliers={removeOutliers}
@@ -187,7 +203,15 @@ export default function App() {
   const [selectedCompareHyperparameters, setSelectedCompareHyperparameters] = useState<string[]>([]);
   const [selectedCompareMetrics, setSelectedCompareMetrics] = useState<string[]>([]);
   const [selectedImageName, setSelectedImageName] = useState('');
+  const [runFilter, setRunFilter] = useState('');
   const [activeTab, setActiveTab] = useState<DashboardTab>('scalars');
+  const [theme, setTheme] = useState<ThemeMode>(() => getInitialTheme());
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+  }, [theme]);
 
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -232,6 +256,31 @@ export default function App() {
       })
       .sort((a, b) => a.experimentName.localeCompare(b.experimentName));
   }, [runs]);
+
+  const filteredExperimentGroups = useMemo(() => {
+    const query = runFilter.trim().toLowerCase();
+    if (!query) return experimentGroups;
+
+    return experimentGroups
+      .map((group) => {
+        const experimentMatches = group.experimentName.toLowerCase().includes(query);
+        const matchingRuns = experimentMatches
+          ? group.runs
+          : group.runs.filter((run) => {
+              const candidate = `${run.fullRunId} ${run.versionLabel}`.toLowerCase();
+              return candidate.includes(query);
+            });
+
+        if (matchingRuns.length === 0) return null;
+
+        return {
+          ...group,
+          runs: matchingRuns,
+          latestRunId: matchingRuns[0]?.fullRunId ?? group.latestRunId,
+        } satisfies ExperimentGroup;
+      })
+      .filter((group): group is ExperimentGroup => group !== null);
+  }, [experimentGroups, runFilter]);
 
   const bounds = useMemo(
     () => getGlobalXBounds(effectiveSelectedRuns, xAxisType),
@@ -283,13 +332,13 @@ export default function App() {
     return resolvedImageName ? getImageSeries(selectedRun, resolvedImageName) : null;
   }, [effectiveSelectedRuns, resolvedImageName, getImageSeries]);
 
-  // Effective window = user-set globalXRange, else full bounds
   const xRangeToUse = globalXRange;
+  const currentMode: 'single' | 'compare' = effectiveActiveTab === 'analysis' ? 'compare' : mode;
 
   const groupedMetrics = useMemo(() => {
     if (effectiveSelectedRuns.length === 0) return {};
     const groups: Record<string, string[]> = {};
-    if (mode === 'single') {
+    if (currentMode === 'single') {
       const run = effectiveSelectedRuns[0];
       getMetricsForRun(run).forEach(m => {
         const parts = m.split('/');
@@ -308,7 +357,7 @@ export default function App() {
       });
     }
     return groups;
-  }, [mode, effectiveSelectedRuns, getMetricsForRun]);
+  }, [currentMode, effectiveSelectedRuns, getMetricsForRun]);
 
   const groupKeys = useMemo(() => Object.keys(groupedMetrics).sort(), [groupedMetrics]);
 
@@ -326,7 +375,7 @@ export default function App() {
     return [...favorites, ...nonFavorites];
   }, [favoriteCharts, orderedMetricKeys]);
 
-  const singleRunRevision = mode === 'single' ? (effectiveSelectedRuns[0] ?? 'none') : 'compare';
+  const singleRunRevision = effectiveActiveTab === 'analysis' ? 'compare' : (mode === 'single' ? (effectiveSelectedRuns[0] ?? 'none') : 'compare');
 
   const isChartCollapsed = (groupKey: string) => collapsedCharts[groupKey] ?? !favoriteCharts[groupKey];
 
@@ -343,7 +392,8 @@ export default function App() {
   };
 
   const toggleRun = (runId: string) => {
-    if (mode === 'single') setSelectedRuns([runId]);
+    const currentMode = effectiveActiveTab === 'analysis' ? 'compare' : mode;
+    if (currentMode === 'single') setSelectedRuns([runId]);
     else setSelectedRuns(prev => prev.includes(runId) ? prev.filter(r => r !== runId) : [...prev, runId]);
   };
 
@@ -356,6 +406,18 @@ export default function App() {
     setSelected: React.Dispatch<React.SetStateAction<string[]>>
   ) => {
     setSelected((prev) => prev.includes(value) ? prev.filter((entry) => entry !== value) : [...prev, value]);
+  };
+
+  const toggleAllHyperparameters = () => {
+    setSelectedCompareHyperparameters((prev) =>
+      prev.length === availableHyperparameters.length ? [] : availableHyperparameters
+    );
+  };
+
+  const toggleAllMetrics = () => {
+    setSelectedCompareMetrics((prev) =>
+      prev.length === availableMetricSummaries.length ? [] : availableMetricSummaries
+    );
   };
 
   const changeMode = (m: 'single' | 'compare') => {
@@ -408,15 +470,6 @@ export default function App() {
     }
 
     if (effectiveActiveTab === 'analysis') {
-      if (mode !== 'compare') {
-        return (
-          <div className="comparison-card empty-state-card">
-            <h3>Hyperparameter Analysis</h3>
-            <p>Switch to compare mode to inspect the run table and parallel coordinates.</p>
-          </div>
-        );
-      }
-
       return (
         <Suspense fallback={<div className="comparison-card empty-state-card"><h3>Loading analysis view…</h3></div>}>
           <ComparePanels
@@ -463,7 +516,7 @@ export default function App() {
               if (!targets) return null;
 
               let seriesData: { name: string; fullData: TimeSeriesData; color?: string }[] = [];
-              if (mode === 'single') {
+              if (currentMode === 'single') {
                 const run = effectiveSelectedRuns[0];
                 seriesData = targets.map(m => {
                   const stage = m.split('/')[0];
@@ -484,7 +537,7 @@ export default function App() {
               return (
                 <SortableChart
                   key={groupKey} id={groupKey} groupKey={groupKey}
-                  seriesData={seriesData} xAxisType={xAxisType}
+                  seriesData={seriesData} theme={theme} xAxisType={xAxisType}
                   smoothing={smoothing} removeOutliers={removeOutliers}
                   xRange={xRangeToUse}
                   widthMode={widthMode}
@@ -492,7 +545,7 @@ export default function App() {
                   favorite={!!favoriteCharts[groupKey]}
                   onToggleFavorite={() => setFavoriteCharts(p => ({ ...p, [groupKey]: !p[groupKey] }))}
                   collapsed={isChartCollapsed(groupKey)}
-                        onToggleCollapse={() => setCollapsedCharts((p) => ({ ...p, [groupKey]: !isChartCollapsed(groupKey) }))}
+                  onToggleCollapse={() => setCollapsedCharts((p) => ({ ...p, [groupKey]: !isChartCollapsed(groupKey) }))}
                 />
               );
             })}
@@ -502,23 +555,45 @@ export default function App() {
     );
   };
 
+  const nextTheme = theme === 'dark' ? 'light' : 'dark';
+
   return (
     <div className="layout-root">
       <aside className="sidebar">
         <div className="sidebar-header">
-          <div className="logo-box"><Activity size={24} color="#00d2ff" /></div>
-          <h1 className="logo-text">Aeroboard</h1>
+          <div className="logo-box"><Activity size={24} /></div>
+          <div className="sidebar-brand-copy">
+            <h1 className="logo-text">Aeroboard</h1>
+          </div>
+          <button
+            type="button"
+            className="theme-toggle-btn"
+            onClick={() => setTheme(nextTheme)}
+            aria-label={`Switch to ${nextTheme} theme`}
+            title={`Switch to ${nextTheme} theme`}
+          >
+            {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+            <span className="theme-toggle-label">{theme === 'dark' ? 'Light' : 'Dark'}</span>
+          </button>
         </div>
 
         <div className="sidebar-section">
           <div className="section-header"><Layers size={14} /><h3>Mode</h3></div>
           <div className="mode-toggle">
-            <button className={mode === 'single' ? 'active' : ''} onClick={() => changeMode('single')}>
-              <Search size={14} /> Single
-            </button>
-            <button className={mode === 'compare' ? 'active' : ''} onClick={() => changeMode('compare')}>
-              <Columns size={14} /> Compare
-            </button>
+            {effectiveActiveTab === 'analysis' ? (
+              <button className={mode === 'compare' ? 'active' : ''} onClick={() => changeMode('compare')}>
+                <Columns size={14} /> Compare
+              </button>
+            ) : (
+              <>
+                <button className={mode === 'single' ? 'active' : ''} onClick={() => changeMode('single')}>
+                  <Search size={14} /> Single
+                </button>
+                <button className={mode === 'compare' ? 'active' : ''} onClick={() => changeMode('compare')}>
+                  <Columns size={14} /> Compare
+                </button>
+              </>
+            )}
           </div>
         </div>
 
@@ -529,8 +604,19 @@ export default function App() {
               <Trash2 size={13} /> {isDeletingRuns ? 'Deleting…' : 'Delete All Runs'}
             </button>
           </div>
+          <div className="run-filter-wrap">
+            <Search size={14} className="run-filter-icon" />
+            <input
+              className="run-filter-input"
+              type="search"
+              value={runFilter}
+              onChange={(event) => setRunFilter(event.target.value)}
+              placeholder="Filter by run name or version"
+              aria-label="Filter runs"
+            />
+          </div>
           <div className="run-list scrollbar-hidden">
-            {experimentGroups.map(group => {
+            {filteredExperimentGroups.map(group => {
               const isCollapsed = !!collapsedExperiments[group.experimentName];
               const selectedCount = group.runs.filter(run => effectiveSelectedRuns.includes(run.fullRunId)).length;
               return (
@@ -539,7 +625,7 @@ export default function App() {
                     <div className="experiment-group-title-wrap">
                       {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
                       <div className="experiment-group-copy">
-                        <span className="experiment-group-title">{group.experimentName}</span>
+                        <span className="experiment-group-title" title={group.experimentName}>{group.experimentName}</span>
                         <small className="experiment-group-meta">{group.runs.length} version{group.runs.length === 1 ? '' : 's'}{selectedCount ? ` • ${selectedCount} selected` : ''}</small>
                       </div>
                     </div>
@@ -550,11 +636,10 @@ export default function App() {
                     <div className="experiment-runs">
                       {group.runs.map(run => (
                         <div key={run.fullRunId} className={`run-card-wrapper ${effectiveSelectedRuns.includes(run.fullRunId) ? 'active' : ''}`}>
-                          <button className="run-card-btn" onClick={() => toggleRun(run.fullRunId)}>
+                          <button className="run-card-btn" onClick={() => toggleRun(run.fullRunId)} title={run.fullRunId} aria-label={run.fullRunId}>
                             <div className="run-card-indicator" style={{ backgroundColor: mergedRunColors[run.fullRunId] }} />
                             <div className="run-card-copy">
-                              <span className="run-name">{run.fullRunId}</span>
-                              <small className="run-version-label">{run.versionLabel}</small>
+                              <small className="run-version-label run-version-pill">{run.versionLabel}</small>
                             </div>
                           </button>
                           {mode === 'compare' && (
@@ -571,6 +656,7 @@ export default function App() {
               );
             })}
             {runs.length === 0 && <p className="empty-hint">No runs detected</p>}
+            {runs.length > 0 && filteredExperimentGroups.length === 0 && <p className="empty-hint">No runs match that filter.</p>}
           </div>
         </div>
 
@@ -624,6 +710,7 @@ export default function App() {
                     min={bounds[0]} max={bounds[1]}
                     value={globalXRange ?? bounds}
                     onChange={setGlobalXRange}
+                    xAxisType={xAxisType}
                   />
                   <button className="reset-range-btn" onClick={() => { setGlobalXRange(null); }}>
                     Reset Window
@@ -636,11 +723,22 @@ export default function App() {
           </div>
         )}
 
-        {effectiveActiveTab === 'analysis' && mode === 'compare' && (
+        {effectiveActiveTab === 'analysis' && (
           <div className="sidebar-section">
             <div className="section-header"><Columns size={14} /><h3>Comparison Axes</h3></div>
             <div className="control-card glass-card selector-card">
-              <label>Hyperparameters</label>
+              <div className="selector-header-row">
+                <label>Hyperparameters</label>
+                {availableHyperparameters.length > 0 && (
+                  <button
+                    type="button"
+                    className="selector-action-btn"
+                    onClick={toggleAllHyperparameters}
+                  >
+                    {selectedCompareHyperparameters.length === availableHyperparameters.length ? 'Clear All' : 'Select All'}
+                  </button>
+                )}
+              </div>
               <div className="chip-list">
                 {availableHyperparameters.map((key) => (
                   <button
@@ -654,7 +752,18 @@ export default function App() {
                 {availableHyperparameters.length === 0 && <p className="empty-hint">No hyperparameters logged yet.</p>}
               </div>
 
-              <label>Metrics</label>
+              <div className="selector-header-row">
+                <label>Metrics</label>
+                {availableMetricSummaries.length > 0 && (
+                  <button
+                    type="button"
+                    className="selector-action-btn"
+                    onClick={toggleAllMetrics}
+                  >
+                    {selectedCompareMetrics.length === availableMetricSummaries.length ? 'Clear All' : 'Select All'}
+                  </button>
+                )}
+              </div>
               <div className="chip-list">
                 {availableMetricSummaries.map((key) => (
                   <button
@@ -698,7 +807,12 @@ export default function App() {
           <div className="main-header-content">
             <div className="header-info">
               <h2 className="viewport-title">
-                {mode === 'single' ? (effectiveSelectedRuns[0] ?? 'No run selected') : `${effectiveSelectedRuns.length} Runs Compared`}
+                {effectiveActiveTab === 'analysis' 
+                  ? `${effectiveSelectedRuns.length} Runs Compared` 
+                  : effectiveSelectedRuns.length > 0 
+                    ? effectiveSelectedRuns[0] 
+                    : 'No run selected'
+                }
               </h2>
               <div className={`connection-badge ${connected ? 'is-live' : ''}`}>
                 <div className="pulse-dot" />

@@ -5,9 +5,10 @@ interface DualRangeSliderProps {
   max: number;
   value: [number, number];
   onChange: (range: [number, number]) => void;
+  xAxisType?: 'wall' | 'rel' | 'step';
 }
 
-export function DualRangeSlider({ min, max, value, onChange }: DualRangeSliderProps) {
+export function DualRangeSlider({ min, max, value, onChange, xAxisType = 'step' }: DualRangeSliderProps) {
   const trackRef = useRef<HTMLDivElement>(null);
   const dragging = useRef<'left' | 'right' | null>(null);
 
@@ -53,7 +54,12 @@ export function DualRangeSlider({ min, max, value, onChange }: DualRangeSliderPr
   const leftPct = toPercent(value[0]);
   const rightPct = toPercent(value[1]);
 
-  const fmt = (v: number) => {
+  const formatValue = (v: number, type: 'wall' | 'rel' | 'step'): string => {
+    if (type === 'wall') {
+      // For wall time, display as rounded integer to show time steps (0, 1, 2, ...)
+      return Math.round(v).toString();
+    }
+    // For rel and step modes, format based on value scale
     if (max > 10000) return v.toFixed(0);
     if (max > 100) return v.toFixed(1);
     return v.toFixed(2);
@@ -77,8 +83,8 @@ export function DualRangeSlider({ min, max, value, onChange }: DualRangeSliderPr
         />
       </div>
       <div className="dual-slider-labels">
-        <span>{fmt(value[0])}</span>
-        <span>{fmt(value[1])}</span>
+        <span>{formatValue(value[0], xAxisType)}</span>
+        <span>{formatValue(value[1], xAxisType)}</span>
       </div>
     </div>
   );

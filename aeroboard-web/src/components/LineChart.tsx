@@ -8,6 +8,7 @@ export type XAxisType = 'wall' | 'rel' | 'step';
 interface LineChartProps {
     title: string;
     seriesData: { name: string; fullData: TimeSeriesData; color?: string }[];
+    themeKey: 'light' | 'dark';
     xAxisType: XAxisType;
     smoothing?: number;
     removeOutliers?: boolean;
@@ -25,7 +26,7 @@ const xRelFormat = (v: number) => {
 };
 
 export function LineChart({
-    title, seriesData, xAxisType,
+    title, seriesData, themeKey, xAxisType,
     smoothing = 0, removeOutliers = false,
     xRange = null,
     height = 250
@@ -39,7 +40,21 @@ export function LineChart({
     const colorKey = seriesData.map(s => s.color ?? '').join(',');
     const hasSmoothingKey = smoothing > 0;
     const dataSignature = seriesData.map(s => `${s.name}:${s.fullData.count}`).join('|');
-    const axisRevisionKey = `${xAxisType}:${removeOutliers ? 'trim' : 'full'}`;
+    const axisRevisionKey = `${themeKey}:${xAxisType}:${removeOutliers ? 'trim' : 'full'}`;
+    const chartTheme = (() => {
+        if (typeof window === 'undefined') {
+            return {
+                axis: '#9ba1a6',
+                grid: 'rgba(255,255,255,0.05)',
+            };
+        }
+
+        const styles = getComputedStyle(document.documentElement);
+        return {
+            axis: styles.getPropertyValue('--plot-axis').trim() || '#9ba1a6',
+            grid: styles.getPropertyValue('--plot-grid').trim() || 'rgba(255,255,255,0.05)',
+        };
+    })();
 
     const processedData = useMemo(
         () => buildProcessedData(seriesData, xAxisType, smoothing, xRange),
@@ -119,16 +134,16 @@ export function LineChart({
             },
             axes: [
                 {
-                    stroke: '#9ba1a6',
-                    grid: { stroke: 'rgba(255,255,255,0.05)', width: 1 },
+                    stroke: chartTheme.axis,
+                    grid: { stroke: chartTheme.grid, width: 1 },
                     space: 50,
                     values: xAxisType !== 'wall'
                         ? (_u, vals) => vals.map(v => v == null ? '' : xAxisType === 'rel' ? xRelFormat(v) : v.toFixed(0))
                         : undefined
                 },
                 {
-                    stroke: '#9ba1a6',
-                    grid: { stroke: 'rgba(255,255,255,0.05)', width: 1 },
+                    stroke: chartTheme.axis,
+                    grid: { stroke: chartTheme.grid, width: 1 },
                     space: 40
                 }
             ],
@@ -188,7 +203,7 @@ export function LineChart({
             plotRef.current = null;
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [title, seriesData.length, colorKey, xAxisType, height, hasSmoothingKey, axisRevisionKey, processedData.alignedData, focusedRange.focusedYRange]);
+    }, [title, seriesData.length, colorKey, chartTheme.axis, chartTheme.grid, xAxisType, height, hasSmoothingKey, axisRevisionKey, processedData.alignedData, focusedRange.focusedYRange]);
 
     // ── Effect 2: Update data whenever filter/data changes ────────────────────
     useEffect(() => {

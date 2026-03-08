@@ -1,15 +1,133 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Outfit:wght@500;700;900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&family=Outfit:wght@500;700;900&display=swap');
 
 :root {
-  --bg-primary: #0a0a0f;
-  --bg-secondary: rgba(20, 20, 30, 0.6);
-  --bg-card: rgba(30, 30, 45, 0.4);
+  color-scheme: dark;
+  --bg-primary: #0a0a0b;
+  --bg-sidebar: #0f1115;
+  --bg-sidebar-gradient-start: #0f1115;
+  --bg-sidebar-gradient-end: #0b0d12;
+  --bg-card: rgba(255, 255, 255, 0.03);
+  --bg-overlay: #14181f;
+  --bg-page-glow-1: rgba(0, 210, 255, 0.12);
+  --bg-page-glow-2: rgba(0, 230, 118, 0.08);
+  --surface-contrast: rgba(0, 0, 0, 0.3);
+  --surface-card-strong: rgba(0, 0, 0, 0.2);
+  --surface-subtler: rgba(255, 255, 255, 0.015);
+  --surface-subtle: rgba(255, 255, 255, 0.03);
+  --surface-subtle-strong: rgba(255, 255, 255, 0.045);
+  --surface-muted: rgba(255, 255, 255, 0.04);
+  --surface-strong: rgba(255, 255, 255, 0.08);
+  --surface-stage: rgba(255, 255, 255, 0.02);
+  --surface-accent-soft: rgba(0, 210, 255, 0.1);
+  --surface-accent-strong: rgba(0, 210, 255, 0.12);
+  --surface-accent-selected: linear-gradient(135deg, rgba(0, 210, 255, 0.09), rgba(0, 230, 118, 0.05));
+  --surface-danger-soft: rgba(255, 76, 107, 0.08);
+  --surface-danger-strong: rgba(255, 76, 107, 0.14);
+  --surface-warning-soft: rgba(255, 235, 59, 0.09);
   --text-primary: #ffffff;
   --text-secondary: #9ba1a6;
-  --accent-primary: #6b4cff;
-  --accent-secondary: #00d2ff;
-  --panel-border: rgba(255, 255, 255, 0.05);
-  --success: #00e676;
+  --text-muted: #5e666c;
+  --text-on-accent: #00141b;
+  --text-danger: #ff8ea1;
+  --text-warning: #ffe866;
+  --run-name-color: #d9e2e7;
+  --run-version-pill-text: #c5cbd1;
+  --accent-primary: #00d2ff;
+  --accent-secondary: #00e676;
+  --accent-critical: #ff4c6b;
+  --panel-border: rgba(255, 255, 255, 0.08);
+  --panel-border-subtle: rgba(255, 255, 255, 0.05);
+  --panel-border-strong: rgba(255, 255, 255, 0.16);
+  --panel-border-accent: rgba(0, 210, 255, 0.3);
+  --panel-border-success: rgba(0, 230, 118, 0.2);
+  --panel-border-danger: rgba(255, 76, 107, 0.28);
+  --panel-border-danger-strong: rgba(255, 76, 107, 0.42);
+  --panel-border-warning: rgba(255, 235, 59, 0.32);
+  --panel-border-warning-strong: rgba(255, 235, 59, 0.42);
+  --sidebar-sheen: rgba(255, 255, 255, 0.02);
+  --sidebar-edge: rgba(255, 255, 255, 0.02);
+  --logo-gradient-start: #ffffff;
+  --shadow-main: 0 8px 32px 0 rgba(0, 0, 0, 0.5);
+  --shadow-card: 0 10px 30px rgba(0, 0, 0, 0.18);
+  --shadow-overlay: 0 24px 60px rgba(0, 0, 0, 0.8);
+  --shadow-overlay-ring: 0 0 0 1px rgba(255, 255, 255, 0.04);
+  --shadow-accent: 0 0 8px rgba(0, 210, 255, 0.5);
+  --shadow-accent-strong: 0 0 14px rgba(0, 210, 255, 0.7);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.12);
+  --plot-axis: #9ba1a6;
+  --plot-grid: rgba(255, 255, 255, 0.05);
+  --plot-selection: rgba(0, 210, 255, 0.12);
+  --plot-selection-border: rgba(0, 210, 255, 0.78);
+  --plot-selection-inset: rgba(255, 255, 255, 0.08);
+  --parallel-axis: rgba(255, 255, 255, 0.15);
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg-primary: #eef3f8;
+  --bg-sidebar: #f5f8fc;
+  --bg-sidebar-gradient-start: #fbfdff;
+  --bg-sidebar-gradient-end: #e8eef7;
+  --bg-card: rgba(255, 255, 255, 0.72);
+  --bg-overlay: #ffffff;
+  --bg-page-glow-1: rgba(0, 114, 245, 0.1);
+  --bg-page-glow-2: rgba(10, 160, 94, 0.08);
+  --surface-contrast: rgba(255, 255, 255, 0.72);
+  --surface-card-strong: rgba(255, 255, 255, 0.78);
+  --surface-subtler: rgba(19, 32, 59, 0.02);
+  --surface-subtle: rgba(19, 32, 59, 0.04);
+  --surface-subtle-strong: rgba(19, 32, 59, 0.07);
+  --surface-muted: rgba(19, 32, 59, 0.06);
+  --surface-strong: rgba(19, 32, 59, 0.1);
+  --surface-stage: rgba(255, 255, 255, 0.84);
+  --surface-accent-soft: rgba(0, 114, 245, 0.12);
+  --surface-accent-strong: rgba(0, 114, 245, 0.1);
+  --surface-accent-selected: linear-gradient(135deg, rgba(0, 114, 245, 0.14), rgba(10, 160, 94, 0.08));
+  --surface-danger-soft: rgba(216, 58, 98, 0.1);
+  --surface-danger-strong: rgba(216, 58, 98, 0.14);
+  --surface-warning-soft: rgba(214, 158, 0, 0.12);
+  --text-primary: #13203b;
+  --text-secondary: #51627d;
+  --text-muted: #72819a;
+  --text-on-accent: #ffffff;
+  --text-danger: #b42349;
+  --text-warning: #8f6a00;
+  --run-name-color: #1d2943;
+  --run-version-pill-text: #465671;
+  --accent-primary: #0072f5;
+  --accent-secondary: #0aa05e;
+  --accent-critical: #d83a62;
+  --panel-border: rgba(19, 32, 59, 0.12);
+  --panel-border-subtle: rgba(19, 32, 59, 0.08);
+  --panel-border-strong: rgba(19, 32, 59, 0.2);
+  --panel-border-accent: rgba(0, 114, 245, 0.28);
+  --panel-border-success: rgba(10, 160, 94, 0.22);
+  --panel-border-danger: rgba(216, 58, 98, 0.22);
+  --panel-border-danger-strong: rgba(216, 58, 98, 0.32);
+  --panel-border-warning: rgba(214, 158, 0, 0.28);
+  --panel-border-warning-strong: rgba(214, 158, 0, 0.34);
+  --sidebar-sheen: rgba(255, 255, 255, 0.7);
+  --sidebar-edge: rgba(255, 255, 255, 0.5);
+  --logo-gradient-start: #13203b;
+  --shadow-main: 0 18px 40px rgba(34, 54, 87, 0.12);
+  --shadow-card: 0 12px 30px rgba(34, 54, 87, 0.08);
+  --shadow-overlay: 0 20px 48px rgba(34, 54, 87, 0.18);
+  --shadow-overlay-ring: 0 0 0 1px rgba(19, 32, 59, 0.08);
+  --shadow-accent: 0 0 0 4px rgba(0, 114, 245, 0.12);
+  --shadow-accent-strong: 0 0 0 6px rgba(0, 114, 245, 0.18);
+  --scrollbar-thumb: rgba(19, 32, 59, 0.18);
+  --plot-axis: #51627d;
+  --plot-grid: rgba(19, 32, 59, 0.12);
+  --plot-selection: rgba(0, 114, 245, 0.12);
+  --plot-selection-border: rgba(0, 114, 245, 0.55);
+  --plot-selection-inset: rgba(255, 255, 255, 0.5);
+  --parallel-axis: rgba(19, 32, 59, 0.18);
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
 }
 
 * {
@@ -22,13 +140,21 @@ body {
   font-family: 'Inter', sans-serif;
   background-color: var(--bg-primary);
   background-image: 
-    radial-gradient(circle at 15% 50%, rgba(107, 76, 255, 0.15) 0%, transparent 50%),
-    radial-gradient(circle at 85% 30%, rgba(0, 210, 255, 0.1) 0%, transparent 50%);
+    radial-gradient(circle at 15% 50%, var(--bg-page-glow-1) 0%, transparent 50%),
+    radial-gradient(circle at 85% 30%, var(--bg-page-glow-2) 0%, transparent 50%);
   color: var(--text-primary);
   min-height: 100vh;
   overflow-x: hidden;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
 }
 
 /* Glassmorphism Classes */
@@ -38,7 +164,7 @@ body {
   -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--panel-border);
   border-radius: 16px;
-  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-main);
 }
 
 .gradient-text {
@@ -84,7 +210,7 @@ body {
 }
 
 .u-grid {
-  stroke: rgba(255, 255, 255, 0.05) !important;
+  stroke: var(--plot-grid) !important;
 }
 
 .u-wrap {
