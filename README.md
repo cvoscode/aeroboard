@@ -11,11 +11,37 @@ Aeroboard is a high-performance, real-time machine learning training evaluation 
 
 ---
 
-## 🚀 Quick Start (One Command)
+## 🚀 Installation
 
-To install the Aeroboard CLI and build all components (Web + Server):
+Aeroboard is published as a Python package and uses `uv` cleanly in three modes:
 
-First, install `uv`. Then run:
+### PyPI CLI install
+
+```bash
+uv tool install aeroboard
+```
+
+### PyPI project environment install
+
+```bash
+uv venv
+uv pip install aeroboard
+```
+
+### GitHub install
+
+```bash
+uv tool install git+https://github.com/cvoscode/aeroboard.git@v0.1.0
+```
+
+The Python package is pure Python. On the first `aeroboard setup` or `aeroboard start`, the CLI downloads two matching release artifacts for the installed version:
+
+1. A platform-specific Rust server binary.
+2. A platform-independent web bundle.
+
+If you are working from a source checkout instead of an installed release, use the developer bootstrap below to build everything locally with `uv`, `npm`, and `cargo`.
+
+### Developer bootstrap from this repository
 
 ```bash
 chmod +x setup.sh
@@ -24,24 +50,17 @@ chmod +x setup.sh
 
 This will:
 1. Create or update the local `.venv` with `uv`.
-2. Install the `aeroboard` Python package, dev dependencies, and example dependencies.
-3. Build the React frontend (`npm run build`).
-4. Build the Rust server (`cargo build --release`).
-
-If you prefer the manual flow, use `uv` directly:
-
-```bash
-uv sync --extra examples --dev
-uv run aeroboard setup
-```
-
-This keeps Python environment creation, dependency resolution, and command execution under `uv`.
+2. Install the `aeroboard` package, dev dependencies, and example dependencies.
+3. Build the React frontend locally.
+4. Build the Rust server locally.
 
 ---
 
 ## 🏎️ Running Aeroboard
 
-Once setup is complete, you can manage everything via `uv run aeroboard`:
+For a project-local environment, use `uv run aeroboard ...`. For a tool install, run `aeroboard ...` directly.
+
+Once setup is complete, you can manage everything via the CLI:
 
 ### 1. Start the Dashboard (and Server)
 ```bash
@@ -63,9 +82,20 @@ If you want persistence, ensure Docker is running and execute:
 uv run aeroboard db
 ```
 
+The CLI manages a dedicated `aeroboard-greptimedb` container and named Docker volume, so it works the same from PyPI installs and source checkouts.
+
 ### 3. Run Python tests
 ```bash
 uv run pytest
+```
+
+### 4. Force a local source build
+
+When you want to rebuild the frontend and Rust server from the checked out repository instead of using release artifacts:
+
+```bash
+uv run aeroboard setup --build-from-source
+uv run aeroboard start --build-from-source
 ```
 
 ---

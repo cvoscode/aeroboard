@@ -1,16 +1,21 @@
-"""
-CLI commands for Aeroboard.
+"""CLI commands for Aeroboard."""
 
-This module provides the command-line interface for:
-- Building the frontend and server
-- Starting the Aeroboard server
-- Managing the GreptimeDB instance
-"""
+from __future__ import annotations
 
-import subprocess
 import os
+import subprocess
 import sys
+
 import click
+
+from aeroboard_client.runtime import (
+    RuntimeAssetError,
+    ensure_server_binary,
+    ensure_web_dist,
+    release_tag,
+    start_greptime_container,
+    stop_greptime_container,
+)
 
 
 @click.group()
@@ -24,75 +29,51 @@ def main():
     pass
 
 
-def _project_root() -> str:
-    """
-    Get the project root directory.
-
-    Returns:
-        The absolute path to the project root directory.
-    """
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-
-
-def _build_frontend(root_dir: str) -> None:
-    """
-    Build the Aeroboard web frontend.
-
-    Args:
-        root_dir: The root directory of the project.
-
-    Raises:
-        SystemExit: If the web directory is not found.
-    """
-    web_dir = os.path.join(root_dir, "aeroboard-web")
-    click.echo("--- 🏗️ Building Aeroboard Web Frontend ---")
-    if os.path.exists(web_dir):
-        click.echo(f"Installing dependencies and building frontend...")
-        subprocess.run(["npm", "install"], cwd=web_dir, check=True, capture_output=True)
-        subprocess.run(["npm", "run", "build"], cwd=web_dir, check=True, capture_output=True)
-        click.echo("✅ Web frontend built successfully.")
-        return
-
-    click.echo(f"Error: web directory not found at {web_dir}", err=True)
-    sys.exit(1)
-
-
-def _build_server(root_dir: str) -> None:
-    """
-    Build the Aeroboard Rust server.
-
-    Args:
-        root_dir: The root directory of the project.
-
-    Raises:
-        SystemExit: If the server directory is not found.
-    """
-    server_dir = os.path.join(root_dir, "aeroboard-server")
-    click.echo("\n--- 🦀 Building Aeroboard Rust Server ---")
-    if os.path.exists(server_dir):
-        subprocess.run(["cargo", "build", "--release"], cwd=server_dir, check=True, capture_output=True)
-        click.echo("✅ Rust server built successfully.")
-        return
-
-    click.echo(f"Error: server directory not found at {server_dir}", err=True)
-    sys.exit(1)
+def _prepare_runtime_assets(build_from_source: bool, force_download: bool) -> tuple[str, str]:
+    try:
+        web_dist_dir = ensure_web_dist(
+            prefer_local_build=build_from_source,
+            force_download=force_download,
+            reporter=click.echo,
+        )
+        binary_path = ensure_server_binary(
+            prefer_local_build=build_from_source,
+            force_download=force_download,
+            reporter=click.echo,
+        )
+    except RuntimeAssetError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        click.echo(
+            f"Aeroboard {release_tag()} needs release artifacts or a local Rust/Node toolchain.",
+            err=True,
+        )
+        sys.exit(1)
+    return str(binary_path), str(web_dist_dir)
 
 
 @main.command()
-def setup():
+@click.option(
+    "--build-from-source",
+    is_flag=True,
+    help="Build the frontend and server locally instead of downloading release artifacts.",
+)
+@click.option(
+    "--force-download",
+    is_flag=True,
+    help="Redownload the packaged runtime artifacts even when local assets exist.",
+)
+def setup(build_from_source, force_download):
     """
-    Build the frontend and prepare the server.
+    Prepare the Aeroboard runtime assets.
 
-    This command:
-    1. Builds the web frontend using npm
-    2. Builds the Rust server using cargo
-
-    After running this command, you can use 'aeroboard start' to run the server.
+    By default this downloads the prebuilt web bundle and platform-specific server
+    binary from the matching GitHub release. In a source checkout you can opt into
+    a full local build with --build-from-source.
     """
-    root_dir = _project_root()
-    _build_frontend(root_dir)
-    _build_server(root_dir)
-    click.echo("\n✅ Setup complete! You can now run 'aeroboard start'")
+    binary_path, web_dist_dir = _prepare_runtime_assets(build_from_source, force_download)
+    click.echo(f"✅ Server binary ready at {binary_path}")
+    click.echo(f"✅ Web bundle ready at {web_dist_dir}")
+    click.echo("\nRun 'aeroboard start' to launch the dashboard.")
 
 
 @main.command()
@@ -110,7 +91,17 @@ def setup():
     default=None,
     help="Filesystem data directory used when storage=filesystem",
 )
-def start(port, flight_port, storage, data_dir):
+@click.option(
+    "--build-from-source",
+    is_flag=True,
+    help="Prefer local npm/cargo builds when running from a source checkout.",
+)
+@click.option(
+    "--force-download",
+    is_flag=True,
+    help="Refresh the downloaded runtime artifacts before starting the server.",
+)
+def start(port, flight_port, storage, data_dir, build_from_source, force_download):
     """
     Start the Aeroboard server and web UI.
 
@@ -120,19 +111,8 @@ def start(port, flight_port, storage, data_dir):
         storage: Storage backend - 'filesystem', 'greptime', or 'live' (default: filesystem)
         data_dir: Data directory for filesystem storage
     """
-    root_dir = _project_root()
-    server_dir = os.path.join(root_dir, "aeroboard-server")
-    binary_path = os.path.join(server_dir, "target", "release", "aeroboard")
-
     click.echo("--- 🚀 Starting Aeroboard Server ---")
-    
-    # Build before starting
-    _build_frontend(root_dir)
-    _build_server(root_dir)
-
-    if not os.path.exists(binary_path):
-        click.echo("Error: Release binary not found after build.", err=True)
-        sys.exit(1)
+    binary_path, web_dist_dir = _prepare_runtime_assets(build_from_source, force_download)
 
     click.echo(f"📍 HTTP UI:     http://localhost:{port}")
     click.echo(f"📍 Flight API:  grpc://localhost:{flight_port}")
@@ -143,19 +123,14 @@ def start(port, flight_port, storage, data_dir):
     env["AEROBOARD_HTTP_PORT"] = str(port)
     env["AEROBOARD_FLIGHT_PORT"] = str(flight_port)
     env["AEROBOARD_STORAGE"] = storage.lower()
+    env["AEROBOARD_WEB_DIST_DIR"] = web_dist_dir
     if data_dir:
         env["AEROBOARD_DATA_DIR"] = os.path.abspath(data_dir)
-    
+
     try:
-        result = subprocess.run([binary_path], cwd=server_dir, env=env, check=False)
+        result = subprocess.run([binary_path], cwd=os.path.dirname(binary_path), env=env, check=False)
         if result.returncode != 0:
             click.echo(f"Error: Aeroboard server exited with code {result.returncode}", err=True)
-            sys.exit(result.returncode)
-    except FileNotFoundError:
-        click.echo("⚠️ Release binary not found, falling back to 'cargo run'...")
-        result = subprocess.run(["cargo", "run", "--release"], cwd=server_dir, env=env, check=False)
-        if result.returncode != 0:
-            click.echo(f"Error: Aeroboard cargo server exited with code {result.returncode}", err=True)
             sys.exit(result.returncode)
     except KeyboardInterrupt:
         click.echo("\n👋 Shutting down...")
@@ -165,25 +140,27 @@ def start(port, flight_port, storage, data_dir):
 @click.option("--greptime-image", default="greptime/greptimedb:latest", help="GreptimeDB Docker image")
 def db(greptime_image):
     """
-    Start GreptimeDB via Docker Compose.
+    Start GreptimeDB in Docker.
 
     This command starts the GreptimeDB instance used for database-backed storage.
     Use 'aeroboard stop-db' to stop the database.
     """
-    root_dir = _project_root()
     click.echo("--- 🗄️ Starting GreptimeDB ---")
     click.echo(f"Image: {greptime_image}")
-    subprocess.run(["docker-compose", "up", "-d"], cwd=root_dir, check=True, capture_output=True)
+    subprocess.run(["docker", "info"], check=True, capture_output=True)
+    start_greptime_container(greptime_image, reporter=click.echo)
     click.echo("✅ GreptimeDB is running.")
 
 
 @main.command()
 def stop_db():
-    """Stop GreptimeDB via Docker Compose."""
-    root_dir = _project_root()
+    """Stop the managed GreptimeDB Docker container."""
     click.echo("--- ⏸️ Stopping GreptimeDB ---")
-    subprocess.run(["docker-compose", "stop"], cwd=root_dir, check=True, capture_output=True)
-    click.echo("✅ GreptimeDB stopped.")
+    stopped = stop_greptime_container(reporter=click.echo)
+    if stopped:
+        click.echo("✅ GreptimeDB stopped.")
+    else:
+        click.echo("ℹ️ GreptimeDB container was not running.")
 
 
 @main.command()
@@ -240,19 +217,17 @@ def status(run_id=None):
 
 @main.command()
 @click.argument("run_id", required=False)
-@click.option("--no-build", is_flag=True, help="Skip building")
+@click.option("--no-build", is_flag=True, help="Skip preparing runtime assets before checking the run")
 def check_run(run_id=None, no_build=False):
     """
     Check the status of a specific run.
 
     Args:
         run_id: The run ID to check (or latest run if not specified)
-        no_build: Skip building the project first
+        no_build: Skip preparing runtime assets first
     """
     if not no_build:
-        root_dir = _project_root()
-        _build_frontend(root_dir)
-        _build_server(root_dir)
+        _prepare_runtime_assets(build_from_source=False, force_download=False)
     
     if run_id is None:
         # Get latest run ID from API

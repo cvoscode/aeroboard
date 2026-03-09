@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -12,20 +12,29 @@ authors = [
   { name="Aeroboard Team" }
 ]
 dependencies = [
-    "pyarrow",
-    "requests",
-    "click",
-    "pillow",
-    "matplotlib>=3.9.4",
-    "torch>=2.8.0",
-    "lightning>=2.6.0",
+  "click>=8.1",
+  "pillow>=10.0.0",
+  "pyarrow>=18.0.0",
+  "requests>=2.32.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/cvoscode/aeroboard"
+Repository = "https://github.com/cvoscode/aeroboard"
+Issues = "https://github.com/cvoscode/aeroboard/issues"
+Releases = "https://github.com/cvoscode/aeroboard/releases"
 
 [project.optional-dependencies]
 examples = [
-  "matplotlib",
-    "torch",
-    "lightning",
+  "lightning>=2.6.0",
+  "matplotlib>=3.9.4",
+  "torch>=2.8.0",
+]
+lightning = [
+  "lightning>=2.6.0",
+]
+torch = [
+  "torch>=2.8.0",
 ]
 ray = [
     "ray[tune]",
@@ -36,6 +45,16 @@ aeroboard = "aeroboard_client.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["aeroboard-client/src/aeroboard_client"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/.github/workflows",
+  "/BUILDING.md",
+  "/README.md",
+  "/aeroboard-client/src/aeroboard_client",
+  "/setup.sh",
+  "/tests",
+]
 
 [tool.hatch.metadata]
 allow-direct-references = true

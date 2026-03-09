@@ -12,7 +12,8 @@ uv sync --extra examples --dev
 
 echo "📦 Setting up Web and Server components..."
 # Use uv run so the CLI executes inside the managed uv environment.
-uv run aeroboard setup
+# Dev setup prefers local builds so changes to the Rust server and frontend are picked up.
+uv run aeroboard setup --build-from-source
 
 echo ""
 echo "✅ All set! To start Aeroboard, run:"

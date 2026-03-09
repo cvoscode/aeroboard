@@ -21,6 +21,7 @@ from aeroboard_client.client import (
     AeroboardClientError,
     FlightConnectionError,
 )
+from aeroboard_client._version import __version__
 
 _default_client: AeroboardClient | None = None
 
@@ -75,6 +76,7 @@ def flush() -> None:
         _default_client.flush()
 
 __all__ = [
+    "__version__",
     "AeroboardClient",
     "AeroboardLightningLogger",
     "AeroboardRayTuneLoggerCallback",
