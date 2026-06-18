@@ -73,13 +73,15 @@ impl FlightService for AeroboardFlightServer {
         request: Request<Streaming<FlightData>>,
     ) -> Result<Response<Self::DoPutStream>, Status> {
         let mut stream = request.into_inner();
-
         let t_junction = self.t_junction.clone();
-        
-        // Channel for returning PutResult to the client
+
+        // Channel for returning PutResult to the client.
         let (tx, rx) = mpsc::channel(2);
 
-        tokio::spawn(async move {
+        // Track the spawned task so we can detect if it dies unexpectedly (panic or error
+        // before sending PutResult). If the task panics, joining returns an Err and we
+        // return an error to the client rather than hanging.
+        let worker_handle = tokio::spawn(async move {
             use arrow_flight::utils::flight_data_to_arrow_batch;
             use arrow::datatypes::Schema;
 
@@ -93,12 +95,11 @@ impl FlightService for AeroboardFlightServer {
                 }
 
                 if msg.data_header.is_empty() {
-                    // This could be app_metadata or something, but usually a put stream starts with Schema.
                     continue;
                 }
-                
+
                 let message: arrow::ipc::Message<'_> = arrow::ipc::root_as_message(&msg.data_header).unwrap();
-                
+
                 match message.header_type() {
                     arrow::ipc::MessageHeader::Schema => {
                         let ipc_schema = message.header_as_schema().unwrap();
@@ -108,24 +109,18 @@ impl FlightService for AeroboardFlightServer {
                     arrow::ipc::MessageHeader::DictionaryBatch => {
                         let _batch = message.header_as_dictionary_batch().unwrap();
                         if let Some(ref schem) = schema {
-                            arrow_flight::utils::flight_data_to_arrow_batch(
+                            let _ = arrow_flight::utils::flight_data_to_arrow_batch(
                                 &msg,
                                 schem.clone(),
-                                &dictionaries_by_id
-                            ).unwrap();
+                                &dictionaries_by_id,
+                            );
                         }
                     }
                     arrow::ipc::MessageHeader::RecordBatch => {
                         if let Some(ref schem) = schema {
-                            match flight_data_to_arrow_batch(
-                                &msg,
-                                schem.clone(),
-                                &dictionaries_by_id
-                            ) {
+                            match flight_data_to_arrow_batch(&msg, schem.clone(), &dictionaries_by_id) {
                                 Ok(batch) => {
-                                    // Successfully decoded an Arrow RecordBatch.
                                     tracing::debug!("Received RecordBatch with {} rows", batch.num_rows());
-                                    // Ship it to the T-Junction!
                                     let batch = Arc::new(batch);
                                     let kind = if declared_kind == TelemetryKind::Unknown {
                                         TelemetryKind::from_batch(&batch)
@@ -135,7 +130,7 @@ impl FlightService for AeroboardFlightServer {
                                     let _ = t_junction.publish(Arc::new(TelemetryBatch::new(kind, batch)));
                                 }
                                 Err(e) => {
-                                    eprintln!("Error decoding batch: {}", e);
+                                    tracing::error!("Error decoding batch: {}", e);
                                 }
                             }
                         }
@@ -143,10 +138,22 @@ impl FlightService for AeroboardFlightServer {
                     _ => {}
                 }
             }
-            
-            // Sending empty app_metadata signals completion for DoPut
+
+            // Signal completion so the client receives PutResult.
             let _ = tx.send(Ok(PutResult { app_metadata: vec![].into() })).await;
         });
+
+        // Ensure the worker task completes (or panics) before we return the response stream.
+        // If the handle returns Err (panic), propagate an error to the client instead of
+        // letting the stream hang.
+        match worker_handle.await {
+            Ok(()) => {} // task completed normally; PutResult was or will be sent
+            Err(_) => {
+                // Join error — the worker task panicked or was cancelled before sending PutResult.
+                // Return an error to the client rather than letting the response stream hang.
+                return Err(Status::internal("Worker task panicked during batch ingestion"));
+            }
+        }
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }

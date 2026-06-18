@@ -1,18 +1,23 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ImageSeries } from '../hooks/useAeroboard';
 
 interface ImageTimelineViewerProps {
   series: ImageSeries | null;
+  onRequestFrame: (runId: string, name: string, tsMs: number) => Promise<void>;
 }
 
 function formatTimestamp(tsMs: number): string {
   return new Date(tsMs).toLocaleString();
 }
 
-export function ImageTimelineViewer({ series }: ImageTimelineViewerProps) {
+export function ImageTimelineViewer({ series, onRequestFrame }: ImageTimelineViewerProps) {
   const [index, setIndex] = useState(0);
   const [followLatest, setFollowLatest] = useState(true);
+  const [frameError, setFrameError] = useState<string | null>(null);
 
+  // `series` is included intentionally — it is the ImageSeries object reference, so any
+  // new frame appended by the WS ingestion will trigger a recalculation to show the latest
+  // frame when followLatest=true. The `frames.length` guard inside the memo handles emptiness.
   const clampedIndex = useMemo(() => {
     if (!series || series.frames.length === 0) return 0;
     if (followLatest) return series.frames.length - 1;
@@ -29,7 +34,27 @@ export function ImageTimelineViewer({ series }: ImageTimelineViewerProps) {
   }
 
   const frame = series.frames[clampedIndex];
-  const dataUrl = `data:image/${frame.format};base64,${frame.image_base64}`;
+  const dataUrl = frame.image_base64 ? `data:image/${frame.format};base64,${frame.image_base64}` : null;
+
+  useEffect(() => {
+    if (frame.image_base64) return;
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        setFrameError(null);
+        await onRequestFrame(frame.run_id, frame.name, frame.ts_ms);
+      } catch (error) {
+        if (!cancelled) {
+          setFrameError(error instanceof Error ? error.message : "Failed to load frame");
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [frame.image_base64, frame.name, frame.run_id, frame.ts_ms, onRequestFrame]);
 
   return (
     <div className="comparison-card image-viewer-card">
@@ -41,7 +66,14 @@ export function ImageTimelineViewer({ series }: ImageTimelineViewerProps) {
         <span className="image-time-pill">{formatTimestamp(frame.ts_ms)}</span>
       </div>
       <div className="image-viewer-stage">
-        <img src={dataUrl} alt={`${series.name} at ${formatTimestamp(frame.ts_ms)}`} className="image-viewer-frame" />
+        {dataUrl ? (
+          <img src={dataUrl} alt={`${series.name} at ${formatTimestamp(frame.ts_ms)}`} className="image-viewer-frame" />
+        ) : (
+          <div className="empty-state-card">
+            <h3>Loading frame…</h3>
+            <p>{frameError ?? "Fetching persisted image bytes for the selected timestamp."}</p>
+          </div>
+        )}
       </div>
       <div className="image-slider-wrap">
         <input

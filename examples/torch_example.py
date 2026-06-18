@@ -4,10 +4,11 @@ import torch.optim as optim
 import aeroboard_client as aeroboard
 import time
 from PIL import Image
+from _config import get_example_flight_url
 
 # 1. Initialize Aeroboard Client
 print("Initializing Aeroboard Client...")
-client = aeroboard.init(run_id="torch_hparams_images", url="grpc://localhost:50051", batch_size=20)
+client = aeroboard.init(run_id="torch_hparams_images", url=get_example_flight_url(), batch_size=20)
 client.log_hyperparameters({
     "model": "mlp",
     "input_size": 10,

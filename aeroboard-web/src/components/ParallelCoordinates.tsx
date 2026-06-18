@@ -53,6 +53,9 @@ export function ParallelCoordinates({ runs, selectedHyperparameters, selectedMet
 
   const ranges = usableAxes.map((axis) => {
     const values = runs.map((run) => axis.getValue(run)).filter((value): value is number => value !== null);
+    if (values.length === 0) {
+      return { min: 0, max: 1 };
+    }
     const min = Math.min(...values);
     const max = Math.max(...values);
     return { min, max: max === min ? max + 1 : max };

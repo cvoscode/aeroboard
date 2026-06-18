@@ -4,6 +4,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 
 use crate::app_state::AppState;
+use crate::storage::{HistoryQueryOptions, ImageFramePayload, ImageFrameQuery, ImageQueryOptions};
 
 /// Standard history query parameters.
 /// 
@@ -33,6 +34,30 @@ pub struct HistoryQuery {
     pub end_ms: Option<i64>,
     pub limit: Option<usize>,
     pub cursor: Option<usize>,
+    pub include_summaries: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ImageHistoryQuery {
+    pub run_id: Option<String>,
+    pub metric: Option<String>,
+    pub start_ms: Option<i64>,
+    pub end_ms: Option<i64>,
+    pub limit: Option<usize>,
+    pub cursor: Option<usize>,
+    pub include_data: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImageFrameContentQuery {
+    pub run_id: String,
+    pub name: String,
+    pub ts_ms: i64,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct RunSummaryQuery {
+    pub run_id: Option<String>,
 }
 
 /// Response from /api/history endpoint.
@@ -87,7 +112,8 @@ pub struct ImageHistoryPoint {
     pub run_id: String,
     pub name: String,
     pub format: String,
-    pub image_base64: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_base64: Option<String>,
 }
 
 /// Summary of hyperparameters for a run.
@@ -113,6 +139,22 @@ pub struct RunSummary {
     pub run_id: String,
     pub hyperparameters: Vec<HyperparameterEntry>,
     pub metric_summaries: Vec<MetricSummary>,
+}
+
+#[derive(Serialize)]
+pub struct RunSummariesResponse {
+    pub run_summaries: Vec<RunSummary>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ImageFrameContentResponse {
+    pub run_id: String,
+    pub name: String,
+    pub ts_ms: i64,
+    pub format: String,
+    pub image_base64: String,
+    pub error: Option<String>,
 }
 
 /// Request payload for /api/runs/resolve endpoint.
@@ -262,7 +304,7 @@ pub fn apply_history_filters(rows: Vec<HistoryPoint>, query: &HistoryQuery) -> V
 }
 
 /// Apply image history filters (same semantics as scalar filters).
-pub fn apply_image_filters(rows: Vec<ImageHistoryPoint>, query: &HistoryQuery) -> Vec<ImageHistoryPoint> {
+pub fn apply_image_filters(rows: Vec<ImageHistoryPoint>, query: &ImageHistoryQuery) -> Vec<ImageHistoryPoint> {
     let run_ids = csv_set(query.run_id.as_deref());
     let metrics = csv_set(query.metric.as_deref());
 
@@ -287,6 +329,16 @@ pub fn filter_hyperparameters(
         .collect()
 }
 
+pub fn csv_set(value: Option<&str>) -> BTreeSet<String> {
+    value
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 /// Page a vector of items based on cursor and limit.
 ///
 /// Cursor-based pagination returns items at positions [cursor, cursor + limit)
@@ -306,15 +358,27 @@ pub fn page_vec<T>(rows: Vec<T>, cursor: Option<usize>, limit: Option<usize>) ->
     (paged, next_cursor)
 }
 
-/// Parse comma-separated string into a BTreeSet, filtering empty strings.
-fn csv_set(value: Option<&str>) -> BTreeSet<String> {
-    value
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
+pub fn build_history_query_options(query: &HistoryQuery) -> HistoryQueryOptions {
+    HistoryQueryOptions {
+        run_ids: csv_set(query.run_id.as_deref()),
+        metrics: csv_set(query.metric.as_deref()),
+        start_ms: query.start_ms,
+        end_ms: query.end_ms,
+        limit: query.limit,
+        cursor: query.cursor,
+    }
+}
+
+pub fn build_image_query_options(query: &ImageHistoryQuery) -> ImageQueryOptions {
+    ImageQueryOptions {
+        run_ids: csv_set(query.run_id.as_deref()),
+        metrics: csv_set(query.metric.as_deref()),
+        start_ms: query.start_ms,
+        end_ms: query.end_ms,
+        limit: query.limit,
+        cursor: query.cursor,
+        include_data: query.include_data.unwrap_or(false),
+    }
 }
 
 /// GET /api/history handler
@@ -324,21 +388,25 @@ pub async fn history_handler(
     State(state): State<AppState>,
     Query(query): Query<HistoryQuery>,
 ) -> Json<HistoryResponse> {
-    match state.storage.query_history().await {
-        Ok(rows) => match state.storage.query_hyperparameters().await {
-            Ok(hyperparameters) => {
-                let filtered_rows = apply_history_filters(rows, &query);
-                let filtered_hyperparameters = filter_hyperparameters(hyperparameters, &query);
-                let run_summaries = build_run_summaries(&filtered_rows, filtered_hyperparameters.clone());
-                let (page_rows, next_cursor) = page_vec(filtered_rows, query.cursor, query.limit);
-                Json(HistoryResponse { rows: page_rows, run_summaries, next_cursor, error: None })
-            }
-            Err(error) => {
-                let msg = error.to_string();
-                tracing::error!("Failed to query hyperparameters: {}", msg);
-                Json(HistoryResponse { rows: vec![], run_summaries: vec![], next_cursor: None, error: Some(msg) })
-            }
-        },
+    let storage_query = build_history_query_options(&query);
+
+    match state.storage.query_history(&storage_query).await {
+        Ok(page) => {
+            let run_summaries = if query.include_summaries.unwrap_or(true) {
+                match state.storage.query_hyperparameters(&storage_query.run_ids).await {
+                    Ok(hyperparameters) => build_run_summaries(&page.rows, hyperparameters),
+                    Err(error) => {
+                        let msg = error.to_string();
+                        tracing::error!("Failed to query hyperparameters: {}", msg);
+                        return Json(HistoryResponse { rows: vec![], run_summaries: vec![], next_cursor: None, error: Some(msg) });
+                    }
+                }
+            } else {
+                vec![]
+            };
+
+            Json(HistoryResponse { rows: page.rows, run_summaries, next_cursor: page.next_cursor, error: None })
+        }
         Err(error) => {
             let msg = error.to_string();
             tracing::error!("Failed to query history: {}", msg);
@@ -347,23 +415,94 @@ pub async fn history_handler(
     }
 }
 
+/// GET /api/runs/summary handler
+pub async fn run_summaries_handler(
+    State(state): State<AppState>,
+    Query(query): Query<RunSummaryQuery>,
+) -> Json<RunSummariesResponse> {
+    let run_ids = csv_set(query.run_id.as_deref());
+    let storage_query = HistoryQueryOptions {
+        run_ids: run_ids.clone(),
+        ..HistoryQueryOptions::default()
+    };
+
+    match state.storage.query_history(&storage_query).await {
+        Ok(page) => match state.storage.query_hyperparameters(&run_ids).await {
+            Ok(hyperparameters) => {
+                let run_summaries = build_run_summaries(&page.rows, hyperparameters);
+                Json(RunSummariesResponse { run_summaries, error: None })
+            }
+            Err(error) => {
+                let msg = error.to_string();
+                tracing::error!("Failed to query hyperparameters: {}", msg);
+                Json(RunSummariesResponse { run_summaries: vec![], error: Some(msg) })
+            }
+        },
+        Err(error) => {
+            let msg = error.to_string();
+            tracing::error!("Failed to query history: {}", msg);
+            Json(RunSummariesResponse { run_summaries: vec![], error: Some(msg) })
+        },
+    }
+}
+
 /// GET /api/history/images handler
 ///
 /// Queries image history using StorageEngine for backend-agnostic behavior.
 pub async fn image_history_handler(
     State(state): State<AppState>,
-    Query(query): Query<HistoryQuery>,
+    Query(query): Query<ImageHistoryQuery>,
 ) -> Json<ImageHistoryResponse> {
-    match state.storage.query_image_history().await {
-        Ok(rows) => {
-            let filtered_rows = apply_image_filters(rows, &query);
-            let (page_rows, next_cursor) = page_vec(filtered_rows, query.cursor, query.limit);
-            Json(ImageHistoryResponse { rows: page_rows, next_cursor, error: None })
+    let storage_query = build_image_query_options(&query);
+
+    match state.storage.query_image_history(&storage_query).await {
+        Ok(page) => {
+            Json(ImageHistoryResponse { rows: page.rows, next_cursor: page.next_cursor, error: None })
         }
         Err(error) => {
             let msg = error.to_string();
             tracing::error!("Failed to query image history: {}", msg);
             Json(ImageHistoryResponse { rows: vec![], next_cursor: None, error: Some(msg) })
+        }
+    }
+}
+
+pub async fn image_frame_content_handler(
+    State(state): State<AppState>,
+    Query(query): Query<ImageFrameContentQuery>,
+) -> Json<ImageFrameContentResponse> {
+    match state.storage.load_image_frame(&ImageFrameQuery {
+        run_id: query.run_id.clone(),
+        name: query.name.clone(),
+        ts_ms: query.ts_ms,
+    }).await {
+        Ok(Some(ImageFramePayload { format, image_base64 })) => Json(ImageFrameContentResponse {
+            run_id: query.run_id,
+            name: query.name,
+            ts_ms: query.ts_ms,
+            format,
+            image_base64,
+            error: None,
+        }),
+        Ok(None) => Json(ImageFrameContentResponse {
+            run_id: query.run_id,
+            name: query.name,
+            ts_ms: query.ts_ms,
+            format: String::new(),
+            image_base64: String::new(),
+            error: Some("image frame not found".to_string()),
+        }),
+        Err(error) => {
+            let msg = error.to_string();
+            tracing::error!("Failed to load image frame: {}", msg);
+            Json(ImageFrameContentResponse {
+                run_id: query.run_id,
+                name: query.name,
+                ts_ms: query.ts_ms,
+                format: String::new(),
+                image_base64: String::new(),
+                error: Some(msg),
+            })
         }
     }
 }
@@ -406,22 +545,25 @@ pub async fn resolve_run_id_handler(
 
 /// DELETE /api/history handler
 ///
-/// Clears persisted history using StorageEngine.
+/// Clears persisted history and live run cache using StorageEngine and TJunction.
 pub async fn delete_history_handler(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<DeleteRunsResponse>) {
-    match state.storage.clear_history().await {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(DeleteRunsResponse { deleted: true, error: None })
-        ),
-        Err(error) => {
-            let msg = error.to_string();
-            tracing::error!("Failed to delete history: {}", msg);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(DeleteRunsResponse { deleted: false, error: Some(msg) })
-            )
-        }
+    // Clear persisted storage
+    if let Err(error) = state.storage.clear_history().await {
+        let msg = error.to_string();
+        tracing::error!("Failed to delete persisted history: {}", msg);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(DeleteRunsResponse { deleted: false, error: Some(msg) })
+        );
     }
+
+    // Clear live run IDs from T-Junction so sidebar re-fetches fresh run list
+    state.t_junction.clear_live_runs().await;
+
+    (
+        StatusCode::OK,
+        Json(DeleteRunsResponse { deleted: true, error: None })
+    )
 }

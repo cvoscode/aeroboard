@@ -1,16 +1,20 @@
 use crate::app_state::AppState;
 use tokio::sync::broadcast;
+use tokio::task::JoinHandle;
 
 /// Start the persistence loop that buffers telemetry batches and appends them to storage.
-/// 
+///
 /// This loop receives batches via the t_junction broadcast channel and uses StorageEngine
 /// to persist them to the configured backend. Errors are logged but do not terminate
 /// the loop - persistence failures are handled gracefully to allow live streaming to continue.
 ///
+/// The returned `JoinHandle` must be awaited to ensure the loop runs to completion.
+/// If dropped without awaiting, the persistence task is silently cancelled.
+///
 /// The loop handles broadcast channel errors gracefully:
 /// - `Lagged`: Warns but continues (persistence is behind but live streaming continues)
 /// - `Closed`: Normal shutdown condition
-pub async fn start_persistence_loop(state: AppState) {
+pub fn start_persistence_loop(state: AppState) -> JoinHandle<()> {
     let mut rx = state.t_junction.subscribe();
     let storage = state.storage.clone();
 
@@ -49,5 +53,5 @@ pub async fn start_persistence_loop(state: AppState) {
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
-    });
+    })
 }

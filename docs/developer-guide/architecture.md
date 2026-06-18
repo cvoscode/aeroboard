@@ -74,7 +74,7 @@ That design matches the fact that timeseries updates are append-heavy and perfor
 
 If you add a new telemetry type, do not stop at one layer. You usually need coordinated changes in:
 
-1. Python schema and client buffering.
+1. Python schema and client buffering (see `aeroboard-client/src/aeroboard_client/schema.py`).
 2. Rust ingestion and telemetry-kind detection.
 3. Storage serialization and query support.
 4. HTTP response shaping if the UI reads it.

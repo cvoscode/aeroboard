@@ -1,10 +1,11 @@
 import time
 import math
 from aeroboard_client import init, log, log_hyperparameters, log_image, flush
+from _config import get_example_flight_url
 
 def main():
     print("Initialize Aeroboard Client...")
-    init(run_id="simulated_compare_demo", url="grpc://localhost:50051", batch_size=10) # Small batch size to see live effects
+    init(run_id="simulated_compare_demo", url=get_example_flight_url(), batch_size=10) # Small batch size to see live effects
     log_hyperparameters({
         "learning_rate": 0.01,
         "dropout": 0.15,

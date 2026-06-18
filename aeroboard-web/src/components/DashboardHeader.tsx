@@ -1,0 +1,83 @@
+import { Menu, X } from "lucide-react";
+
+interface DashboardHeaderProps {
+  connected: boolean;
+  effectiveActiveTab: "scalars" | "images" | "analysis";
+  effectiveSelectedRuns: string[];
+  visibleTabs: { id: "scalars" | "images" | "analysis"; label: string }[];
+  activeTab: "scalars" | "images" | "analysis";
+  onTabChange: (tab: "scalars" | "images" | "analysis") => void;
+  sidebarOpen: boolean;
+  onToggleSidebar: () => void;
+  deleteError: string | null;
+  onDismissDeleteError: () => void;
+}
+
+export function DashboardHeader({
+  connected,
+  effectiveActiveTab,
+  effectiveSelectedRuns,
+  visibleTabs,
+  activeTab,
+  onTabChange,
+  sidebarOpen,
+  onToggleSidebar,
+  deleteError,
+  onDismissDeleteError,
+}: DashboardHeaderProps) {
+  return (
+    <header className="main-header">
+      <div className="main-header-content">
+        <div className="header-info">
+          <button
+            type="button"
+            className="sidebar-toggle-btn"
+            onClick={onToggleSidebar}
+            aria-expanded={sidebarOpen}
+            aria-controls="dashboard-sidebar"
+          >
+            {sidebarOpen ? <X size={16} /> : <Menu size={16} />}
+            <span>Controls</span>
+          </button>
+
+          <h2 className="viewport-title">
+            {effectiveActiveTab === "analysis"
+              ? `${effectiveSelectedRuns.length} Runs Compared`
+              : effectiveSelectedRuns.length > 0
+                ? effectiveSelectedRuns[0]
+                : "No run selected"}
+          </h2>
+
+          <div className={`connection-badge ${connected ? "is-live" : ""}`}>
+            <div className="pulse-dot" />
+            <span>{connected ? "LIVE" : "OFFLINE"}</span>
+          </div>
+        </div>
+
+        <div className="page-tabs" role="tablist" aria-label="Dashboard pages">
+          {visibleTabs.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab.id}
+              className={`page-tab-btn ${activeTab === tab.id ? "active" : ""}`}
+              onClick={() => onTabChange(tab.id)}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {deleteError ? (
+        <div className="status-banner status-banner--error" role="status">
+          <p>{deleteError}</p>
+          <button type="button" onClick={onDismissDeleteError}>
+            Dismiss
+          </button>
+        </div>
+      ) : null}
+    </header>
+  );
+}

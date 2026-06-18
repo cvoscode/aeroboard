@@ -28,11 +28,8 @@ async fn handle_socket(socket: WebSocket, t_junction: Arc<TJunction>) {
     // Spawn a task to read from the WebSocket connection to keep it alive
     let mut recv_task = tokio::spawn(async move {
         while let Some(msg_result) = receiver.next().await {
-            if let Ok(msg) = msg_result {
-            match msg {
-                Message::Close(_) => break,
-                _ => {} // Ignore other messages from client
-            }
+            if let Ok(Message::Close(_)) = msg_result {
+                break;
             }
         }
     });
@@ -63,7 +60,11 @@ async fn handle_socket(socket: WebSocket, t_junction: Arc<TJunction>) {
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                     tracing::warn!("WebSocket subscriber lagged and skipped {} batches", skipped);
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
+                // Broadcast channel closed — WebSocket disconnected; abort the recv task.
+                Err(broadcast::error::RecvError::Closed) => {
+                    tracing::debug!("WebSocket broadcast channel closed, stopping sender");
+                    break;
+                }
             }
         }
     });

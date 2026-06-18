@@ -41,6 +41,11 @@ impl TJunction {
         self.live_run_ids.read().await.iter().cloned().collect()
     }
 
+    /// Clear all live run IDs (e.g., after deleting all persisted runs).
+    pub async fn clear_live_runs(&self) {
+        self.live_run_ids.write().await.clear();
+    }
+
     fn register_batch_runs(&self, telemetry: &TelemetryBatch) {
         let batch = &telemetry.batch;
         let Some(run_id_index) = batch.schema().fields().iter().position(|field| field.name() == "run_id") else {
@@ -54,7 +59,8 @@ impl TJunction {
         let run_id_array = batch.column(run_id_index).as_string::<i32>();
 
         let run_ids: Vec<String> = (0..batch.num_rows())
-            .filter_map(|index| (!run_id_array.is_null(index)).then(|| run_id_array.value(index).to_string()))
+            .filter(|&index| !run_id_array.is_null(index))
+            .map(|index| run_id_array.value(index).to_string())
             .collect();
 
         if run_ids.is_empty() {
@@ -62,9 +68,15 @@ impl TJunction {
         }
 
         let live_run_ids = self.live_run_ids.clone();
-        tokio::spawn(async move {
+        // If spawn fails (runtime at capacity), the run IDs are silently dropped for
+        // this batch — prefer live streaming over crashing the task. Run IDs will be
+        // recovered from subsequent batches or on restart.
+        let handle = tokio::spawn(async move {
             let mut known = live_run_ids.write().await;
             known.extend(run_ids);
         });
+        // Explicitly drop to suppress "unused future" lint. The spawn is fire-and-forget;
+        // we accept that a full runtime queue means run IDs for this batch are dropped.
+        std::mem::drop(handle);
     }
 }

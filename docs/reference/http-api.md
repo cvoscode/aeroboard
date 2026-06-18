@@ -75,7 +75,7 @@ In live-only mode, deletion should not be treated as a normal persisted-history 
 
 ## `GET /api/history/images`
 
-Returns persisted image history.
+Returns persisted image history metadata.
 
 ### Query parameters
 
@@ -87,6 +87,7 @@ Uses the same filter fields as `GET /api/history`:
 - `end_ms`
 - `limit`
 - `cursor`
+- `include_data` (optional, defaults to `false`)
 
 ### Response shape
 
@@ -97,11 +98,37 @@ Uses the same filter fields as `GET /api/history`:
       "ts_ms": 1740000000000,
       "run_id": "baseline",
       "name": "samples/prediction",
-      "format": "png",
-      "image_base64": "..."
+      "format": "png"
     }
   ],
   "next_cursor": null,
+  "error": null
+}
+```
+
+When `include_data=true`, each row may also include `image_base64`. The default metadata-only mode keeps list responses smaller; fetch full frame bytes from the dedicated frame endpoint when needed.
+
+## `GET /api/history/images/frame`
+
+Returns the payload for one persisted image frame.
+
+### Query parameters
+
+| Parameter | Type | Meaning |
+| --- | --- | --- |
+| `run_id` | string | Run ID |
+| `name` | string | Image metric name |
+| `ts_ms` | integer | Exact frame timestamp in milliseconds |
+
+### Response shape
+
+```json
+{
+  "run_id": "baseline",
+  "name": "samples/prediction",
+  "ts_ms": 1740000000000,
+  "format": "png",
+  "image_base64": "...",
   "error": null
 }
 ```
@@ -115,6 +142,35 @@ Lists known run IDs.
 ```json
 {
   "runs": ["baseline", "baseline-v2"]
+}
+```
+
+## `GET /api/runs/summary`
+
+Returns run summaries independently of paged scalar history.
+
+### Query parameters
+
+| Parameter | Type | Meaning |
+| --- | --- | --- |
+| `run_id` | string | Optional single run ID or comma-separated run IDs |
+
+### Response shape
+
+```json
+{
+  "run_summaries": [
+    {
+      "run_id": "baseline",
+      "hyperparameters": [
+        {"key": "lr", "value": "0.001", "value_type": "float"}
+      ],
+      "metric_summaries": [
+        {"name": "train/loss", "last": 0.42, "min": 0.42, "max": 1.1}
+      ]
+    }
+  ],
+  "error": null
 }
 ```
 

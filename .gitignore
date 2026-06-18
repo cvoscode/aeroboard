@@ -1,6 +1,11 @@
 /*.pyc
 *.pyo
 __pycache__
+.pytest_cache/
+*.egg-info/
 logs/*
 runs/*
-aeroboard-server/.aeroboard/runs/
+*/.aeroboard/runs/
+.aeroboard/runs
+aeroboard-web/dist/
+aeroboard-server/target/

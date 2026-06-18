@@ -89,6 +89,97 @@ The CLI manages a dedicated `aeroboard-greptimedb` container and named Docker vo
 uv run pytest
 ```
 
+# Aeroboard 🚀
+
+Aeroboard is a high-performance, real-time machine learning training evaluation platform. It leverages an "Arrow-Native" architecture to achieve blazing-fast, serialization-free telemetry streaming. It streams your metrics from Python to a Rust backend, out to a React frontend at 60 FPS, all without copying arrays or slowing down your training loops.
+
+## System Components
+
+1. **Client SDK (Python/PyArrow)**
+2. **"T-Junction" Server (Rust/Axum/Tonic)**
+3. **Web Dashboard (React/Vite/uPlot/Arrow-JS)**
+4. **Persistence Backend (Filesystem by default, GreptimeDB optional)**
+
+---
+
+## 🚀 Installation
+
+Aeroboard is published as a Python package and uses `uv` cleanly in three modes:
+
+### PyPI CLI install
+
+```bash
+uv tool install aeroboard
+```
+
+### PyPI project environment install
+
+```bash
+uv venv
+uv pip install aeroboard
+```
+
+### GitHub install
+
+```bash
+uv tool install git+https://github.com/cvoscode/aeroboard.git@v0.1.0
+```
+
+The Python package is pure Python. On the first `aeroboard setup` or `aeroboard start`, the CLI downloads two matching release artifacts for the installed version:
+
+1. A platform-specific Rust server binary.
+2. A platform-independent web bundle.
+
+If you are working from a source checkout instead of an installed release, use the developer bootstrap below to build everything locally with `uv`, `npm`, and `cargo`.
+
+### Developer bootstrap from this repository
+
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+
+This will:
+1. Create or update the local `.venv` with `uv`.
+2. Install the `aeroboard` package, dev dependencies, and example dependencies.
+3. Build the React frontend locally.
+4. Build the Rust server locally.
+
+---
+
+## 🏎️ Running Aeroboard
+
+For a project-local environment, use `uv run aeroboard ...`. For a tool install, run `aeroboard ...` directly.
+
+Once setup is complete, you can manage everything via the CLI:
+
+### 1. Start the Dashboard (and Server)
+```bash
+uv run aeroboard start
+```
+Go to `http://localhost:3000` to see your metrics!
+
+Filesystem persistence is the default. Useful options:
+
+```bash
+uv run aeroboard start --storage filesystem --data-dir .aeroboard
+uv run aeroboard start --storage greptime
+uv run aeroboard start --port 3100 --flight-port 51051
+```
+
+### 2. Start GreptimeDB (Optional)
+If you want persistence, ensure Docker is running and execute:
+```bash
+uv run aeroboard db
+```
+
+The CLI manages a dedicated `aeroboard-greptimedb` container and named Docker volume, so it works the same from PyPI installs and source checkouts.
+
+### 3. Run Python tests
+```bash
+uv run pytest
+```
+
 ### 4. Force a local source build
 
 When you want to rebuild the frontend and Rust server from the checked out repository instead of using release artifacts:
@@ -97,6 +188,27 @@ When you want to rebuild the frontend and Rust server from the checked out repos
 uv run aeroboard setup --build-from-source
 uv run aeroboard start --build-from-source
 ```
+
+## 🧪 Examples
+
+The `examples/` directory contains several scripts demonstrating how to integrate Aeroboard into different workflows. Use these to quickly verify your installation:
+
+- **Standard PyTorch:** `python examples/torch_example.py` (Demonstrates metrics, hyperparameters, and images)
+- **PyTorch Lightning:** `python examples/lightning_example.py` (Integration with the Lightning Trainer)
+- **Ray Tune:** `python examples/ray_tune_example.py` (Hyperparameter optimization integration)
+
+To run any example using the local environment:
+```bash
+uv run python examples/<name>.py
+```
+
+When the local server is not using the default ports, the examples share these overrides:
+```bash
+export AEROBOARD_EXAMPLE_FLIGHT_URL=grpc://localhost:51010
+export AEROBOARD_EXAMPLE_API_BASE_URL=http://localhost:3010
+uv run python examples/<name>.py
+```
+
 
 ---
 

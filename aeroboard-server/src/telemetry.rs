@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use serde::{Deserialize, Serialize};
 
@@ -18,10 +19,7 @@ impl TelemetryKind {
             return Self::Unknown;
         };
 
-        match first
-            .to_ascii_lowercase()
-            .as_str()
-        {
+        match first.to_ascii_lowercase().as_str() {
             "scalars" => Self::Scalars,
             "images" => Self::Images,
             "hyperparameters" => Self::Hyperparameters,
@@ -32,21 +30,38 @@ impl TelemetryKind {
 
     pub fn from_batch(batch: &RecordBatch) -> Self {
         let schema = batch.schema();
+        let field_count = schema.fields().len();
 
-        if schema.fields().len() == 4 && schema.field(3).name() == "value" {
-            Self::Scalars
-        } else if schema.fields().len() == 5 && schema.field(3).name() == "image_data" {
-            Self::Images
-        } else if schema.fields().len() == 5
-            && schema.field(2).name() == "key"
-            && schema.field(3).name() == "value"
-        {
-            Self::Hyperparameters
-        } else if schema.fields().len() == 4 && schema.field(3).name() == "values" {
-            Self::Distributions
-        } else {
-            Self::Unknown
+        // Helper to safely check field name at index
+        fn field_name_eq(schema: &Schema, index: usize, expected_name: &str) -> bool {
+            if index < schema.fields().len() {
+                schema.field(index).name() == expected_name
+            } else {
+                false
+            }
         }
+
+        // Scalars: 4 fields, field[3] == "value"
+        if field_count == 4 && field_name_eq(&schema, 3, "value") {
+            return Self::Scalars;
+        }
+        // Images: 5 fields, field[3] == "image_data"
+        if field_count == 5 && field_name_eq(&schema, 3, "image_data") {
+            return Self::Images;
+        }
+        // Hyperparameters: 5 fields, field[2] == "key" and field[3] == "value"
+        if field_count == 5
+            && field_name_eq(&schema, 2, "key")
+            && field_name_eq(&schema, 3, "value")
+        {
+            return Self::Hyperparameters;
+        }
+        // Distributions: 4 fields, field[3] == "values"
+        if field_count == 4 && field_name_eq(&schema, 3, "values") {
+            return Self::Distributions;
+        }
+
+        Self::Unknown
     }
 
     pub fn as_dir_name(&self) -> Option<&'static str> {

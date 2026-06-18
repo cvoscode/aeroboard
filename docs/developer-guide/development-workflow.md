@@ -60,7 +60,7 @@ When changing persistence, test at least these cases:
 
 - filesystem mode
 - live-only mode for empty-history semantics
-- Greptime mode if your change touches the database-specific backend
+- Greptime mode if your change touches the database-specific backend (requires a running Docker container as described in README.md).
 
 Storage regressions are easy to miss if you only validate one backend.
 

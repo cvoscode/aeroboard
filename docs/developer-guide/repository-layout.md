@@ -49,7 +49,7 @@ MkDocs source tree for this documentation site.
 
 ## Package layout notes
 
-The repository has both a top-level Python project configuration and a dedicated `aeroboard-client` package directory. When changing Python packaging or documentation, verify which path is authoritative for the behavior you are describing.
+The repository root `pyproject.toml` is the canonical Python package manifest. The `aeroboard-client/` directory contains the package source tree and local examples, not an independent publishable package definition.
 
 ## Build outputs and generated artifacts
 
@@ -57,7 +57,9 @@ Common generated output locations include:
 
 - `aeroboard-server/target/` for Rust build artifacts
 - `aeroboard-web/dist/` for the frontend bundle
+- `aeroboard-client/src/*.egg-info/` for packaging metadata generated during builds
 - `.aeroboard/` or custom data directories for filesystem persistence
+- `site/` for generated MkDocs output
 - `logs/` for captured example runs in this repository snapshot
 
 Do not document generated artifacts as if they are source-owned unless the workflow explicitly depends on them.

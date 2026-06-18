@@ -1,180 +1,20 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import * as arrow from 'apache-arrow';
+import { fetchImageFrame, fetchImageHistory, fetchRuns, fetchRunSummaries, fetchScalarHistory } from "./aeroboard/api";
+import { getImageSeries as readImageSeries, getImageSeriesForRun as readImageSeriesForRun, type ImageStore, upsertImageFrame } from "./aeroboard/imageStore";
+import {
+    ensureRunSummary,
+    getChartData as readChartData,
+    getGlobalXBounds as readGlobalXBounds,
+    getMetricsForRun as readMetricsForRun,
+    ingestPoint,
+    ingestScalarRows,
+    type RunSummaryStore,
+    type ScalarStore,
+} from "./aeroboard/scalarStore";
+import type { ImageSeries, LoadStatus, RunSummary, TimeSeriesData } from "./aeroboard/types";
 
-export interface TimeSeriesData {
-    wallTimes: Float64Array;
-    relTimes: Float64Array;
-    steps: Float64Array;
-    plotX: Float64Array;
-    values: Float64Array;
-    count: number;
-}
-
-export interface HyperparameterEntry {
-    key: string;
-    value: string;
-    value_type: string;
-}
-
-export interface MetricSummary {
-    name: string;
-    last: number;
-    min: number;
-    max: number;
-}
-
-export interface RunSummary {
-    run_id: string;
-    hyperparameters: HyperparameterEntry[];
-    metric_summaries: MetricSummary[];
-}
-
-export interface ImageFrame {
-    ts_ms: number;
-    run_id: string;
-    name: string;
-    format: string;
-    image_base64: string;
-}
-
-export interface ImageSeries {
-    run_id: string;
-    name: string;
-    frames: ImageFrame[];
-}
-
-type Store = Record<string, Record<string, TimeSeriesData>>;
-type RunSummaryStore = Record<string, RunSummary>;
-type ImageStore = Record<string, Record<string, ImageSeries>>;
-
-type MetricSummaryInternal = MetricSummary & { __ts?: number };
-
-function makeEmptySeries(): TimeSeriesData {
-    return {
-        wallTimes: new Float64Array(4096),
-        relTimes: new Float64Array(4096),
-        steps: new Float64Array(4096).fill(-1),
-        plotX: new Float64Array(4096),
-        values: new Float64Array(4096),
-        count: 0,
-    };
-}
-
-function growFloat64Array(source: Float64Array, nextSize: number, fillValue?: number): Float64Array {
-    const next = new Float64Array(nextSize);
-    next.set(source);
-    if (fillValue !== undefined && nextSize > source.length) {
-        next.fill(fillValue, source.length);
-    }
-    return next;
-}
-
-function ensureSeriesCapacity(series: TimeSeriesData) {
-    if (series.count < series.values.length) return;
-    const nextSize = Math.max(1024, series.values.length * 2);
-    series.wallTimes = growFloat64Array(series.wallTimes, nextSize);
-    series.relTimes = growFloat64Array(series.relTimes, nextSize);
-    series.steps = growFloat64Array(series.steps, nextSize, -1);
-    series.plotX = growFloat64Array(series.plotX, nextSize);
-    series.values = growFloat64Array(series.values, nextSize);
-}
-
-function ensureRunSummary(summaryStore: RunSummaryStore, runId: string): RunSummary {
-    if (!summaryStore[runId]) {
-        summaryStore[runId] = { run_id: runId, hyperparameters: [], metric_summaries: [] };
-    }
-    return summaryStore[runId];
-}
-
-function updateMetricSummary(summary: RunSummary, name: string, tsMs: number, value: number) {
-    const metricEntries = summary.metric_summaries as MetricSummaryInternal[];
-    const existing = metricEntries.find((entry) => entry.name === name);
-    if (existing) {
-        existing.min = Math.min(existing.min, value);
-        existing.max = Math.max(existing.max, value);
-        if ((existing.__ts ?? Number.NEGATIVE_INFINITY) <= tsMs) {
-            existing.last = value;
-            existing.__ts = tsMs;
-        }
-        return;
-    }
-
-    metricEntries.push({ name, last: value, min: value, max: value, __ts: tsMs });
-}
-
-function ingestPoint(
-    store: Store,
-    summaryStore: RunSummaryStore,
-    startTimes: Record<string, number>,
-    runId: string,
-    name: string,
-    tsMs: number,
-    val: number,
-    step: number | null,
-): boolean {
-    const wallTime = tsMs / 1000;
-
-    if (!startTimes[runId]) startTimes[runId] = wallTime;
-    const relTime = wallTime - startTimes[runId];
-
-    if (!store[runId]) store[runId] = {};
-    const runStore = store[runId];
-
-    if (!runStore[name]) runStore[name] = makeEmptySeries();
-    const series = runStore[name];
-
-    ensureSeriesCapacity(series);
-
-    const i = series.count;
-    series.wallTimes[i] = wallTime;
-    series.relTimes[i] = relTime;
-    series.plotX[i] = step ?? relTime;
-    series.values[i] = val;
-    if (step !== null) series.steps[i] = step;
-    series.count = i + 1;
-
-    updateMetricSummary(ensureRunSummary(summaryStore, runId), name, tsMs, val);
-    return true;
-}
-
-async function fetchPagedJson<T>(url: string): Promise<T[] | null> {
-    try {
-        const separator = url.includes('?') ? '&' : '?';
-        const resp = await fetch(`${url}${separator}limit=10000&cursor=0`);
-        if (!resp.ok) {
-            throw new Error(`Request failed with status ${resp.status}`);
-        }
-
-        const json = await resp.json() as { rows?: T[]; next_cursor?: number | null; error?: string };
-        if (!resp.ok && json.error) {
-            console.error('Aeroboard API error:', json.error);
-        }
-
-        const rows: T[] = json.rows ?? [];
-        let nextCursor = json.next_cursor ?? null;
-
-        while (nextCursor !== null) {
-            const pageResp = await fetch(`${url}${separator}limit=10000&cursor=${nextCursor}`);
-            if (!pageResp.ok) {
-                console.warn(`Aeroboard API page request failed with status ${pageResp.status}`);
-                break;
-            }
-            const page = await pageResp.json() as { rows?: T[]; next_cursor?: number | null };
-            rows.push(...(page.rows ?? []));
-            nextCursor = page.next_cursor ?? null;
-
-            if ((page.rows ?? []).length === 0 && nextCursor == null) {
-                break;
-            }
-        }
-
-        return rows;
-    } catch (err) {
-        const error = err instanceof Error ? err.message : String(err);
-        console.warn(`[Aeroboard] Failed to fetch history from ${url}:`, error);
-        return null;
-    }
-}
+export type { HyperparameterEntry, ImageFrame, ImageSeries, LoadStatus, MetricSummary, RunSummary, TimeSeriesData } from "./aeroboard/types";
 
 function setHyperparameter(summaryStore: RunSummaryStore, runId: string, key: string, value: string, valueType: string) {
     const summary = ensureRunSummary(summaryStore, runId);
@@ -187,21 +27,8 @@ function setHyperparameter(summaryStore: RunSummaryStore, runId: string, key: st
     summary.hyperparameters.push({ key, value, value_type: valueType });
 }
 
-function upsertImageFrame(imageStore: ImageStore, frame: ImageFrame) {
-    if (!imageStore[frame.run_id]) imageStore[frame.run_id] = {};
-    if (!imageStore[frame.run_id][frame.name]) {
-        imageStore[frame.run_id][frame.name] = { run_id: frame.run_id, name: frame.name, frames: [] };
-    }
-
-    const series = imageStore[frame.run_id][frame.name];
-    const existingIndex = series.frames.findIndex((candidate) => candidate.ts_ms === frame.ts_ms);
-    if (existingIndex >= 0) series.frames[existingIndex] = frame;
-    else series.frames.push(frame);
-    series.frames.sort((a, b) => a.ts_ms - b.ts_ms);
-}
-
 function clearStore(
-    store: React.MutableRefObject<Store>,
+    store: React.MutableRefObject<ScalarStore>,
     startTimes: React.MutableRefObject<Record<string, number>>,
     summaries: React.MutableRefObject<RunSummaryStore>,
     images: React.MutableRefObject<ImageStore>,
@@ -243,19 +70,37 @@ export interface UseAeroboardResult {
     getImageSeries: (runId: string, name: string) => ImageSeries | null;
     runs: string[];
     tick: number;
+    loadStatus: {
+        runs: LoadStatus;
+        summaries: LoadStatus;
+        history: LoadStatus;
+        images: LoadStatus;
+    };
     deleteAllRuns: () => Promise<{ ok: boolean; reason?: string }>;
-    loadHistory: () => Promise<void>;
+    loadRunSummaries: (runIds?: string[]) => Promise<void>;
+    loadHistoryForRuns: (runIds: string[]) => Promise<void>;
+    loadImagesForRun: (runId: string) => Promise<void>;
+    ensureImageFrame: (runId: string, name: string, tsMs: number) => Promise<void>;
 }
 
 export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string = getDefaultApiBase()) {
     const [connected, setConnected] = useState(false);
-    const storeRef = useRef<Store>({});
+    const storeRef = useRef<ScalarStore>({});
     const summaryRef = useRef<RunSummaryStore>({});
     const imageStoreRef = useRef<ImageStore>({});
     const startTimes = useRef<Record<string, number>>({});
     const [runs, setRuns] = useState<string[]>([]);
     const [tick, setTick] = useState(0);
-    const [reloadToken, setReloadToken] = useState(0);
+    const loadedSummaryRunsRef = useRef<Set<string>>(new Set());
+    const loadedHistoryRunsRef = useRef<Set<string>>(new Set());
+    const loadedImageRunsRef = useRef<Set<string>>(new Set());
+    const frameRequestsRef = useRef<Set<string>>(new Set());
+    const [loadStatus, setLoadStatus] = useState<UseAeroboardResult["loadStatus"]>({
+        runs: "idle",
+        summaries: "idle",
+        history: "idle",
+        images: "idle",
+    });
 
     const refreshRuns = useCallback(() => {
         const allRuns = new Set<string>([
@@ -267,82 +112,103 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
         setTick((t) => t + 1);
     }, []);
 
-    const loadHistory = useCallback(async () => {
+    const loadRuns = useCallback(async () => {
+        setLoadStatus((prev) => ({ ...prev, runs: "loading" }));
         try {
-            const [historyResp, imageRows] = await Promise.all([
-                fetch(`${apiBase}/api/history?limit=10000&cursor=0`),
-                fetchPagedJson<ImageFrame>(`${apiBase}/api/history/images`),
-            ]);
+            const fetchedRuns = await fetchRuns(apiBase);
+            setRuns(fetchedRuns);
+            setTick((t) => t + 1);
+            setLoadStatus((prev) => ({ ...prev, runs: "ready" }));
+        } catch (error) {
+            console.warn("[Aeroboard] Failed to load runs:", error);
+            setLoadStatus((prev) => ({ ...prev, runs: "error" }));
+        }
+    }, [apiBase]);
 
-            if (!historyResp.ok) {
-                console.warn('[Aeroboard] History request not OK:', historyResp.status);
+    const loadRunSummaries = useCallback(async (runIds?: string[]) => {
+        const targetRuns = runIds && runIds.length > 0 ? runIds : runs;
+        const missingRuns = targetRuns.filter((runId) => !loadedSummaryRunsRef.current.has(runId));
+        if (missingRuns.length === 0) return;
+
+        setLoadStatus((prev) => ({ ...prev, summaries: "loading" }));
+        try {
+            const summaries = await fetchRunSummaries(apiBase, missingRuns);
+            for (const summary of summaries) {
+                summaryRef.current[summary.run_id] = summary;
+                loadedSummaryRunsRef.current.add(summary.run_id);
             }
-
-            if (historyResp.ok) {
-                const firstPage = await historyResp.json() as {
-                    rows: { ts_ms: number; run_id: string; name: string; value: number }[];
-                    run_summaries?: RunSummary[];
-                    next_cursor?: number | null;
-                    error?: string;
-                };
-                const allRows = [...(firstPage.rows ?? [])];
-
-                let nextCursor = firstPage.next_cursor ?? null;
-                while (nextCursor !== null) {
-                    const pageResp = await fetch(`${apiBase}/api/history?limit=10000&cursor=${nextCursor}`);
-                    if (!pageResp.ok) {
-                        console.warn('[Aeroboard] History page request failed:', pageResp.status);
-                        break;
-                    }
-                    const page = await pageResp.json() as {
-                        rows?: { ts_ms: number; run_id: string; name: string; value: number }[];
-                        next_cursor?: number | null;
-                    };
-                    allRows.push(...(page.rows ?? []));
-                    nextCursor = page.next_cursor ?? null;
-
-                    if ((page.rows ?? []).length === 0 && nextCursor == null) {
-                        break;
-                    }
-                }
-
-                for (const summary of firstPage.run_summaries ?? []) {
-                    summaryRef.current[summary.run_id] = summary;
-                }
-
-                if (allRows.length) {
-                    allRows.sort((a, b) => a.ts_ms - b.ts_ms);
-                    const stepMap: Record<string, Map<number, number>> = {};
-                    for (const row of allRows) {
-                        if (row.name === 'step' || row.name.endsWith('/step')) {
-                            if (!stepMap[row.run_id]) stepMap[row.run_id] = new Map();
-                            stepMap[row.run_id].set(row.ts_ms, row.value);
-                        }
-                    }
-
-                    for (const row of allRows) {
-                        if (row.name === 'step' || row.name.endsWith('/step')) continue;
-                        const step = stepMap[row.run_id]?.get(row.ts_ms) ?? null;
-                        ingestPoint(storeRef.current, summaryRef.current, startTimes.current, row.run_id, row.name, row.ts_ms, row.value, step);
-                    }
-                }
-            }
-
-            if (imageRows !== null) {
-                for (const frame of imageRows) {
-                    upsertImageFrame(imageStoreRef.current, frame);
-                }
-            }
-
             refreshRuns();
-        } catch (e) {
-            console.warn('[Aeroboard] Failed to load history:', e);
+            setLoadStatus((prev) => ({ ...prev, summaries: "ready" }));
+        } catch (error) {
+            console.warn("[Aeroboard] Failed to load run summaries:", error);
+            setLoadStatus((prev) => ({ ...prev, summaries: "error" }));
+        }
+    }, [apiBase, refreshRuns, runs]);
+
+    const loadHistoryForRuns = useCallback(async (runIds: string[]) => {
+        const missingRuns = runIds.filter((runId) => !loadedHistoryRunsRef.current.has(runId));
+        if (missingRuns.length === 0) return;
+
+        setLoadStatus((prev) => ({ ...prev, history: "loading" }));
+        try {
+            const rows = await fetchScalarHistory(apiBase, missingRuns);
+            ingestScalarRows(storeRef.current, summaryRef.current, startTimes.current, rows);
+            missingRuns.forEach((runId) => loadedHistoryRunsRef.current.add(runId));
+            refreshRuns();
+            setLoadStatus((prev) => ({ ...prev, history: "ready" }));
+        } catch (error) {
+            console.warn("[Aeroboard] Failed to load history:", error);
+            setLoadStatus((prev) => ({ ...prev, history: "error" }));
+        }
+    }, [apiBase, refreshRuns]);
+
+    const loadImagesForRun = useCallback(async (runId: string) => {
+        if (!runId || loadedImageRunsRef.current.has(runId)) return;
+
+        setLoadStatus((prev) => ({ ...prev, images: "loading" }));
+        try {
+            const frames = await fetchImageHistory(apiBase, runId);
+            for (const frame of frames) {
+                upsertImageFrame(imageStoreRef.current, frame);
+            }
+            loadedImageRunsRef.current.add(runId);
+            refreshRuns();
+            setLoadStatus((prev) => ({ ...prev, images: "ready" }));
+        } catch (error) {
+            console.warn("[Aeroboard] Failed to load image history:", error);
+            setLoadStatus((prev) => ({ ...prev, images: "error" }));
+        }
+    }, [apiBase, refreshRuns]);
+
+    const ensureImageFrame = useCallback(async (runId: string, name: string, tsMs: number) => {
+        const existing = imageStoreRef.current[runId]?.[name]?.frames.find((frame) => frame.ts_ms === tsMs);
+        if (existing?.image_base64) return;
+
+        const requestKey = `${runId}:${name}:${tsMs}`;
+        if (frameRequestsRef.current.has(requestKey)) return;
+        frameRequestsRef.current.add(requestKey);
+
+        try {
+            const payload = await fetchImageFrame(apiBase, runId, name, tsMs);
+            if (payload) {
+                upsertImageFrame(imageStoreRef.current, payload);
+                refreshRuns();
+            }
+        } catch (error) {
+            console.warn("[Aeroboard] Failed to load image frame:", error);
+        } finally {
+            frameRequestsRef.current.delete(requestKey);
         }
     }, [apiBase, refreshRuns]);
 
     useEffect(() => {
-        loadHistory();
-    }, [apiBase, reloadToken, loadHistory]);
+        void loadRuns();
+    }, [loadRuns]);
+
+    useEffect(() => {
+        if (runs.length === 0) return;
+        void loadRunSummaries(runs);
+    }, [loadRunSummaries, runs]);
 
     useEffect(() => {
         const ws = new WebSocket(wsUrl);
@@ -388,10 +254,13 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
                         for (let i = 0; i < batch.numRows; i++) {
                             const metricName = String(nameCol.get(i));
                             if (metricName === 'step' || metricName.endsWith('/step')) continue;
-                            const tsMs = Number(timeCol.get(i));
-                            const runId = String(runIdCol.get(i));
-                            const val = Number(valueCol.get(i));
-                            if (ingestPoint(storeRef.current, summaryRef.current, startTimes.current, runId, metricName, tsMs, val, batchStep)) {
+                            const row = {
+                                ts_ms: Number(timeCol.get(i)),
+                                run_id: String(runIdCol.get(i)),
+                                name: metricName,
+                                value: Number(valueCol.get(i)),
+                            };
+                            if (ingestPoint(storeRef.current, summaryRef.current, startTimes.current, row, batchStep)) {
                                 shouldUpdate = true;
                             }
                         }
@@ -432,14 +301,11 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
     }, [wsUrl, refreshRuns]);
 
     const getChartData = useCallback((runId: string, name: string): TimeSeriesData | null => {
-        if (!runId) return null;
-        const series = storeRef.current[runId]?.[name];
-        return series && series.count > 0 ? series : null;
+        return readChartData(storeRef.current, runId, name);
     }, []);
 
     const getMetricsForRun = useCallback((runId: string): string[] => {
-        if (!runId) return [];
-        return Object.keys(storeRef.current[runId] ?? {});
+        return readMetricsForRun(storeRef.current, runId);
     }, []);
 
     const getRunSummaries = useCallback((runIds: string[]): RunSummary[] => {
@@ -465,29 +331,15 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
     }, [getRunSummaries]);
 
     const getImageSeriesForRun = useCallback((runId: string): ImageSeries[] => {
-        return Object.values(imageStoreRef.current[runId] ?? {}).sort((a, b) => a.name.localeCompare(b.name));
+        return readImageSeriesForRun(imageStoreRef.current, runId);
     }, []);
 
     const getImageSeries = useCallback((runId: string, name: string): ImageSeries | null => {
-        return imageStoreRef.current[runId]?.[name] ?? null;
+        return readImageSeries(imageStoreRef.current, runId, name);
     }, []);
 
     const getGlobalXBounds = useCallback((targetRuns: string[], xAxis: 'wall' | 'rel' | 'step'): [number, number] => {
-        let min = Infinity;
-        let max = -Infinity;
-        for (const runId of targetRuns) {
-            const runStore = storeRef.current[runId];
-            if (!runStore) continue;
-            for (const series of Object.values(runStore)) {
-                const xArr = xAxis === 'wall' ? series.wallTimes : xAxis === 'rel' ? series.relTimes : series.steps;
-                for (let i = 0; i < series.count; i++) {
-                    if (xAxis === 'step' && xArr[i] < 0) continue;
-                    if (xArr[i] < min) min = xArr[i];
-                    if (xArr[i] > max) max = xArr[i];
-                }
-            }
-        }
-        return min === Infinity ? [0, 100] : [min, max];
+        return readGlobalXBounds(storeRef.current, targetRuns, xAxis);
     }, []);
 
     const deleteAllRuns = useCallback(async (): Promise<{ ok: boolean; reason?: string }> => {
@@ -508,9 +360,12 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
                 return { ok: false, reason: message };
             }
             clearStore(storeRef, startTimes, summaryRef, imageStoreRef);
+            loadedSummaryRunsRef.current.clear();
+            loadedHistoryRunsRef.current.clear();
+            loadedImageRunsRef.current.clear();
+            frameRequestsRef.current.clear();
             setRuns([]);
             setTick((t) => t + 1);
-            setReloadToken((t) => t + 1);
             return { ok: true };
         } catch (err) {
             console.error('[Aeroboard] Failed to delete runs:', err);
@@ -530,7 +385,11 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
         getImageSeries,
         runs,
         tick,
+        loadStatus,
         deleteAllRuns,
-        loadHistory,
+        loadRunSummaries,
+        loadHistoryForRuns,
+        loadImagesForRun,
+        ensureImageFrame,
     };
 }

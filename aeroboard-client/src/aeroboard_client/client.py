@@ -109,6 +109,7 @@ class AeroboardClient:
         url: str = "grpc://localhost:50051",
         batch_size: int = 100,
         api_base_url: Optional[str] = None,
+        ssl_verify: Union[bool, str] = True,
     ):
         """
         Initialize the Aeroboard client.
@@ -117,16 +118,21 @@ class AeroboardClient:
             run_id: Base run identifier for telemetry.
             url: gRPC Flight server address.
             batch_size: Batch size for telemetry buffering.
+            api_base_url: HTTP API base URL (defaults to converting gRPC URL).
+            ssl_verify: Whether to verify SSL certificates. Can also be a path
+                to a CA bundle. Set to False for self-signed certificates.
         """
         self.base_run_id = _normalize_run_id(run_id)
         self.url = url
         self.batch_size = batch_size
         self.api_base_url = (api_base_url or _default_api_base_url(url)).rstrip("/")
+        self.ssl_verify = ssl_verify
         self._scalar_buffer: List[Dict[str, Any]] = []
         self._hyperparameter_buffer: List[Dict[str, Any]] = []
         self._image_buffer: List[Dict[str, Any]] = []
         self._resolved_run_id: Optional[str] = None  # Resolved after first connection
         self._http_client: Optional[Any] = None  # For HTTP API queries
+        self._had_flush_error: bool = False  # Track if flush encountered an error
 
         # Initialize Flight client
         try:
@@ -169,7 +175,8 @@ class AeroboardClient:
             response = requests.post(
                 f"{self.api_base_url}/api/runs/resolve",
                 json={"base_run_id": normalized_base},
-                timeout=2,
+                timeout=5,
+                verify=self.ssl_verify,
             )
             if response.status_code == 200:
                 resolved = response.json().get("run_id", normalized_base)
@@ -429,6 +436,20 @@ class AeroboardClient:
         except Exception as e:
             error_msg = f"[Aeroboard] Error flushing data via Flight: {e}"
             print(error_msg)
+            self._had_flush_error = True
+
+    def had_error(self) -> bool:
+        """
+        Check if the last flush operation encountered an error.
+
+        Returns:
+            True if the last flush had an error, False otherwise.
+        """
+        return self._had_flush_error
+
+    def clear_error(self) -> None:
+        """Clear the flush error flag."""
+        self._had_flush_error = False
 
     def _flush_scalar_buffer(self) -> None:
         """Flush scalar metrics buffer to the backend."""
@@ -547,7 +568,6 @@ class AeroboardClient:
         Raises:
             AeroboardClientError: If HTTP query fails.
         """
-        self._http_client = __import__('requests')
         url = f"{self.api_base_url}/api/history"
 
         params = {}
@@ -592,7 +612,7 @@ class AeroboardClient:
         Returns:
             List of hyperparameter entries.
         """
-        self._http_client = __import__('requests')
+        self._ensure_http_client()
 
         url = f"{self.api_base_url}/api/history"
 
@@ -646,7 +666,7 @@ class AeroboardClient:
         Returns:
             List of image data points with base64-encoded image data.
         """
-        self._http_client = __import__('requests')
+        self._ensure_http_client()
 
         url = f"{self.api_base_url}/api/history/images"
 
@@ -682,7 +702,7 @@ class AeroboardClient:
         Raises:
             AeroboardClientError: If unable to connect or query.
         """
-        self._http_client = __import__('requests')
+        self._ensure_http_client()
 
         url = f"{self.api_base_url}/api/runs"
 
@@ -701,7 +721,10 @@ class AeroboardClient:
         """
         self.flush()
         if self.client:
-            self.client.close()
+            try:
+                self.client.close()
+            except Exception as e:
+                print(f"[Aeroboard] Warning: error closing Flight client: {e}")
 
 
 class AeroboardLightningCallback:

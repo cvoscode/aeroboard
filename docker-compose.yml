@@ -11,6 +11,12 @@ services:
     command: standalone start --http-addr 0.0.0.0:4000 --rpc-addr 0.0.0.0:4001
     volumes:
       - greptimedb-data:/tmp/greptimedb
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
 volumes:
   greptimedb-data:

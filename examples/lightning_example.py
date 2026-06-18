@@ -14,7 +14,6 @@ Greptime:
 
 import argparse
 import io
-import os
 import time
 
 import matplotlib
@@ -27,6 +26,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import aeroboard_client as aeroboard
+from _config import get_example_api_base_url, get_example_flight_url
 
 
 class GradientFigureCallback(pl.Callback):
@@ -163,12 +163,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--url",
-        default=os.getenv("AEROBOARD_EXAMPLE_FLIGHT_URL", "grpc://localhost:50051"),
+        default=get_example_flight_url(),
         help="Arrow Flight endpoint used by the Python client.",
     )
     parser.add_argument(
         "--api-base-url",
-        default=os.getenv("AEROBOARD_EXAMPLE_API_BASE_URL", "http://localhost:3000"),
+        default=get_example_api_base_url(),
         help="HTTP API base used for run resolution and history endpoints.",
     )
     parser.add_argument(

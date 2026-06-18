@@ -5,16 +5,19 @@ Typical usage:
     uv sync --extra ray --dev
     uv run aeroboard start --storage filesystem --data-dir .aeroboard/examples/fs
     uv run examples/ray_tune_example.py
+
+Set `AEROBOARD_EXAMPLE_FLIGHT_URL` and `AEROBOARD_EXAMPLE_API_BASE_URL` when the
+server is running on non-default ports.
 """
 
 from __future__ import annotations
 
 import math
-import os
 import time
 
 from ray import tune
 import aeroboard_client as aeroboard
+from _config import get_example_api_base_url, get_example_flight_url
 
 
 def objective(config: dict[str, float]) -> None:
@@ -30,8 +33,8 @@ def objective(config: dict[str, float]) -> None:
 
 def main() -> None:
     callback = aeroboard.AeroboardRayTuneLoggerCallback(
-        url=os.getenv("AEROBOARD_EXAMPLE_FLIGHT_URL", "grpc://localhost:50051"),
-        api_base_url=os.getenv("AEROBOARD_EXAMPLE_API_BASE_URL", "http://localhost:3000"),
+        url=get_example_flight_url(),
+        api_base_url=get_example_api_base_url(),
         batch_size=20,
         run_prefix="ray-tune-demo",
         metric_prefix="train",
