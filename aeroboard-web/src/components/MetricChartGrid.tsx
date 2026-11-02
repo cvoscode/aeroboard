@@ -31,6 +31,9 @@ interface MetricChartGridProps {
   setFavoriteCharts: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
   setCollapsedCharts: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
   setOrderedMetrics: React.Dispatch<React.SetStateAction<string[]>>;
+  /** Effective target line per chart (user override, else configured default). */
+  optimalValues: Record<string, number | null>;
+  setOptimalValues: React.Dispatch<React.SetStateAction<Record<string, number | null>>>;
 }
 
 export function MetricChartGrid({
@@ -52,6 +55,8 @@ export function MetricChartGrid({
   setFavoriteCharts,
   setCollapsedCharts,
   setOrderedMetrics,
+  optimalValues,
+  setOptimalValues,
 }: MetricChartGridProps) {
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -59,6 +64,11 @@ export function MetricChartGrid({
   );
 
   const isChartCollapsed = (groupKey: string) => collapsedCharts[groupKey] ?? !favoriteCharts[groupKey];
+
+  // Removal is stored as null, not deleted, so a configured default target stays off.
+  const setOptimalValue = (groupKey: string, value: number | null) => {
+    setOptimalValues((prev) => ({ ...prev, [groupKey]: value }));
+  };
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
@@ -118,9 +128,11 @@ export function MetricChartGrid({
                 widthMode={widthMode}
                 revisionKey={`${singleRunRevision}:${groupKey}:${xAxisType}:${removeOutliers ? "trim" : "full"}`}
                 favorite={!!favoriteCharts[groupKey]}
-                onToggleFavorite={() => setFavoriteCharts((prev) => ({ ...prev, [groupKey]: !prev[groupKey] }))}
+                onToggleFavorite={() => setFavoriteCharts((prev) => ({ ...prev, [groupKey]: !favoriteCharts[groupKey] }))}
                 collapsed={isChartCollapsed(groupKey)}
                 onToggleCollapse={() => setCollapsedCharts((prev) => ({ ...prev, [groupKey]: !isChartCollapsed(groupKey) }))}
+                optimalValue={optimalValues[groupKey] ?? null}
+                onOptimalValueChange={(value) => setOptimalValue(groupKey, value)}
               />
             );
           })}

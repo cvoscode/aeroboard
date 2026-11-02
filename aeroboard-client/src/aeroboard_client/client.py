@@ -19,17 +19,47 @@ Example:
     >>> client.close()
 """
 
+import atexit
+import json
 import re
+import os
+import threading
 import time
 import io
 import math
+import wave
 import warnings
+import weakref
 import pyarrow as pa
 import pyarrow.flight as fl
 from typing import Optional, Dict, Union, List, Any
-from .schema import scalar_schema, image_schema, hyperparameter_schema
+from .schema import scalar_schema, image_schema, audio_schema, video_schema, hyperparameter_schema
+from ._sender import BatchSender, DEFAULT_MAX_QUEUE_BYTES
 
 MAX_IMAGE_BYTES = 256 * 1024  # 256 KB
+# Audio/video are passed through as already-encoded bytes; these limits keep a
+# single Flight message well under the server's AEROBOARD_MAX_MESSAGE_MB (64 MB).
+MAX_MEDIA_BYTES = 32 * 1024 * 1024  # 32 MB per clip
+MEDIA_FLUSH_BYTES = 8 * 1024 * 1024  # flush once this much media is buffered
+
+_MEDIA_SCHEMAS = {"audio": audio_schema, "video": video_schema}
+# Seconds a Flight upload may take before it is treated as failed and retried.
+FLIGHT_CALL_TIMEOUT = 60.0
+# Metric names whose value is the training step rather than a metric of their own.
+_STEP_KEYS = ("step",)
+
+# Clients still open at interpreter exit get flushed so trailing metrics aren't lost.
+_OPEN_CLIENTS: "weakref.WeakSet[AeroboardClient]" = weakref.WeakSet()
+
+
+@atexit.register
+def _close_open_clients() -> None:
+    for client in list(_OPEN_CLIENTS):
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001 - best effort during shutdown
+            pass
+_MEDIA_DEFAULT_FORMATS = {"audio": "wav", "video": "mp4"}
 
 
 def _resolve_lightning_integration() -> tuple[type[Any], type[Any], Any, bool]:
@@ -65,6 +95,47 @@ def _resolve_ray_tune_integration() -> tuple[type[Any], bool]:
 _RayTuneLoggerCallbackBase, _RAY_TUNE_AVAILABLE = _resolve_ray_tune_integration()
 
 
+# Per-run dashboard defaults travel on the hyperparameter channel under a reserved
+# key, so the server needs no extra storage. The dashboard hides this entry from
+# hyperparameter views and uses it to pre-star charts and draw target lines.
+DASHBOARD_CONFIG_KEY = "__aeroboard_dashboard__"
+DASHBOARD_CONFIG_VALUE_TYPE = "aeroboard_dashboard"
+_DASHBOARD_FIELDS = ("starred", "order", "targets")
+
+
+def _normalize_dashboard_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate a dashboard config dict and return its JSON-ready form.
+
+    Raises ValueError on unknown keys (catches typos such as "stared") or bad types.
+    """
+    if not isinstance(config, dict):
+        raise ValueError("dashboard config must be a dict")
+    unknown = sorted(set(config) - set(_DASHBOARD_FIELDS))
+    if unknown:
+        raise ValueError(f"unknown dashboard option(s): {', '.join(unknown)}; expected {', '.join(_DASHBOARD_FIELDS)}")
+
+    normalized: Dict[str, Any] = {}
+    for field in ("starred", "order"):
+        names = config.get(field)
+        if names is None:
+            continue
+        if isinstance(names, str) or not all(isinstance(name, str) for name in names):
+            raise ValueError(f"dashboard {field} must be a list of metric names")
+        normalized[field] = [name for name in (n.strip() for n in names) if name]
+
+    targets = config.get("targets")
+    if targets is not None:
+        if not isinstance(targets, dict):
+            raise ValueError("dashboard targets must be a dict of metric name -> number")
+        clean: Dict[str, float] = {}
+        for name, value in targets.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"dashboard target for {name!r} must be a finite number")
+            clean[str(name)] = float(value)
+        normalized["targets"] = clean
+    return normalized
+
+
 class AeroboardClientError(Exception):
     """Base exception for Aeroboard client errors."""
 
@@ -90,6 +161,11 @@ class AeroboardClient:
             name already exists (e.g., "resnet" -> "resnet-v2" -> "resnet-v3").
         url: gRPC Flight server URL (default: "grpc://localhost:50051")
         batch_size: Number of metrics to buffer before flushing (default: 100)
+        background: Send batches from a background thread (default). Logging calls
+            then never wait on the network; ``flush()`` waits for delivery.
+        flush_timeout: Seconds ``flush()`` waits for queued batches to be delivered.
+        max_queue_bytes: Memory budget for batches waiting to be sent while the
+            server is unreachable; the oldest are dropped beyond it.
 
     Example:
         >>> client = AeroboardClient(run_id="my-model", url="grpc://server:50051")
@@ -110,6 +186,10 @@ class AeroboardClient:
         batch_size: int = 100,
         api_base_url: Optional[str] = None,
         ssl_verify: Union[bool, str] = True,
+        *,
+        background: bool = True,
+        flush_timeout: float = 10.0,
+        max_queue_bytes: int = DEFAULT_MAX_QUEUE_BYTES,
     ):
         """
         Initialize the Aeroboard client.
@@ -130,17 +210,27 @@ class AeroboardClient:
         self._scalar_buffer: List[Dict[str, Any]] = []
         self._hyperparameter_buffer: List[Dict[str, Any]] = []
         self._image_buffer: List[Dict[str, Any]] = []
+        self._media_buffers: Dict[str, List[Dict[str, Any]]] = {"audio": [], "video": []}
+        self._media_buffer_bytes: int = 0
         self._resolved_run_id: Optional[str] = None  # Resolved after first connection
         self._http_client: Optional[Any] = None  # For HTTP API queries
         self._had_flush_error: bool = False  # Track if flush encountered an error
+        self._lock = threading.RLock()  # guards the buffers; log() may be called from several threads
+        self._closed = False
+        self.flush_timeout = flush_timeout
 
-        # Initialize Flight client
+        # Initialize Flight client (connects lazily on the first upload)
         try:
             self.client = fl.FlightClient(self.url)
         except Exception as e:
             error_msg = f"[Aeroboard] Failed to connect to Flight server at {url}: {e}"
             print(error_msg)
             self.client = None
+
+        self._sender: Optional[BatchSender] = None
+        if background and self.client is not None:
+            self._sender = BatchSender(self._do_put, on_error=self._report_error, max_queue_bytes=max_queue_bytes)
+        _OPEN_CLIENTS.add(self)
 
     @property
     def run_id(self) -> str:
@@ -153,6 +243,15 @@ class AeroboardClient:
         if self._resolved_run_id is None:
             self._resolved_run_id = self._resolve_run_id(self.base_run_id)
         return self._resolved_run_id
+
+    def _ensure_http_client(self) -> None:
+        """Lazily create the HTTP session used by the query_* helpers."""
+        if self._http_client is None:
+            import requests
+
+            session = requests.Session()
+            session.verify = self.ssl_verify
+            self._http_client = session
 
     def _resolve_run_id(self, base: str) -> str:
         """
@@ -191,7 +290,7 @@ class AeroboardClient:
             print(f"[Aeroboard] Run '{normalized_base}' already exists → using '{resolved}'")
         return resolved
 
-    def log(self, metrics: Dict[str, float]) -> None:
+    def log(self, metrics: Dict[str, float], step: Optional[Union[int, float]] = None) -> None:
         """
         Log scalar metrics to the current run.
 
@@ -199,10 +298,12 @@ class AeroboardClient:
         or when explicitly calling `flush()`. Only numeric values are logged.
 
         Args:
-            metrics: Dictionary of metric names to values.
+            metrics: Dictionary of metric names to values. A ``"step"`` entry is used
+                as the step when ``step`` is not given (it is not logged as a metric).
+            step: Training step these values belong to; the dashboard plots by it.
 
         Example:
-            >>> client.log({"loss": 0.5, "accuracy": 0.8, "epoch": 1.0})
+            >>> client.log({"loss": 0.5, "accuracy": 0.8}, step=100)
 
         Raises:
             AeroboardClientError: If the Flight client is not connected.
@@ -210,19 +311,30 @@ class AeroboardClient:
         if self.client is None:
             raise FlightConnectionError("No Flight connection available. Check server URL and connectivity.")
 
-        ts = int(time.time() * 1000)
-        for k, v in metrics.items():
-            normalized = _coerce_scalar_metric_value(v)
-            if normalized is not None:
-                self._scalar_buffer.append({
-                    "timestamp": ts,
-                    "run_id": self.run_id,
-                    "name": k,
-                    "value": normalized,
-                })
+        values = dict(metrics)
+        resolved_step = _coerce_scalar_metric_value(step)
+        for key in _STEP_KEYS:
+            if key in values:
+                embedded = _coerce_scalar_metric_value(values.pop(key))
+                if resolved_step is None:
+                    resolved_step = embedded
 
-        if len(self._scalar_buffer) >= self.batch_size:
-            self.flush()
+        ts = int(time.time() * 1000)
+        run_id = self.run_id
+        with self._lock:
+            for k, v in values.items():
+                normalized = _coerce_scalar_metric_value(v)
+                if normalized is not None:
+                    self._scalar_buffer.append({
+                        "timestamp": ts,
+                        "run_id": run_id,
+                        "name": k,
+                        "value": normalized,
+                        "step": resolved_step,
+                    })
+
+            if len(self._scalar_buffer) >= self.batch_size:
+                self._flush_buffers()
 
     def log_metrics(
         self,
@@ -232,14 +344,14 @@ class AeroboardClient:
         prefix: Optional[str] = None,
     ) -> None:
         """
-        Log numeric metrics with optional metric prefixing and shared step injection.
+        Log numeric metrics with optional metric prefixing and a shared step.
 
         This is convenient for vanilla training loops where you want to keep code like
         `client.log_metrics({"loss": loss, "accuracy": acc}, step=global_step, prefix="train")`.
 
         Args:
             metrics: Mapping of metric names to numeric values or scalar tensors.
-            step: Optional shared step to attach as `step`.
+            step: Optional shared step for all values.
             prefix: Optional prefix for metric names that do not already contain `/`.
         """
         payload: Dict[str, float] = {}
@@ -254,12 +366,8 @@ class AeroboardClient:
 
             payload[metric_name] = normalized
 
-        resolved_step = _coerce_scalar_metric_value(step)
-        if resolved_step is not None:
-            payload["step"] = resolved_step
-
         if payload:
-            self.log(payload)
+            self.log(payload, step=step)
 
     def log_hyperparameters(
         self,
@@ -290,25 +398,70 @@ class AeroboardClient:
             raise FlightConnectionError("No Flight connection available.")
 
         ts = int(time.time() * 1000)
-        for key, value in hyperparameters.items():
-            normalized = _normalize_hparam_value(value)
-            if normalized is None:
-                continue
-            encoded_value, value_type = normalized
-            self._hyperparameter_buffer.append({
-                "timestamp": ts,
-                "run_id": self.run_id,
-                "key": str(key),
-                "value": encoded_value,
-                "value_type": value_type,
-            })
+        run_id = self.run_id
+        with self._lock:
+            for key, value in hyperparameters.items():
+                normalized = _normalize_hparam_value(value)
+                if normalized is None:
+                    continue
+                encoded_value, value_type = normalized
+                self._hyperparameter_buffer.append({
+                    "timestamp": ts,
+                    "run_id": run_id,
+                    "key": str(key),
+                    "value": encoded_value,
+                    "value_type": value_type,
+                })
 
-        # Log the step if provided
+            if len(self._hyperparameter_buffer) >= self.batch_size:
+                self._flush_buffers()
+
+        # Record the step at which the hyperparameters were set.
         if step is not None:
             self.log({"hyperparameters/step": float(step)})
 
-        if len(self._hyperparameter_buffer) >= self.batch_size:
-            self.flush()
+    def configure_dashboard(
+        self,
+        *,
+        starred: Optional[List[str]] = None,
+        targets: Optional[Dict[str, float]] = None,
+        order: Optional[List[str]] = None,
+    ) -> None:
+        """
+        Set the dashboard's initial view for this run.
+
+        Metric names may be full names ("train/loss") or chart names ("loss").
+        These override the server's ``aeroboard.toml`` defaults; anything a user
+        changes in the dashboard UI wins over both. Calling again replaces the
+        previous settings for this run.
+
+        Args:
+            starred: Charts to star: expanded and pinned to the top.
+            targets: Metric name -> target value, drawn as a dashed reference line.
+            order: Initial chart order; unlisted charts follow alphabetically.
+
+        Example:
+            >>> client.configure_dashboard(
+            ...     starred=["loss", "val/accuracy"],
+            ...     targets={"val/accuracy": 0.95},
+            ... )
+        """
+        if self.client is None:
+            raise FlightConnectionError("No Flight connection available.")
+
+        options = {"starred": starred, "targets": targets, "order": order}
+        config = _normalize_dashboard_config({k: v for k, v in options.items() if v is not None})
+        run_id = self.run_id
+        with self._lock:
+            self._hyperparameter_buffer.append({
+                "timestamp": int(time.time() * 1000),
+                "run_id": run_id,
+                "key": DASHBOARD_CONFIG_KEY,
+                "value": json.dumps(config, sort_keys=True),
+                "value_type": DASHBOARD_CONFIG_VALUE_TYPE,
+            })
+        # Send right away so the dashboard picks up the view before the first metrics.
+        self.flush()
 
     def log_image(
         self,
@@ -342,17 +495,116 @@ class AeroboardClient:
             raise FlightConnectionError("No Flight connection available.")
 
         encoded, inferred_format = _coerce_image_bytes(image, format=format)
-        self._image_buffer.append({
-            "timestamp": timestamp_ms or int(time.time() * 1000),
-            "run_id": self.run_id,
-            "name": name,
-            "image_data": encoded,
-            "format": inferred_format,
-        })
+        run_id = self.run_id
+        with self._lock:
+            self._image_buffer.append({
+                "timestamp": timestamp_ms or int(time.time() * 1000),
+                "run_id": run_id,
+                "name": name,
+                "image_data": encoded,
+                "format": inferred_format,
+            })
 
-        # Images have smaller batch size (max 4 per batch due to size)
-        if len(self._image_buffer) >= max(1, math.ceil(self.batch_size / 4)):
-            self.flush()
+            # Images have smaller batch size (max 4 per batch due to size)
+            if len(self._image_buffer) >= max(1, math.ceil(self.batch_size / 4)):
+                self._flush_buffers()
+
+    def log_audio(
+        self,
+        name: str,
+        audio: Any,
+        *,
+        sample_rate: Optional[int] = None,
+        format: Optional[str] = None,
+        timestamp_ms: Optional[int] = None,
+    ) -> None:
+        """
+        Log an audio clip for the current run.
+
+        Encoded audio (bytes or a file path such as ``"sample.mp3"``) is sent as-is
+        with no re-encoding. Raw waveforms (numpy arrays or torch tensors) are
+        packed into 16-bit PCM WAV using numpy and the standard library only.
+
+        Args:
+            name: Stream name (e.g., "eval/speech").
+            audio: Encoded bytes, a file path, or a waveform array of shape
+                ``(samples,)``, ``(samples, channels)`` or ``(channels, samples)``.
+                Float waveforms are expected in ``[-1, 1]``; int16 is used as-is.
+            sample_rate: Sample rate in Hz (required for waveform arrays).
+            format: Container format, e.g. "wav", "mp3", "ogg", "flac". Inferred
+                from the file extension for paths; defaults to "wav".
+            timestamp_ms: Optional timestamp in milliseconds (defaults to now).
+
+        Example:
+            >>> client.log_audio("eval/speech", waveform, sample_rate=16000)
+            >>> client.log_audio("eval/tts", "outputs/sample.mp3")
+        """
+        payload, media_format = _coerce_audio_bytes(audio, sample_rate=sample_rate, format=format)
+        self._append_media("audio", name, payload, media_format, timestamp_ms)
+
+    def log_video(
+        self,
+        name: str,
+        video: Any,
+        *,
+        format: Optional[str] = None,
+        timestamp_ms: Optional[int] = None,
+    ) -> None:
+        """
+        Log an encoded video clip for the current run.
+
+        The bytes are forwarded untouched; Aeroboard never transcodes on the
+        Python side. Use a browser-playable container such as MP4 (H.264) or
+        WebM (VP8/VP9/AV1). Animated GIF/WebP are also supported.
+
+        Args:
+            name: Stream name (e.g., "eval/rollout").
+            video: Encoded bytes or a path to a video file.
+            format: Container format, e.g. "mp4", "webm", "gif". Inferred from
+                the file extension for paths; defaults to "mp4".
+            timestamp_ms: Optional timestamp in milliseconds (defaults to now).
+
+        Example:
+            >>> client.log_video("eval/rollout", "videos/episode_10.mp4")
+        """
+        payload, media_format = _coerce_encoded_media(video, kind="video", format=format)
+        self._append_media("video", name, payload, media_format, timestamp_ms)
+
+    def _append_media(
+        self,
+        kind: str,
+        name: str,
+        payload: bytes,
+        media_format: str,
+        timestamp_ms: Optional[int],
+    ) -> None:
+        if self.client is None:
+            raise FlightConnectionError("No Flight connection available.")
+        if not payload:
+            raise ValueError(f"Cannot log an empty {kind} payload.")
+        if len(payload) > MAX_MEDIA_BYTES:
+            raise ValueError(
+                f"{kind} payload for '{name}' is {len(payload) / 1e6:.1f} MB; the limit is "
+                f"{MAX_MEDIA_BYTES / 1e6:.0f} MB. Log a shorter or more compressed clip."
+            )
+
+        run_id = self.run_id
+        with self._lock:
+            self._media_buffers[kind].append({
+                "timestamp": timestamp_ms or int(time.time() * 1000),
+                "run_id": run_id,
+                "name": name,
+                "data": payload,
+                "format": media_format,
+            })
+            self._media_buffer_bytes += len(payload)
+
+            pending = sum(len(buffer) for buffer in self._media_buffers.values())
+            if (
+                self._media_buffer_bytes >= MEDIA_FLUSH_BYTES
+                or pending >= max(1, math.ceil(self.batch_size / 4))
+            ):
+                self._flush_buffers()
 
     def attach_lightning(
         self,
@@ -421,29 +673,51 @@ class AeroboardClient:
 
     def flush(self) -> None:
         """
-        Force flush all buffered data to the backend.
+        Send all buffered data and wait (up to ``flush_timeout``) until the server
+        has acknowledged it.
 
-        This sends all buffered metrics, hyperparameters, and images via Arrow Flight.
-        Call this explicitly to ensure data is sent even if batch size isn't reached.
+        If the server is currently unreachable this returns right away; the data
+        stays queued and is retried in the background.
         """
         if self.client is None:
             return
 
+        with self._lock:
+            self._flush_buffers()
+        if self._sender is not None:
+            self._sender.wait_idle(self.flush_timeout)
+
+    def _flush_buffers(self) -> None:
+        """Turn every non-empty buffer into a batch and hand it to the sender.
+
+        Buffers are cleared as soon as their batch is queued; delivery, retries and
+        the memory budget are the sender's job. Called with ``self._lock`` held.
+        """
         try:
             self._flush_scalar_buffer()
             self._flush_hyperparameter_buffer()
             self._flush_image_buffer()
+            for kind in self._media_buffers:
+                self._flush_media_buffer(kind)
         except Exception as e:
-            error_msg = f"[Aeroboard] Error flushing data via Flight: {e}"
-            print(error_msg)
-            self._had_flush_error = True
+            self._report_error(f"[Aeroboard] Error flushing data via Flight: {e}")
+
+    def _report_error(self, message: str) -> None:
+        print(message)
+        self._had_flush_error = True
+
+    def _send(self, batch: pa.RecordBatch, schema: pa.Schema, descriptor_path: bytes) -> None:
+        if self._sender is not None:
+            self._sender.submit(batch, schema, descriptor_path)
+        else:
+            self._do_put(batch, schema, descriptor_path)
 
     def had_error(self) -> bool:
         """
-        Check if the last flush operation encountered an error.
+        Check whether sending telemetry failed since the last ``clear_error()``.
 
         Returns:
-            True if the last flush had an error, False otherwise.
+            True if a batch could not be delivered (it may still be retried).
         """
         return self._had_flush_error
 
@@ -460,6 +734,7 @@ class AeroboardClient:
         run_ids = [x["run_id"] for x in self._scalar_buffer]
         names = [x["name"] for x in self._scalar_buffer]
         values = [x["value"] for x in self._scalar_buffer]
+        steps = [x["step"] for x in self._scalar_buffer]
 
         batch = pa.RecordBatch.from_arrays(
             [
@@ -467,11 +742,12 @@ class AeroboardClient:
                 pa.array(run_ids, type=pa.string()),
                 pa.array(names, type=pa.string()),
                 pa.array(values, type=pa.float64()),
+                pa.array(steps, type=pa.float64()),
             ],
             schema=scalar_schema,
         )
 
-        self._do_put(batch, scalar_schema, b"scalars")
+        self._send(batch, scalar_schema, b"scalars")
         self._scalar_buffer.clear()
 
     def _flush_hyperparameter_buffer(self) -> None:
@@ -490,7 +766,7 @@ class AeroboardClient:
             schema=hyperparameter_schema,
         )
 
-        self._do_put(batch, hyperparameter_schema, b"hyperparameters")
+        self._send(batch, hyperparameter_schema, b"hyperparameters")
         self._hyperparameter_buffer.clear()
 
     def _flush_image_buffer(self) -> None:
@@ -509,8 +785,30 @@ class AeroboardClient:
             schema=image_schema,
         )
 
-        self._do_put(batch, image_schema, b"images")
+        self._send(batch, image_schema, b"images")
         self._image_buffer.clear()
+
+    def _flush_media_buffer(self, kind: str) -> None:
+        """Flush buffered audio or video clips to the backend."""
+        buffer = self._media_buffers[kind]
+        if not buffer:
+            return
+
+        schema = _MEDIA_SCHEMAS[kind]
+        batch = pa.RecordBatch.from_arrays(
+            [
+                pa.array([x["timestamp"] for x in buffer], type=pa.timestamp('ms')),
+                pa.array([x["run_id"] for x in buffer], type=pa.string()),
+                pa.array([x["name"] for x in buffer], type=pa.string()),
+                pa.array([x["data"] for x in buffer], type=pa.binary()),
+                pa.array([x["format"] for x in buffer], type=pa.string()),
+            ],
+            schema=schema,
+        )
+
+        self._send(batch, schema, kind.encode())
+        self._media_buffer_bytes -= sum(len(x["data"]) for x in buffer)
+        buffer.clear()
 
     def _do_put(
         self,
@@ -518,20 +816,20 @@ class AeroboardClient:
         schema: pa.Schema,
         descriptor_path: bytes,
     ) -> None:
-        """Send a RecordBatch to the Flight server."""
+        """Send a RecordBatch to the Flight server and wait for its acknowledgement.
+
+        Raises on failure; the background sender decides whether to retry.
+        """
         if self.client is None:
             return
 
-        try:
-            desc = fl.FlightDescriptor.for_path(descriptor_path)
-            writer, _reader = self.client.do_put(desc, schema)
-            writer.write_batch(batch)
-            writer.done_writing()
-            writer.close()
-        except Exception as e:
-            error_msg = f"[Aeroboard] Error sending data to Flight: {e}"
-            print(error_msg)
-            raise
+        desc = fl.FlightDescriptor.for_path(descriptor_path)
+        options = fl.FlightCallOptions(timeout=FLIGHT_CALL_TIMEOUT)
+        writer, _reader = self.client.do_put(desc, schema, options=options)
+        writer.write_batch(batch)
+        writer.done_writing()
+        # close() completes the RPC and raises if the server rejected the batch.
+        writer.close()
 
     def query_history(
         self,
@@ -568,6 +866,7 @@ class AeroboardClient:
         Raises:
             AeroboardClientError: If HTTP query fails.
         """
+        self._ensure_http_client()
         url = f"{self.api_base_url}/api/history"
 
         params = {}
@@ -636,6 +935,8 @@ class AeroboardClient:
                 for entry in summary.get("hyperparameters", []):
                     if key is not None and entry.get("key") != key:
                         continue
+                    if key is None and entry.get("key") == DASHBOARD_CONFIG_KEY:
+                        continue  # internal dashboard settings, not a hyperparameter
                     entries.append({
                         "run_id": summary_run_id,
                         "key": entry.get("key"),
@@ -715,11 +1016,20 @@ class AeroboardClient:
         except Exception as e:
             raise AeroboardClientError(f"Failed to list runs: {e}")
 
-    def close(self) -> None:
+    def close(self, timeout: Optional[float] = None) -> None:
         """
-        Close the client and flush any remaining data.
+        Flush remaining data, wait up to ``timeout`` seconds (default:
+        ``flush_timeout``) for it to be delivered, and release the connection.
         """
-        self.flush()
+        if self._closed:
+            return
+        self._closed = True
+        _OPEN_CLIENTS.discard(self)
+        if self.client is not None:
+            with self._lock:
+                self._flush_buffers()
+        if self._sender is not None:
+            self._sender.close(self.flush_timeout if timeout is None else timeout)
         if self.client:
             try:
                 self.client.close()
@@ -1119,6 +1429,104 @@ def _coerce_image_bytes(
     raise TypeError("Unsupported image type. Use bytes, PIL Image, numpy array, or torch tensor.")
 
 
+def _normalize_media_format(value: str) -> str:
+    return value.strip().lstrip(".").lower()
+
+
+def _coerce_encoded_media(
+    media: Any,
+    *,
+    kind: str,
+    format: Optional[str] = None,
+) -> tuple[bytes, str]:
+    """
+    Accept already-encoded media as bytes or a file path. No transcoding is done.
+
+    Returns:
+        Tuple of (payload, format).
+    """
+    if isinstance(media, (bytes, bytearray, memoryview)):
+        media_format = _normalize_media_format(format or _MEDIA_DEFAULT_FORMATS[kind])
+        return bytes(media), media_format
+
+    if isinstance(media, (str, os.PathLike)):
+        path = os.fspath(media)
+        suffix = os.path.splitext(path)[1]
+        media_format = _normalize_media_format(format or suffix or _MEDIA_DEFAULT_FORMATS[kind])
+        with open(path, "rb") as handle:
+            return handle.read(), media_format
+
+    hint = (
+        " Encode frames to MP4/WebM first (e.g. with ffmpeg) and pass the bytes or file path."
+        if kind == "video"
+        else ""
+    )
+    raise TypeError(f"Unsupported {kind} type {type(media).__name__}. Use bytes or a file path.{hint}")
+
+
+def _coerce_audio_bytes(
+    audio: Any,
+    *,
+    sample_rate: Optional[int] = None,
+    format: Optional[str] = None,
+) -> tuple[bytes, str]:
+    """
+    Coerce audio to encoded bytes.
+
+    Encoded bytes and file paths pass through unchanged. numpy arrays and torch
+    tensors are packed as 16-bit PCM WAV (vectorised numpy + stdlib ``wave``).
+    """
+    if isinstance(audio, (bytes, bytearray, memoryview, str, os.PathLike)):
+        return _coerce_encoded_media(audio, kind="audio", format=format)
+
+    if hasattr(audio, "detach") and hasattr(audio, "cpu"):  # torch.Tensor without importing torch
+        audio = audio.detach().cpu().numpy()
+
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+
+    if np is None or not isinstance(audio, np.ndarray):
+        raise TypeError(
+            f"Unsupported audio type {type(audio).__name__}. Use bytes, a file path, a numpy array or a torch tensor."
+        )
+
+    if format is not None and _normalize_media_format(format) != "wav":
+        raise ValueError("Waveform arrays are encoded as WAV; pass encoded bytes to log other formats.")
+    if not sample_rate or sample_rate <= 0:
+        raise ValueError("sample_rate is required when logging a waveform array.")
+
+    return _encode_wav(audio, int(sample_rate)), "wav"
+
+
+def _encode_wav(samples: Any, sample_rate: int) -> bytes:
+    import numpy as np
+
+    arr = np.asarray(samples)
+    if arr.ndim == 2 and arr.shape[0] < arr.shape[1]:
+        arr = arr.T  # (channels, samples) -> (samples, channels)
+    if arr.ndim == 1:
+        arr = arr[:, None]
+    if arr.ndim != 2 or arr.shape[0] == 0:
+        raise ValueError(f"Expected a 1D or 2D waveform, got shape {np.shape(samples)}.")
+
+    if np.issubdtype(arr.dtype, np.floating):
+        pcm = (np.clip(np.nan_to_num(arr), -1.0, 1.0) * 32767.0).astype("<i2")
+    elif arr.dtype == np.int16:
+        pcm = arr.astype("<i2", copy=False)
+    else:
+        raise TypeError(f"Unsupported waveform dtype {arr.dtype}; use float in [-1, 1] or int16.")
+
+    with io.BytesIO() as buffer:
+        with wave.open(buffer, "wb") as writer:
+            writer.setnchannels(pcm.shape[1])
+            writer.setsampwidth(2)
+            writer.setframerate(sample_rate)
+            writer.writeframes(np.ascontiguousarray(pcm).tobytes())
+        return buffer.getvalue()
+
+
 def _maybe_compress_encoded_image(
     payload: bytes,
     image_format: str,
@@ -1239,11 +1647,6 @@ def _coerce_scalar_metric_value(value: Any) -> Optional[float]:
     return None
 
 
-def _quote_sql_string(value: str) -> str:
-    """Escape single quotes for SQL."""
-    return value.replace("'", "''")
-
-
 def _normalize_run_id(run_id: Optional[str]) -> str:
     """Normalize a run ID by stripping whitespace."""
     cleaned = (run_id or '').strip()
@@ -1262,49 +1665,26 @@ def _default_api_base_url(flight_url: Optional[str] = None) -> str:
 
 
 def _fetch_existing_run_ids(base: str, api_base_url: Optional[str] = None) -> set[str]:
-    """Fetch existing run IDs from GreptimeDB or HTTP API."""
+    """Fetch run IDs matching ``base`` (or its versions) from the server's run list.
+
+    Only used when the server's ``/api/runs/resolve`` endpoint is unavailable. The
+    client never talks to the storage backend directly.
+    """
     import requests
 
-    existing: set[str] = set()
     normalized_base = _normalize_run_id(base)
-    quoted = _quote_sql_string(normalized_base)
     api_base_url = (api_base_url or "http://localhost:3000").rstrip("/")
-
-    # Try GreptimeDB SQL query first
     try:
-        sql = f"SELECT DISTINCT run_id FROM scalars WHERE run_id = '{quoted}' OR run_id LIKE '{quoted}-v%'"
-        resp = requests.get(
-            "http://localhost:4000/v1/sql",
-            params={"sql": sql, "db": "public"},
-            timeout=1,
-        )
-        if resp.status_code == 200:
-            existing.update(_extract_greptime_run_ids(resp.json()))
+        resp = requests.get(f"{api_base_url}/api/runs", timeout=2)
+        if resp.status_code != 200:
+            return set()
+        runs = resp.json().get("runs", [])
     except Exception:
-        pass
-
-    # Try HTTP API as fallback
-    try:
-        resp = requests.get(f"{api_base_url}/api/runs", timeout=1)
-        if resp.status_code == 200:
-            runs = resp.json().get("runs", [])
-            existing.update(
-                run_id for run_id in runs
-                if run_id == normalized_base or run_id.startswith(f"{normalized_base}-v")
-            )
-    except Exception:
-        pass
-
-    return existing
-
-
-def _extract_greptime_run_ids(payload: dict) -> set[str]:
-    """Extract run IDs from GreptimeDB query result."""
-    output = payload.get("output", [])
-    if not output or "records" not in output[0]:
         return set()
-    rows = output[0]["records"].get("rows", [])
-    return {row[0] for row in rows if row and row[0]}
+    return {
+        run_id for run_id in runs
+        if run_id == normalized_base or run_id.startswith(f"{normalized_base}-v")
+    }
 
 
 def resolve_run_id(base: str, existing: set[str], include_base: bool = True) -> str:
@@ -1345,7 +1725,9 @@ def _split_framework_suffix(candidate: str) -> tuple[str, str]:
     Returns:
         Tuple of (base_name, framework_suffix).
     """
-    match = re.fullmatch(r"(.*?)(-pl[^-]+)?", candidate)
+    # A Lightning suffix is "-pl" plus a dotted version ("exp-pl2.5.1"); names that
+    # merely contain "-pl" ("sample-placement") have none.
+    match = re.fullmatch(r"(.+?)(-pl\d+(?:\.\d+)*)?", candidate)
     if match is None:
         return candidate, ""
     return match.group(1), match.group(2) or ""

@@ -5,8 +5,10 @@ build:
   tools:
     python: "3.11"
 
-mkdocs:
-  configuration: mkdocs.yml
+sphinx:
+  builder: dirhtml
+  configuration: docs/conf.py
+  fail_on_warning: true
 
 python:
   install:

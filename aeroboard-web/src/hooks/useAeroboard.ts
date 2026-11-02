@@ -1,22 +1,43 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import * as arrow from 'apache-arrow';
-import { fetchImageFrame, fetchImageHistory, fetchRuns, fetchRunSummaries, fetchScalarHistory } from "./aeroboard/api";
-import { getImageSeries as readImageSeries, getImageSeriesForRun as readImageSeriesForRun, type ImageStore, upsertImageFrame } from "./aeroboard/imageStore";
+import { fetchImageHistory, fetchMediaHistory, fetchRuns, fetchRunSummaries, fetchScalarHistory, fetchServerDashboardDefaults, imageContentUrl, mediaContentUrl } from "./aeroboard/api";
+import { DASHBOARD_CONFIG_KEY, extractRunDashboardConfig, parseRunDashboardConfigValue, type PartialDashboardDefaults } from "../lib/dashboardDefaults";
+import { getMediaSeriesForRun as readMediaSeriesForRun, MEDIA_KINDS, type MediaStore, revokeMediaStore, upsertMediaClip } from "./aeroboard/mediaStore";
+import { mediaMimeType } from "../lib/media";
+import { getImageSeries as readImageSeries, getImageSeriesForRun as readImageSeriesForRun, type ImageStore, revokeImageStore, upsertImageFrame } from "./aeroboard/imageStore";
 import {
     ensureRunSummary,
     getChartData as readChartData,
     getGlobalXBounds as readGlobalXBounds,
     getMetricsForRun as readMetricsForRun,
-    ingestPoint,
     ingestScalarRows,
+    mergeHistoryRows,
     type RunSummaryStore,
     type ScalarStore,
 } from "./aeroboard/scalarStore";
-import type { ImageSeries, LoadStatus, RunSummary, TimeSeriesData } from "./aeroboard/types";
+import type { ImageFrame, ImageSeries, LoadStatus, MediaClip, MediaKind, MediaSeries, RunSummary, ScalarRow, TimeSeriesData } from "./aeroboard/types";
 
-export type { HyperparameterEntry, ImageFrame, ImageSeries, LoadStatus, MetricSummary, RunSummary, TimeSeriesData } from "./aeroboard/types";
+export type { HyperparameterEntry, ImageFrame, ImageSeries, LoadStatus, MediaClip, MediaKind, MediaSeries, MetricSummary, RunSummary, TimeSeriesData } from "./aeroboard/types";
 
-function setHyperparameter(summaryStore: RunSummaryStore, runId: string, key: string, value: string, valueType: string) {
+type DashboardConfigStore = Record<string, PartialDashboardDefaults | null>;
+
+/** Reconnect delays for the live socket: 1s, 2s, 4s … capped at 30s. */
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 30_000;
+
+function setHyperparameter(
+    summaryStore: RunSummaryStore,
+    dashboardConfigs: DashboardConfigStore,
+    runId: string,
+    key: string,
+    value: string,
+    valueType: string,
+) {
+    // Per-run dashboard settings share the hyperparameter channel but aren't hyperparameters.
+    if (key === DASHBOARD_CONFIG_KEY) {
+        dashboardConfigs[runId] = parseRunDashboardConfigValue(value);
+        return;
+    }
     const summary = ensureRunSummary(summaryStore, runId);
     const existing = summary.hyperparameters.find((entry) => entry.key === key);
     if (existing) {
@@ -27,24 +48,33 @@ function setHyperparameter(summaryStore: RunSummaryStore, runId: string, key: st
     summary.hyperparameters.push({ key, value, value_type: valueType });
 }
 
-function clearStore(
-    store: React.MutableRefObject<ScalarStore>,
-    startTimes: React.MutableRefObject<Record<string, number>>,
-    summaries: React.MutableRefObject<RunSummaryStore>,
-    images: React.MutableRefObject<ImageStore>,
-) {
-    store.current = {};
-    startTimes.current = {};
-    summaries.current = {};
-    images.current = {};
-}
+/**
+ * Combine a summary fetched from the server with what this tab accumulated
+ * from live data, so a late-arriving fetch can't erase newer live values.
+ */
+function mergeSummaries(server: RunSummary, local: RunSummary | undefined): RunSummary {
+    if (!local) return server;
+    const hyperparameters = new Map(server.hyperparameters.map((entry) => [entry.key, entry]));
+    for (const entry of local.hyperparameters) hyperparameters.set(entry.key, entry);
 
-function bytesToBase64(bytes: Uint8Array): string {
-    let binary = '';
-    bytes.forEach((byte) => {
-        binary += String.fromCharCode(byte);
-    });
-    return btoa(binary);
+    const metrics = new Map(server.metric_summaries.map((entry) => [entry.name, { ...entry }]));
+    for (const entry of local.metric_summaries) {
+        const existing = metrics.get(entry.name);
+        if (!existing) {
+            metrics.set(entry.name, entry);
+            continue;
+        }
+        // Keep the live entry object (it carries its timestamp for later updates).
+        metrics.set(entry.name, Object.assign(entry, {
+            min: Math.min(existing.min, entry.min),
+            max: Math.max(existing.max, entry.max),
+        }));
+    }
+    return {
+        run_id: server.run_id,
+        hyperparameters: Array.from(hyperparameters.values()),
+        metric_summaries: Array.from(metrics.values()),
+    };
 }
 
 function getDefaultApiBase(): string {
@@ -58,6 +88,10 @@ function getDefaultWsUrl(): string {
     return `${protocol}://${window.location.host}/ws/live`;
 }
 
+function sameList(a: string[], b: string[]): boolean {
+    return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
 export interface UseAeroboardResult {
     connected: boolean;
     getChartData: (runId: string, name: string) => TimeSeriesData | null;
@@ -68,6 +102,10 @@ export interface UseAeroboardResult {
     getMetricSummaryKeys: (runIds: string[]) => string[];
     getImageSeriesForRun: (runId: string) => ImageSeries[];
     getImageSeries: (runId: string, name: string) => ImageSeries | null;
+    /** `<img src>` for a frame: its live Blob URL, or the persisted-content URL. */
+    getImageSource: (frame: ImageFrame, attempt?: number) => string;
+    getMediaSeriesForRun: (runId: string) => MediaSeries[];
+    getMediaSource: (clip: MediaClip, attempt?: number) => string;
     runs: string[];
     tick: number;
     loadStatus: {
@@ -75,95 +113,150 @@ export interface UseAeroboardResult {
         summaries: LoadStatus;
         history: LoadStatus;
         images: LoadStatus;
+        media: LoadStatus;
     };
     deleteAllRuns: () => Promise<{ ok: boolean; reason?: string }>;
     loadRunSummaries: (runIds?: string[]) => Promise<void>;
     loadHistoryForRuns: (runIds: string[]) => Promise<void>;
     loadImagesForRun: (runId: string) => Promise<void>;
-    ensureImageFrame: (runId: string, name: string, tsMs: number) => Promise<void>;
+    loadMediaForRun: (runId: string) => Promise<void>;
+    /** Dashboard settings the training script sent for this run, if any. */
+    getRunDashboardConfig: (runId: string) => PartialDashboardDefaults | null;
+    /** Server-wide defaults from aeroboard.toml (null until loaded). */
+    serverDashboardDefaults: PartialDashboardDefaults | null;
+    /** Problem reading aeroboard.toml, surfaced so a typo isn't silently ignored. */
+    dashboardConfigError: string | null;
 }
 
-export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string = getDefaultApiBase()) {
+export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string = getDefaultApiBase()): UseAeroboardResult {
     const [connected, setConnected] = useState(false);
     const storeRef = useRef<ScalarStore>({});
     const summaryRef = useRef<RunSummaryStore>({});
     const imageStoreRef = useRef<ImageStore>({});
+    const mediaStoreRef = useRef<MediaStore>({});
+    const dashboardConfigsRef = useRef<DashboardConfigStore>({});
+    const [serverDashboardDefaults, setServerDashboardDefaults] = useState<PartialDashboardDefaults | null>(null);
+    const [dashboardConfigError, setDashboardConfigError] = useState<string | null>(null);
     const startTimes = useRef<Record<string, number>>({});
     const [runs, setRuns] = useState<string[]>([]);
+    const runsRef = useRef<string[]>([]);
+    /** Runs the server reported via /api/runs (the sidebar also shows runs seen live). */
+    const fetchedRunsRef = useRef<string[]>([]);
     const [tick, setTick] = useState(0);
+    const refreshScheduledRef = useRef(false);
     const loadedSummaryRunsRef = useRef<Set<string>>(new Set());
+    const pendingSummaryRunsRef = useRef<Set<string>>(new Set());
     const loadedHistoryRunsRef = useRef<Set<string>>(new Set());
+    const pendingHistoryRunsRef = useRef<Set<string>>(new Set());
     const loadedImageRunsRef = useRef<Set<string>>(new Set());
-    const frameRequestsRef = useRef<Set<string>>(new Set());
+    const loadedMediaRunsRef = useRef<Set<string>>(new Set());
     const [loadStatus, setLoadStatus] = useState<UseAeroboardResult["loadStatus"]>({
         runs: "idle",
         summaries: "idle",
         history: "idle",
         images: "idle",
+        media: "idle",
     });
 
+    /**
+     * Re-render at most once per animation frame, however many batches arrive.
+     * The run list is the union of server-listed runs and runs seen locally.
+     */
     const refreshRuns = useCallback(() => {
-        const allRuns = new Set<string>([
-            ...Object.keys(summaryRef.current),
-            ...Object.keys(storeRef.current),
-            ...Object.keys(imageStoreRef.current),
-        ]);
-        setRuns(Array.from(allRuns).sort());
-        setTick((t) => t + 1);
+        if (refreshScheduledRef.current) return;
+        refreshScheduledRef.current = true;
+        const schedule = typeof requestAnimationFrame === 'function'
+            ? requestAnimationFrame
+            : (callback: () => void) => setTimeout(callback, 16);
+        schedule(() => {
+            refreshScheduledRef.current = false;
+            const allRuns = Array.from(new Set<string>([
+                ...fetchedRunsRef.current,
+                ...Object.keys(summaryRef.current),
+                ...Object.keys(storeRef.current),
+                ...Object.keys(imageStoreRef.current),
+                ...Object.keys(mediaStoreRef.current),
+            ])).sort();
+            // Only publish a new array when the list changed, so effects keyed on
+            // `runs` don't re-run on every live batch.
+            if (!sameList(allRuns, runsRef.current)) {
+                runsRef.current = allRuns;
+                setRuns(allRuns);
+            }
+            setTick((t) => t + 1);
+        });
     }, []);
 
     const loadRuns = useCallback(async () => {
         setLoadStatus((prev) => ({ ...prev, runs: "loading" }));
         try {
-            const fetchedRuns = await fetchRuns(apiBase);
-            setRuns(fetchedRuns);
-            setTick((t) => t + 1);
+            fetchedRunsRef.current = await fetchRuns(apiBase);
+            refreshRuns();
             setLoadStatus((prev) => ({ ...prev, runs: "ready" }));
         } catch (error) {
             console.warn("[Aeroboard] Failed to load runs:", error);
             setLoadStatus((prev) => ({ ...prev, runs: "error" }));
         }
-    }, [apiBase]);
+    }, [apiBase, refreshRuns]);
 
     const loadRunSummaries = useCallback(async (runIds?: string[]) => {
-        const targetRuns = runIds && runIds.length > 0 ? runIds : runs;
-        const missingRuns = targetRuns.filter((runId) => !loadedSummaryRunsRef.current.has(runId));
+        const targetRuns = runIds && runIds.length > 0 ? runIds : runsRef.current;
+        // Skip runs already loaded *or* currently being fetched: a run the server has
+        // no summary for (e.g. media only, or live-only mode) must not be re-requested
+        // on every live batch.
+        const missingRuns = targetRuns.filter(
+            (runId) => !loadedSummaryRunsRef.current.has(runId) && !pendingSummaryRunsRef.current.has(runId),
+        );
         if (missingRuns.length === 0) return;
+        missingRuns.forEach((runId) => pendingSummaryRunsRef.current.add(runId));
 
         setLoadStatus((prev) => ({ ...prev, summaries: "loading" }));
         try {
             const summaries = await fetchRunSummaries(apiBase, missingRuns);
-            for (const summary of summaries) {
-                summaryRef.current[summary.run_id] = summary;
-                loadedSummaryRunsRef.current.add(summary.run_id);
+            for (const rawSummary of summaries) {
+                const { summary, config } = extractRunDashboardConfig(rawSummary);
+                summaryRef.current[summary.run_id] = mergeSummaries(summary, summaryRef.current[summary.run_id]);
+                if (config) dashboardConfigsRef.current[summary.run_id] ??= config;
             }
+            missingRuns.forEach((runId) => loadedSummaryRunsRef.current.add(runId));
             refreshRuns();
             setLoadStatus((prev) => ({ ...prev, summaries: "ready" }));
         } catch (error) {
             console.warn("[Aeroboard] Failed to load run summaries:", error);
             setLoadStatus((prev) => ({ ...prev, summaries: "error" }));
+        } finally {
+            missingRuns.forEach((runId) => pendingSummaryRunsRef.current.delete(runId));
         }
-    }, [apiBase, refreshRuns, runs]);
+    }, [apiBase, refreshRuns]);
 
-    const loadHistoryForRuns = useCallback(async (runIds: string[]) => {
-        const missingRuns = runIds.filter((runId) => !loadedHistoryRunsRef.current.has(runId));
-        if (missingRuns.length === 0) return;
+    /** Fetch persisted history and merge it with live points already received. */
+    const fetchHistory = useCallback(async (runIds: string[], force: boolean) => {
+        const targetRuns = runIds.filter(
+            (runId) => (force || !loadedHistoryRunsRef.current.has(runId)) && !pendingHistoryRunsRef.current.has(runId),
+        );
+        if (targetRuns.length === 0) return;
+        targetRuns.forEach((runId) => pendingHistoryRunsRef.current.add(runId));
 
         setLoadStatus((prev) => ({ ...prev, history: "loading" }));
         try {
-            const rows = await fetchScalarHistory(apiBase, missingRuns);
-            ingestScalarRows(storeRef.current, summaryRef.current, startTimes.current, rows);
-            missingRuns.forEach((runId) => loadedHistoryRunsRef.current.add(runId));
+            const rows = await fetchScalarHistory(apiBase, targetRuns);
+            mergeHistoryRows(storeRef.current, summaryRef.current, startTimes.current, targetRuns, rows);
+            targetRuns.forEach((runId) => loadedHistoryRunsRef.current.add(runId));
             refreshRuns();
             setLoadStatus((prev) => ({ ...prev, history: "ready" }));
         } catch (error) {
             console.warn("[Aeroboard] Failed to load history:", error);
             setLoadStatus((prev) => ({ ...prev, history: "error" }));
+        } finally {
+            targetRuns.forEach((runId) => pendingHistoryRunsRef.current.delete(runId));
         }
     }, [apiBase, refreshRuns]);
 
+    const loadHistoryForRuns = useCallback((runIds: string[]) => fetchHistory(runIds, false), [fetchHistory]);
+
     const loadImagesForRun = useCallback(async (runId: string) => {
         if (!runId || loadedImageRunsRef.current.has(runId)) return;
+        loadedImageRunsRef.current.add(runId);
 
         setLoadStatus((prev) => ({ ...prev, images: "loading" }));
         try {
@@ -171,134 +264,234 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
             for (const frame of frames) {
                 upsertImageFrame(imageStoreRef.current, frame);
             }
-            loadedImageRunsRef.current.add(runId);
             refreshRuns();
             setLoadStatus((prev) => ({ ...prev, images: "ready" }));
         } catch (error) {
+            loadedImageRunsRef.current.delete(runId);
             console.warn("[Aeroboard] Failed to load image history:", error);
             setLoadStatus((prev) => ({ ...prev, images: "error" }));
         }
     }, [apiBase, refreshRuns]);
 
-    const ensureImageFrame = useCallback(async (runId: string, name: string, tsMs: number) => {
-        const existing = imageStoreRef.current[runId]?.[name]?.frames.find((frame) => frame.ts_ms === tsMs);
-        if (existing?.image_base64) return;
+    const loadMediaForRun = useCallback(async (runId: string) => {
+        if (!runId || loadedMediaRunsRef.current.has(runId)) return;
+        loadedMediaRunsRef.current.add(runId);
 
-        const requestKey = `${runId}:${name}:${tsMs}`;
-        if (frameRequestsRef.current.has(requestKey)) return;
-        frameRequestsRef.current.add(requestKey);
-
+        setLoadStatus((prev) => ({ ...prev, media: "loading" }));
         try {
-            const payload = await fetchImageFrame(apiBase, runId, name, tsMs);
-            if (payload) {
-                upsertImageFrame(imageStoreRef.current, payload);
-                refreshRuns();
+            // Metadata only: clip bytes are streamed on demand by the <audio>/<video> elements.
+            const perKind = await Promise.all(MEDIA_KINDS.map((kind) => fetchMediaHistory(apiBase, kind, runId)));
+            for (const clips of perKind) {
+                for (const clip of clips) upsertMediaClip(mediaStoreRef.current, clip);
             }
+            refreshRuns();
+            setLoadStatus((prev) => ({ ...prev, media: "ready" }));
         } catch (error) {
-            console.warn("[Aeroboard] Failed to load image frame:", error);
-        } finally {
-            frameRequestsRef.current.delete(requestKey);
+            loadedMediaRunsRef.current.delete(runId);
+            console.warn("[Aeroboard] Failed to load media history:", error);
+            setLoadStatus((prev) => ({ ...prev, media: "error" }));
         }
     }, [apiBase, refreshRuns]);
+
+    /**
+     * Catch up after the live stream had a gap (reconnect, or the server reported
+     * that this tab lagged): re-fetch everything already shown. Merging dedupes.
+     */
+    const resync = useCallback(() => {
+        void loadRuns();
+        const historyRuns = Array.from(loadedHistoryRunsRef.current);
+        if (historyRuns.length > 0) void fetchHistory(historyRuns, true);
+        for (const runId of Array.from(loadedImageRunsRef.current)) {
+            loadedImageRunsRef.current.delete(runId);
+            void loadImagesForRun(runId);
+        }
+        for (const runId of Array.from(loadedMediaRunsRef.current)) {
+            loadedMediaRunsRef.current.delete(runId);
+            void loadMediaForRun(runId);
+        }
+    }, [fetchHistory, loadImagesForRun, loadMediaForRun, loadRuns]);
 
     useEffect(() => {
         void loadRuns();
     }, [loadRuns]);
 
     useEffect(() => {
+        let cancelled = false;
+        fetchServerDashboardDefaults(apiBase)
+            .then(({ defaults, error }) => {
+                if (cancelled) return;
+                setServerDashboardDefaults(defaults);
+                setDashboardConfigError(error);
+            })
+            .catch((error) => {
+                // Older servers have no /api/config: fall back to no defaults.
+                console.warn("[Aeroboard] Dashboard defaults unavailable:", error);
+                if (!cancelled) setServerDashboardDefaults({});
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase]);
+
+    useEffect(() => {
         if (runs.length === 0) return;
         void loadRunSummaries(runs);
     }, [loadRunSummaries, runs]);
 
+    const handleArrowMessage = useCallback((data: ArrayBuffer) => {
+        const table = arrow.tableFromIPC(new Uint8Array(data));
+        let shouldUpdate = false;
+
+        for (const batch of table.batches) {
+            const timeCol = batch.getChild('timestamp');
+            const runIdCol = batch.getChild('run_id');
+            if (!timeCol || !runIdCol) continue;
+
+            const nameCol = batch.getChild('name');
+            const valueCol = batch.getChild('value');
+            const stepCol = batch.getChild('step');
+            const imageCol = batch.getChild('image_data');
+            const audioCol = batch.getChild('audio_data');
+            const videoCol = batch.getChild('video_data');
+            const formatCol = batch.getChild('format');
+            const keyCol = batch.getChild('key');
+            const valueTypeCol = batch.getChild('value_type');
+
+            if (nameCol && valueCol && !keyCol) {
+                const rows: ScalarRow[] = [];
+                for (let i = 0; i < batch.numRows; i++) {
+                    const step = stepCol?.get(i);
+                    rows.push({
+                        ts_ms: Number(timeCol.get(i)),
+                        run_id: String(runIdCol.get(i)),
+                        name: String(nameCol.get(i)),
+                        value: Number(valueCol.get(i)),
+                        step: step === null || step === undefined ? null : Number(step),
+                    });
+                }
+                if (ingestScalarRows(storeRef.current, summaryRef.current, startTimes.current, rows)) {
+                    shouldUpdate = true;
+                }
+            } else if (nameCol && imageCol && formatCol) {
+                for (let i = 0; i < batch.numRows; i++) {
+                    const payload = imageCol.get(i) as Uint8Array | null;
+                    const format = String(formatCol.get(i));
+                    upsertImageFrame(imageStoreRef.current, {
+                        ts_ms: Number(timeCol.get(i)),
+                        run_id: String(runIdCol.get(i)),
+                        name: String(nameCol.get(i)),
+                        format,
+                        objectUrl: payload && payload.byteLength > 0
+                            ? URL.createObjectURL(new Blob([payload as Uint8Array<ArrayBuffer>], { type: `image/${format}` }))
+                            : undefined,
+                    });
+                    shouldUpdate = true;
+                }
+            } else if (nameCol && formatCol && (audioCol || videoCol)) {
+                const kind: MediaKind = audioCol ? 'audio' : 'video';
+                const dataCol = (audioCol ?? videoCol)!;
+                for (let i = 0; i < batch.numRows; i++) {
+                    const format = String(formatCol.get(i));
+                    const payload = dataCol.get(i) as Uint8Array | null;
+                    // The server strips payloads when clips are persisted; those are
+                    // fetched lazily. Live-only mode delivers bytes, kept as a Blob URL.
+                    const objectUrl = payload && payload.byteLength > 0
+                        ? URL.createObjectURL(new Blob([payload as Uint8Array<ArrayBuffer>], { type: mediaMimeType(kind, format) }))
+                        : undefined;
+                    upsertMediaClip(mediaStoreRef.current, {
+                        kind,
+                        ts_ms: Number(timeCol.get(i)),
+                        run_id: String(runIdCol.get(i)),
+                        name: String(nameCol.get(i)),
+                        format,
+                        objectUrl,
+                    });
+                    shouldUpdate = true;
+                }
+            } else if (keyCol && valueCol && valueTypeCol) {
+                for (let i = 0; i < batch.numRows; i++) {
+                    setHyperparameter(
+                        summaryRef.current,
+                        dashboardConfigsRef.current,
+                        String(runIdCol.get(i)),
+                        String(keyCol.get(i)),
+                        String(valueCol.get(i)),
+                        String(valueTypeCol.get(i)),
+                    );
+                    shouldUpdate = true;
+                }
+            }
+        }
+
+        if (shouldUpdate) refreshRuns();
+    }, [refreshRuns]);
+
     useEffect(() => {
-        const ws = new WebSocket(wsUrl);
-        ws.binaryType = 'arraybuffer';
+        let disposed = false;
+        let socket: WebSocket | null = null;
+        let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+        let attempts = 0;
+        let hasConnected = false;
 
-        ws.onopen = () => setConnected(true);
-        ws.onclose = () => setConnected(false);
+        const connect = () => {
+            if (disposed) return;
+            const ws = new WebSocket(wsUrl);
+            socket = ws;
+            ws.binaryType = 'arraybuffer';
 
-        ws.onerror = (event) => {
-            console.error('[Aeroboard] WebSocket error:', event);
-            setConnected(false);
-        };
+            ws.onopen = () => {
+                setConnected(true);
+                attempts = 0;
+                // Anything sent while we were disconnected was persisted, not pushed.
+                if (hasConnected) resync();
+                hasConnected = true;
+            };
 
-        ws.onmessage = async (event) => {
-            try {
-                if (!(event.data instanceof ArrayBuffer)) return;
-                const table = arrow.tableFromIPC(event.data);
+            ws.onclose = () => {
+                setConnected(false);
+                if (disposed) return;
+                const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** attempts);
+                attempts += 1;
+                reconnectTimer = setTimeout(connect, delay);
+            };
 
-                let shouldUpdate = false;
+            ws.onerror = (event) => {
+                console.error('[Aeroboard] WebSocket error:', event);
+            };
 
-                for (const batch of table.batches) {
-                    const timeCol = batch.getChild('timestamp');
-                    const runIdCol = batch.getChild('run_id');
-                    if (!timeCol || !runIdCol) continue;
-
-                    const nameCol = batch.getChild('name');
-                    const valueCol = batch.getChild('value');
-                    const imageCol = batch.getChild('image_data');
-                    const formatCol = batch.getChild('format');
-                    const keyCol = batch.getChild('key');
-                    const valueTypeCol = batch.getChild('value_type');
-
-                    if (nameCol && valueCol && !keyCol) {
-                        let batchStep: number | null = null;
-                        for (let i = 0; i < batch.numRows; i++) {
-                            const metricName = String(nameCol.get(i));
-                            if (metricName === 'step' || metricName.endsWith('/step')) {
-                                batchStep = Number(valueCol.get(i));
-                                break;
-                            }
-                        }
-
-                        for (let i = 0; i < batch.numRows; i++) {
-                            const metricName = String(nameCol.get(i));
-                            if (metricName === 'step' || metricName.endsWith('/step')) continue;
-                            const row = {
-                                ts_ms: Number(timeCol.get(i)),
-                                run_id: String(runIdCol.get(i)),
-                                name: metricName,
-                                value: Number(valueCol.get(i)),
-                            };
-                            if (ingestPoint(storeRef.current, summaryRef.current, startTimes.current, row, batchStep)) {
-                                shouldUpdate = true;
-                            }
-                        }
-                    } else if (nameCol && imageCol && formatCol) {
-                        for (let i = 0; i < batch.numRows; i++) {
-                            const payload = imageCol.get(i);
-                            const bytes = payload instanceof Uint8Array ? payload : new Uint8Array(payload as ArrayBufferLike);
-                            upsertImageFrame(imageStoreRef.current, {
-                                ts_ms: Number(timeCol.get(i)),
-                                run_id: String(runIdCol.get(i)),
-                                name: String(nameCol.get(i)),
-                                format: String(formatCol.get(i)),
-                                image_base64: bytesToBase64(bytes),
-                            });
-                            shouldUpdate = true;
-                        }
-                    } else if (keyCol && valueCol && valueTypeCol) {
-                        for (let i = 0; i < batch.numRows; i++) {
-                            setHyperparameter(
-                                summaryRef.current,
-                                String(runIdCol.get(i)),
-                                String(keyCol.get(i)),
-                                String(valueCol.get(i)),
-                                String(valueTypeCol.get(i)),
-                            );
-                            shouldUpdate = true;
+            ws.onmessage = (event) => {
+                try {
+                    if (event.data instanceof ArrayBuffer) {
+                        handleArrowMessage(event.data);
+                    } else if (typeof event.data === 'string') {
+                        const message = JSON.parse(event.data) as { type?: string; skipped?: number };
+                        if (message.type === 'lagged') {
+                            console.warn(`[Aeroboard] Live stream skipped ${message.skipped ?? '?'} batches; re-fetching history`);
+                            resync();
                         }
                     }
+                } catch (err) {
+                    console.error('[Aeroboard] Failed to handle live message:', err);
                 }
-
-                if (shouldUpdate) refreshRuns();
-            } catch (err) {
-                console.error('[Aeroboard] Failed to parse Arrow batch from WS:', err);
-            }
+            };
         };
 
-        return () => ws.close();
-    }, [wsUrl, refreshRuns]);
+        connect();
+        return () => {
+            disposed = true;
+            clearTimeout(reconnectTimer);
+            socket?.close();
+        };
+    }, [wsUrl, handleArrowMessage, resync]);
+
+    useEffect(() => {
+        const media = mediaStoreRef;
+        const images = imageStoreRef;
+        return () => {
+            revokeMediaStore(media.current);
+            revokeImageStore(images.current);
+        };
+    }, []);
 
     const getChartData = useCallback((runId: string, name: string): TimeSeriesData | null => {
         return readChartData(storeRef.current, runId, name);
@@ -338,6 +531,22 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
         return readImageSeries(imageStoreRef.current, runId, name);
     }, []);
 
+    const getImageSource = useCallback((frame: ImageFrame, attempt = 0): string => {
+        return frame.objectUrl ?? imageContentUrl(apiBase, frame, attempt);
+    }, [apiBase]);
+
+    const getMediaSeriesForRun = useCallback((runId: string): MediaSeries[] => {
+        return readMediaSeriesForRun(mediaStoreRef.current, runId);
+    }, []);
+
+    const getRunDashboardConfig = useCallback((runId: string): PartialDashboardDefaults | null => {
+        return dashboardConfigsRef.current[runId] ?? null;
+    }, []);
+
+    const getMediaSource = useCallback((clip: MediaClip, attempt = 0): string => {
+        return clip.objectUrl ?? mediaContentUrl(apiBase, clip, attempt);
+    }, [apiBase]);
+
     const getGlobalXBounds = useCallback((targetRuns: string[], xAxis: 'wall' | 'rel' | 'step'): [number, number] => {
         return readGlobalXBounds(storeRef.current, targetRuns, xAxis);
     }, []);
@@ -359,11 +568,19 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
                 }
                 return { ok: false, reason: message };
             }
-            clearStore(storeRef, startTimes, summaryRef, imageStoreRef);
-            loadedSummaryRunsRef.current.clear();
-            loadedHistoryRunsRef.current.clear();
-            loadedImageRunsRef.current.clear();
-            frameRequestsRef.current.clear();
+            storeRef.current = {};
+            startTimes.current = {};
+            summaryRef.current = {};
+            revokeImageStore(imageStoreRef.current);
+            imageStoreRef.current = {};
+            revokeMediaStore(mediaStoreRef.current);
+            mediaStoreRef.current = {};
+            dashboardConfigsRef.current = {};
+            fetchedRunsRef.current = [];
+            for (const loaded of [loadedSummaryRunsRef, loadedHistoryRunsRef, loadedImageRunsRef, loadedMediaRunsRef]) {
+                loaded.current.clear();
+            }
+            runsRef.current = [];
             setRuns([]);
             setTick((t) => t + 1);
             return { ok: true };
@@ -383,6 +600,9 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
         getMetricSummaryKeys,
         getImageSeriesForRun,
         getImageSeries,
+        getImageSource,
+        getMediaSeriesForRun,
+        getMediaSource,
         runs,
         tick,
         loadStatus,
@@ -390,6 +610,9 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
         loadRunSummaries,
         loadHistoryForRuns,
         loadImagesForRun,
-        ensureImageFrame,
+        loadMediaForRun,
+        getRunDashboardConfig,
+        serverDashboardDefaults,
+        dashboardConfigError,
     };
 }

@@ -8,6 +8,7 @@ const COLLAPSED_STORAGE_KEY = "aeroboard-collapsed-charts";
 const ORDER_STORAGE_KEY = "aeroboard-ordered-metrics";
 const EXPERIMENTS_STORAGE_KEY = "aeroboard-collapsed-experiments";
 const RUN_COLORS_STORAGE_KEY = "aeroboard-run-colors";
+const OPTIMAL_VALUES_STORAGE_KEY = "aeroboard-optimal-values";
 
 function asRecord(raw: unknown): Record<string, boolean> {
   if (!raw || typeof raw !== "object") return {};
@@ -20,6 +21,17 @@ function asStringRecord(raw: unknown): Record<string, string> {
   if (!raw || typeof raw !== "object") return {};
   return Object.fromEntries(
     Object.entries(raw).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+  );
+}
+
+/** `null` records an explicit "no line" so a configured default target stays removed. */
+function asOptionalNumberRecord(raw: unknown): Record<string, number | null> {
+  if (!raw || typeof raw !== "object") return {};
+  return Object.fromEntries(
+    Object.entries(raw).filter(
+      (entry): entry is [string, number | null] =>
+        entry[1] === null || (typeof entry[1] === "number" && Number.isFinite(entry[1])),
+    ),
   );
 }
 
@@ -59,6 +71,28 @@ export function useDashboardPreferences() {
     asStringRecord,
   );
 
+  // User overrides for per-chart target ("optimal value") lines, keyed by chart group key.
+  // Absent key = use the configured default; null = user removed the line.
+  const [optimalValues, setOptimalValues] = usePersistentState<Record<string, number | null>>(
+    OPTIMAL_VALUES_STORAGE_KEY,
+    {},
+    asOptionalNumberRecord,
+  );
+
+  /** Drop the user's chart overrides so the configured initial view applies again. */
+  const resetChartView = () => {
+    setFavoriteCharts({});
+    setCollapsedCharts({});
+    setOrderedMetrics([]);
+    setOptimalValues({});
+  };
+
+  const hasChartOverrides =
+    Object.keys(favoriteCharts).length > 0 ||
+    Object.keys(collapsedCharts).length > 0 ||
+    orderedMetrics.length > 0 ||
+    Object.keys(optimalValues).length > 0;
+
   return {
     widthMode,
     setWidthMode,
@@ -72,5 +106,9 @@ export function useDashboardPreferences() {
     setCollapsedExperiments,
     runColors,
     setRunColors,
+    optimalValues,
+    setOptimalValues,
+    resetChartView,
+    hasChartOverrides,
   };
 }

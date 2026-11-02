@@ -13,8 +13,14 @@ import type { XAxisType } from "./components/LineChart";
 
 const ComparePanels = lazy(() => import("./components/ComparePanels"));
 const ImagePanel = lazy(() => import("./components/ImagePanel"));
+import {
+  defaultOrderRank,
+  isStarredByDefault,
+  resolveDashboardDefaults,
+} from "./lib/dashboardDefaults";
+const MediaPanel = lazy(() => import("./components/MediaPanel"));
 
-type DashboardTab = "scalars" | "images" | "analysis";
+type DashboardTab = "scalars" | "images" | "media" | "analysis";
 type ThemeMode = "light" | "dark";
 
 const THEME_STORAGE_KEY = "aeroboard-theme";
@@ -72,6 +78,17 @@ function getInitialTheme(): ThemeMode {
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
+/**
+ * Charts read their colors from CSS variables while rendering, and child effects run
+ * before this component's effects, so the theme attribute must be on <html> before the
+ * render that uses it, not in a useEffect after it.
+ */
+function applyThemeToDocument(theme: ThemeMode) {
+  if (typeof document === "undefined") return;
+  document.documentElement.dataset.theme = theme;
+  document.documentElement.style.colorScheme = theme;
+}
+
 function App() {
   const {
     connected,
@@ -80,7 +97,7 @@ function App() {
     loadRunSummaries,
     loadHistoryForRuns,
     loadImagesForRun,
-    ensureImageFrame,
+    getImageSource,
     getMetricsForRun,
     getGlobalXBounds,
     getRunSummaries,
@@ -88,8 +105,15 @@ function App() {
     getMetricSummaryKeys,
     getImageSeriesForRun,
     getImageSeries,
+    getMediaSeriesForRun,
+    getMediaSource,
+    loadMediaForRun,
     runs,
+    tick,
     deleteAllRuns,
+    getRunDashboardConfig,
+    serverDashboardDefaults,
+    dashboardConfigError,
   } = useAeroboard();
 
   const {
@@ -105,7 +129,12 @@ function App() {
     setCollapsedExperiments,
     runColors,
     setRunColors,
+    optimalValues,
+    setOptimalValues,
+    resetChartView,
+    hasChartOverrides,
   } = useDashboardPreferences();
+  const [configErrorDismissed, setConfigErrorDismissed] = useState(false);
 
   const [mode, setMode] = useState<"single" | "compare">("single");
   const [selectedRuns, setSelectedRuns] = useState<string[]>([]);
@@ -120,13 +149,15 @@ function App() {
   const [selectedImageName, setSelectedImageName] = useState("");
   const [runFilter, setRunFilter] = useState("");
   const [activeTab, setActiveTab] = useState<DashboardTab>("scalars");
-  const [theme, setTheme] = useState<ThemeMode>(() => getInitialTheme());
+  const [theme, setTheme] = useState<ThemeMode>(() => {
+    const initial = getInitialTheme();
+    applyThemeToDocument(initial);
+    return initial;
+  });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    document.documentElement.style.colorScheme = theme;
     window.localStorage.setItem(THEME_STORAGE_KEY, theme);
   }, [theme]);
 
@@ -158,42 +189,64 @@ function App() {
     void loadImagesForRun(selectedRun);
   }, [activeTab, effectiveSelectedRuns, loadImagesForRun]);
 
+  useEffect(() => {
+    if (activeTab !== "media") return;
+    const selectedRun = effectiveSelectedRuns[0];
+    if (!selectedRun) return;
+    void loadMediaForRun(selectedRun);
+  }, [activeTab, effectiveSelectedRuns, loadMediaForRun]);
+
   const experimentGroups = useMemo(() => buildExperimentGroups(runs), [runs]);
   const filteredExperimentGroups = useMemo(() => filterExperimentGroups(experimentGroups, runFilter), [experimentGroups, runFilter]);
 
   const bounds = useMemo(
     () => getGlobalXBounds(effectiveSelectedRuns, xAxisType),
-    [effectiveSelectedRuns, getGlobalXBounds, xAxisType],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `tick`: the store is a ref
+    [effectiveSelectedRuns, getGlobalXBounds, xAxisType, tick],
   );
 
   const runSummaries = useMemo(
     () => getRunSummaries(effectiveSelectedRuns),
-    [effectiveSelectedRuns, getRunSummaries],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `tick`: the store is a ref
+    [effectiveSelectedRuns, getRunSummaries, tick],
   );
 
   const availableHyperparameters = useMemo(
     () => getHyperparameterKeys(effectiveSelectedRuns),
-    [effectiveSelectedRuns, getHyperparameterKeys],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `tick`: the store is a ref
+    [effectiveSelectedRuns, getHyperparameterKeys, tick],
   );
 
   const availableMetricSummaries = useMemo(
     () => getMetricSummaryKeys(effectiveSelectedRuns),
-    [effectiveSelectedRuns, getMetricSummaryKeys],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `tick`: the store is a ref
+    [effectiveSelectedRuns, getMetricSummaryKeys, tick],
   );
 
   const imageSeriesOptions = useMemo(() => {
     const selectedRun = effectiveSelectedRuns[0];
     return selectedRun ? getImageSeriesForRun(selectedRun) : [];
-  }, [effectiveSelectedRuns, getImageSeriesForRun]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `tick`: the store is a ref
+  }, [effectiveSelectedRuns, getImageSeriesForRun, tick]);
+
+  // The stores live in refs, so memos that read them depend on `tick`, which
+  // useAeroboard bumps (at most once per frame) whenever new data arrives.
+  const mediaSeries = useMemo(() => {
+    const selectedRun = effectiveSelectedRuns[0];
+    return selectedRun ? getMediaSeriesForRun(selectedRun) : [];
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `tick`: the store is a ref
+  }, [effectiveSelectedRuns, getMediaSeriesForRun, tick]);
 
   const hasAnyImages = useMemo(
     () => runs.some((runId) => getImageSeriesForRun(runId).length > 0),
-    [getImageSeriesForRun, runs],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `tick`: the store is a ref
+    [getImageSeriesForRun, runs, tick],
   );
 
   const selectedRunsHaveImages = useMemo(
     () => effectiveSelectedRuns.some((runId) => getImageSeriesForRun(runId).length > 0),
-    [effectiveSelectedRuns, getImageSeriesForRun],
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `tick`: the store is a ref
+    [effectiveSelectedRuns, getImageSeriesForRun, tick],
   );
 
   const effectiveActiveTab = activeTab;
@@ -209,7 +262,8 @@ function App() {
     const selectedRun = effectiveSelectedRuns[0];
     if (!selectedRun || !resolvedImageName) return null;
     return getImageSeries(selectedRun, resolvedImageName);
-  }, [effectiveSelectedRuns, getImageSeries, resolvedImageName]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `tick`: the store is a ref
+  }, [effectiveSelectedRuns, getImageSeries, resolvedImageName, tick]);
 
   const currentMode: "single" | "compare" = effectiveActiveTab === "analysis" ? "compare" : mode;
 
@@ -237,22 +291,49 @@ function App() {
     }
 
     return groups;
-  }, [currentMode, effectiveSelectedRuns, getMetricsForRun]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `tick`: the store is a ref
+  }, [currentMode, effectiveSelectedRuns, getMetricsForRun, tick]);
 
   const groupKeys = useMemo(() => Object.keys(groupedMetrics).sort(), [groupedMetrics]);
+
+  // Initial view: aeroboard.toml defaults, overridden by what the selected runs' training
+  // scripts configured. `tick` covers per-run settings arriving over the live socket.
+  const dashboardDefaults = useMemo(() => {
+    return resolveDashboardDefaults(
+      serverDashboardDefaults,
+      effectiveSelectedRuns.map((runId) => getRunDashboardConfig(runId)),
+      groupKeys,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveSelectedRuns, getRunDashboardConfig, groupKeys, serverDashboardDefaults, tick]);
+
+  // UI choices (localStorage) win; otherwise fall back to the configured defaults.
+  const effectiveFavoriteCharts = useMemo(() => {
+    const result: Record<string, boolean> = {};
+    for (const key of groupKeys) result[key] = favoriteCharts[key] ?? isStarredByDefault(dashboardDefaults, key);
+    return result;
+  }, [dashboardDefaults, favoriteCharts, groupKeys]);
+
+  const effectiveOptimalValues = useMemo(() => {
+    const result: Record<string, number | null> = {};
+    for (const key of groupKeys) result[key] = key in optimalValues ? optimalValues[key] : dashboardDefaults.targets[key] ?? null;
+    return result;
+  }, [dashboardDefaults, groupKeys, optimalValues]);
+
   const orderedMetricKeys = useMemo(() => {
     const keys = new Set(groupKeys);
-    return [
-      ...orderedMetrics.filter((metric) => keys.has(metric)),
-      ...groupKeys.filter((metric) => !orderedMetrics.includes(metric)),
-    ];
-  }, [groupKeys, orderedMetrics]);
+    const userOrdered = orderedMetrics.filter((metric) => keys.has(metric));
+    const rest = groupKeys
+      .filter((metric) => !orderedMetrics.includes(metric))
+      .sort((a, b) => defaultOrderRank(dashboardDefaults, a) - defaultOrderRank(dashboardDefaults, b) || a.localeCompare(b));
+    return [...userOrdered, ...rest];
+  }, [dashboardDefaults, groupKeys, orderedMetrics]);
 
   const visibleMetricKeys = useMemo(() => {
-    const favorites = orderedMetricKeys.filter((key) => favoriteCharts[key]);
-    const nonFavorites = orderedMetricKeys.filter((key) => !favoriteCharts[key] && groupedMetrics[key]);
+    const favorites = orderedMetricKeys.filter((key) => effectiveFavoriteCharts[key]);
+    const nonFavorites = orderedMetricKeys.filter((key) => !effectiveFavoriteCharts[key] && groupedMetrics[key]);
     return [...favorites, ...nonFavorites];
-  }, [favoriteCharts, groupedMetrics, orderedMetricKeys]);
+  }, [effectiveFavoriteCharts, groupedMetrics, orderedMetricKeys]);
 
   const singleRunRevision =
     effectiveActiveTab === "analysis" ? "compare" : mode === "single" ? (effectiveSelectedRuns[0] ?? "none") : "compare";
@@ -260,6 +341,7 @@ function App() {
   const visibleTabs: { id: DashboardTab; label: string }[] = [
     { id: "scalars", label: "Scalar Values" },
     { id: "images", label: "Images / Plots" },
+    { id: "media", label: "Audio / Video" },
     { id: "analysis", label: "Hyperparameter Analysis" },
   ];
 
@@ -375,7 +457,28 @@ function App() {
 
       return (
         <Suspense fallback={<div className="comparison-card empty-state-card"><h3>Loading image view…</h3></div>}>
-          <ImagePanel series={activeImageSeries} onRequestFrame={ensureImageFrame} />
+          <ImagePanel series={activeImageSeries} getImageSource={getImageSource} />
+        </Suspense>
+      );
+    }
+
+    if (effectiveActiveTab === "media") {
+      if (mediaSeries.length === 0) {
+        return (
+          <div className="comparison-card empty-state-card">
+            <h3>Audio / Video</h3>
+            <p>
+              {loadStatus.media === "loading"
+                ? "Loading media history for the selected run…"
+                : "No audio or video logged for this run yet. Use client.log_audio(...) or client.log_video(...)."}
+            </p>
+          </div>
+        );
+      }
+
+      return (
+        <Suspense fallback={<div className="comparison-card empty-state-card"><h3>Loading media view…</h3></div>}>
+          <MediaPanel series={mediaSeries} getMediaSource={getMediaSource} />
         </Suspense>
       );
     }
@@ -402,12 +505,14 @@ function App() {
         removeOutliers={removeOutliers}
         xRange={globalXRange}
         widthMode={widthMode}
-        favoriteCharts={favoriteCharts}
+        favoriteCharts={effectiveFavoriteCharts}
         collapsedCharts={collapsedCharts}
         singleRunRevision={singleRunRevision}
         setFavoriteCharts={setFavoriteCharts}
         setCollapsedCharts={setCollapsedCharts}
         setOrderedMetrics={setOrderedMetrics}
+        optimalValues={effectiveOptimalValues}
+        setOptimalValues={setOptimalValues}
       />
     );
   };
@@ -420,7 +525,10 @@ function App() {
         sidebarOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         theme={theme}
-        onThemeToggle={() => setTheme(nextTheme)}
+        onThemeToggle={() => {
+          applyThemeToDocument(nextTheme);
+          setTheme(nextTheme);
+        }}
         nextTheme={nextTheme}
         effectiveActiveTab={effectiveActiveTab}
         mode={mode}
@@ -445,6 +553,8 @@ function App() {
         onRemoveOutliersChange={setRemoveOutliers}
         widthMode={widthMode}
         onWidthModeChange={setWidthMode}
+        canResetChartView={hasChartOverrides}
+        onResetChartView={resetChartView}
         bounds={bounds}
         globalXRange={globalXRange}
         onGlobalXRangeChange={setGlobalXRange}
@@ -477,6 +587,15 @@ function App() {
           deleteError={deleteError}
           onDismissDeleteError={() => setDeleteError(null)}
         />
+
+        {dashboardConfigError && !configErrorDismissed ? (
+          <div className="status-banner status-banner--error config-error-banner" role="status">
+            <p>Dashboard defaults not applied: {dashboardConfigError}</p>
+            <button type="button" onClick={() => setConfigErrorDismissed(true)}>
+              Dismiss
+            </button>
+          </div>
+        ) : null}
 
         <section className="dashboard-content">
           {renderActiveTab()}

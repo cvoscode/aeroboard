@@ -1,31 +1,42 @@
-use axum::{extract::{Query, State}, http::StatusCode, Json};
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use arrow::array::{ArrayRef, Float64Array, StringDictionaryBuilder, TimestampMillisecondArray};
+use arrow::datatypes::{DataType, Field, Int32Type, Schema, TimeUnit};
+use arrow::ipc::writer::StreamWriter;
+use arrow::record_batch::RecordBatch;
+use axum::{
+    body::{Body, Bytes},
+    extract::{Query, Request, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
+    Json,
+};
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::BTreeSet;
 
 use crate::app_state::AppState;
-use crate::storage::{HistoryQueryOptions, ImageFramePayload, ImageFrameQuery, ImageQueryOptions};
+use crate::storage::{
+    BoxError, HistoryQueryOptions, ImageFrameQuery, ImageQueryOptions, MediaKind, MediaPayload,
+    MediaSource,
+};
+
+/// Content type of `GET /api/history?format=arrow` responses.
+pub const ARROW_STREAM_CONTENT_TYPE: &str = "application/vnd.apache.arrow.stream";
+/// Pagination cursor header for Arrow responses (JSON responses carry `next_cursor`).
+pub const NEXT_CURSOR_HEADER: &str = "x-aeroboard-next-cursor";
 
 /// Standard history query parameters.
-/// 
-/// All fields are optional for flexible querying:
-/// - `run_id`: Filter by specific run ID or comma-separated list
-/// - `metric`: Filter by specific metric name or comma-separated list
-/// - `start_ms`: Start timestamp in milliseconds (inclusive)
-/// - `end_ms`: End timestamp in milliseconds (inclusive)
-/// - `limit`: Maximum number of results to return
-/// - `cursor`: Pagination cursor (offset-style)
 ///
-/// API contract:
-/// - Backend-agnostic query interface that works with all storage backends
-/// - Always returns explicit empty results rather than relying on frontend assumptions
-/// - Error messages are descriptive and include backend-specific context
+/// All fields are optional:
+/// - `run_id`: a run ID or comma-separated list
+/// - `metric`: a metric name or comma-separated list
+/// - `start_ms` / `end_ms`: inclusive timestamp bounds in milliseconds
+/// - `limit` / `cursor`: offset-style pagination; no `limit` returns everything
+/// - `format`: `json` (default) or `arrow` for an Arrow IPC stream with dictionary-
+///   encoded `run_id`/`name` columns, which is far smaller for long runs
 ///
-/// Cursor-based pagination semantics:
-/// - `cursor = None`: Return first `limit` results from start of dataset
-/// - `cursor = N`: Return next `limit` results after position `N`
-/// - `limit = None`: Return all remaining results (unlimited)
-/// - Cursor is position-based, not item-based for consistent pagination
+/// Errors are reported with a non-2xx status and an `error` field in the JSON body.
 #[derive(Debug, Deserialize, Default)]
 pub struct HistoryQuery {
     pub run_id: Option<String>,
@@ -35,6 +46,7 @@ pub struct HistoryQuery {
     pub limit: Option<usize>,
     pub cursor: Option<usize>,
     pub include_summaries: Option<bool>,
+    pub format: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -48,8 +60,22 @@ pub struct ImageHistoryQuery {
     pub include_data: Option<bool>,
 }
 
+/// Query for `/api/history/media`. Returns metadata only; payload bytes are
+/// fetched lazily from `/api/history/media/content`.
 #[derive(Debug, Deserialize)]
-pub struct ImageFrameContentQuery {
+pub struct MediaHistoryQuery {
+    pub kind: MediaKind,
+    pub run_id: Option<String>,
+    pub metric: Option<String>,
+    pub start_ms: Option<i64>,
+    pub end_ms: Option<i64>,
+    pub limit: Option<usize>,
+    pub cursor: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MediaContentQuery {
+    pub kind: MediaKind,
     pub run_id: String,
     pub name: String,
     pub ts_ms: i64,
@@ -69,7 +95,7 @@ pub struct HistoryResponse {
     pub error: Option<String>,
 }
 
-/// Response from /api/history/images endpoint.
+/// Response from /api/history/images and /api/history/media.
 #[derive(Serialize)]
 pub struct ImageHistoryResponse {
     pub rows: Vec<ImageHistoryPoint>,
@@ -97,12 +123,15 @@ pub struct DeleteRunsResponse {
 }
 
 /// A single scalar data point returned from persisted history.
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct HistoryPoint {
     pub ts_ms: i64,
     pub run_id: String,
     pub name: String,
     pub value: f64,
+    /// Training step logged alongside the value, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<f64>,
 }
 
 /// A single image data point returned from image history.
@@ -117,7 +146,7 @@ pub struct ImageHistoryPoint {
 }
 
 /// Summary of hyperparameters for a run.
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct HyperparameterEntry {
     pub key: String,
     pub value: String,
@@ -125,7 +154,7 @@ pub struct HyperparameterEntry {
 }
 
 /// Summary of metrics for a run.
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct MetricSummary {
     pub name: String,
     pub last: f64,
@@ -134,7 +163,7 @@ pub struct MetricSummary {
 }
 
 /// Summary of a complete run including hyperparameters and metrics.
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 pub struct RunSummary {
     pub run_id: String,
     pub hyperparameters: Vec<HyperparameterEntry>,
@@ -147,33 +176,22 @@ pub struct RunSummariesResponse {
     pub error: Option<String>,
 }
 
-#[derive(Serialize)]
-pub struct ImageFrameContentResponse {
-    pub run_id: String,
-    pub name: String,
-    pub ts_ms: i64,
-    pub format: String,
-    pub image_base64: String,
-    pub error: Option<String>,
-}
-
 /// Request payload for /api/runs/resolve endpoint.
 #[derive(Debug, Deserialize)]
 pub struct ResolveRunIdRequest {
     pub base_run_id: String,
 }
 
-/// Resolve the canonical run ID for a given base run ID.
+/// Resolve the run ID to use for a requested base name.
 ///
-/// This function queries the storage backend to find all runs matching the
-/// base run ID (including versioned variants like `run_name-v1`, `run_name-v2`, etc.).
-/// It returns the canonical run ID to use, which may be the base run ID itself or
-/// a versioned variant if the base already exists.
+/// Returns the base name if it is unused, otherwise the next free version:
+/// `name` → `name-v2` → `name-v3` … A Lightning framework suffix (`-pl2.5.1`) is
+/// kept at the end: `exp-pl2.5.1` → `exp-v2-pl2.5.1`.
 pub fn resolve_run_id(base: &str, existing: &BTreeSet<String>) -> String {
     let normalized_base = normalize_run_id(base);
     let existing_versions = extract_version_from_existing(existing, &normalized_base);
 
-    if existing_versions.is_empty() || !existing_versions.contains(&1) {
+    if !existing_versions.contains(&1) {
         return normalized_base;
     }
 
@@ -187,12 +205,18 @@ fn normalize_run_id(run_id: &str) -> String {
     run_id.trim().to_string()
 }
 
-/// Split a run ID into base and framework suffix (e.g., "resnet-pl3.10" → ("resnet", "-pl3.10")).
+/// Split off a trailing Lightning version suffix: `-pl` followed by a dotted
+/// version number (`resnet-pl2.5.1` → `("resnet", "-pl2.5.1")`). Names that merely
+/// contain `-pl` (`sample-placement`) have no suffix.
 fn split_framework_suffix(candidate: &str) -> (String, String) {
-    match candidate.rsplit_once("-pl") {
-        Some((prefix, suffix)) if !suffix.is_empty() => (prefix.to_string(), format!("-pl{}", suffix)),
-        _ => (candidate.to_string(), String::new()),
+    if let Some((prefix, version)) = candidate.rsplit_once("-pl") {
+        let is_version = !version.is_empty()
+            && version.split('.').all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+        if is_version && !prefix.is_empty() {
+            return (prefix.to_string(), format!("-pl{version}"));
+        }
     }
+    (candidate.to_string(), String::new())
 }
 
 /// Extract the version number from a candidate run ID relative to a base run ID.
@@ -223,109 +247,11 @@ fn extract_version_from_existing(existing: &BTreeSet<String>, base: &str) -> BTr
 }
 
 /// Build run summaries from history points and hyperparameters.
-///
-/// This function aggregates data points into per-run summaries, tracking
-/// the last value, min, and max for each metric.
+#[cfg(test)]
 pub fn build_run_summaries(points: &[HistoryPoint], hyperparameters: Vec<(String, HyperparameterEntry)>) -> Vec<RunSummary> {
-    let mut per_run_metrics: std::collections::BTreeMap<String, std::collections::BTreeMap<String, MetricStatAccumulator>> = std::collections::BTreeMap::new();
-    for point in points {
-        let metric_map = per_run_metrics.entry(point.run_id.clone()).or_default();
-        let stats = metric_map.entry(point.name.clone()).or_insert_with(|| MetricStatAccumulator {
-            last_ts_ms: point.ts_ms,
-            last: point.value,
-            min: point.value,
-            max: point.value,
-        });
-        stats.update(point.ts_ms, point.value);
-    }
-
-    let mut per_run_hparams: std::collections::BTreeMap<String, std::collections::BTreeMap<String, HyperparameterEntry>> = std::collections::BTreeMap::new();
-    for (run_id, entry) in hyperparameters {
-        per_run_hparams.entry(run_id).or_default().insert(entry.key.clone(), entry);
-    }
-
-    let run_ids: std::collections::BTreeSet<String> = per_run_metrics.keys().chain(per_run_hparams.keys()).cloned().collect();
-    run_ids.into_iter().map(|run_id| {
-        let hyperparameters = per_run_hparams.remove(&run_id)
-            .map(|entries| entries.into_values().collect())
-            .unwrap_or_default();
-        let metric_summaries = per_run_metrics.remove(&run_id)
-            .map(|metrics| metrics.into_iter().map(|(name, acc)| MetricSummary {
-                name,
-                last: acc.last,
-                min: acc.min,
-                max: acc.max,
-            }).collect())
-            .unwrap_or_default();
-        RunSummary { run_id, hyperparameters, metric_summaries }
-    }).collect()
-}
-
-/// Aggregator for metric statistics.
-struct MetricStatAccumulator {
-    last_ts_ms: i64,
-    last: f64,
-    min: f64,
-    max: f64,
-}
-
-impl MetricStatAccumulator {
-    fn update(&mut self, ts_ms: i64, value: f64) {
-        if ts_ms >= self.last_ts_ms {
-            self.last_ts_ms = ts_ms;
-            self.last = value;
-        }
-        self.min = self.min.min(value);
-        self.max = self.max.max(value);
-    }
-}
-
-/// Apply standard history filters to query results.
-///
-/// Filter semantics:
-/// - Multiple run_id/metric values are joined with OR logic (CSV parsing)
-/// - Timestamp range uses inclusive bounds on both ends
-/// - Empty filters (missing fields) apply to all records
-/// - Time window filtering only applies if bounds are specified
-///
-/// This function ensures consistent filtering behavior across all storage backends.
-pub fn apply_history_filters(rows: Vec<HistoryPoint>, query: &HistoryQuery) -> Vec<HistoryPoint> {
-    let run_ids = csv_set(query.run_id.as_deref());
-    let metrics = csv_set(query.metric.as_deref());
-
-    rows.into_iter()
-        .filter(|row| {
-            (run_ids.is_empty() || run_ids.contains(&row.run_id))
-                && (metrics.is_empty() || metrics.contains(&row.name))
-                && query.start_ms.is_none_or(|start| row.ts_ms >= start)
-                && query.end_ms.is_none_or(|end| row.ts_ms <= end)
-        })
-        .collect()
-}
-
-/// Apply image history filters (same semantics as scalar filters).
-pub fn apply_image_filters(rows: Vec<ImageHistoryPoint>, query: &ImageHistoryQuery) -> Vec<ImageHistoryPoint> {
-    let run_ids = csv_set(query.run_id.as_deref());
-    let metrics = csv_set(query.metric.as_deref());
-
-    rows.into_iter()
-        .filter(|row| {
-            (run_ids.is_empty() || run_ids.contains(&row.run_id))
-                && (metrics.is_empty() || metrics.contains(&row.name))
-                && query.start_ms.is_none_or(|start| row.ts_ms >= start)
-                && query.end_ms.is_none_or(|end| row.ts_ms <= end)
-        })
-        .collect()
-}
-
-/// Filter hyperparameters by run ID.
-pub fn filter_hyperparameters(
-    rows: Vec<(String, HyperparameterEntry)>,
-    query: &HistoryQuery,
-) -> Vec<(String, HyperparameterEntry)> {
-    let run_ids = csv_set(query.run_id.as_deref());
-    rows.into_iter()
-        .filter(|(run_id, _)| run_ids.is_empty() || run_ids.contains(run_id))
+    crate::summaries::accumulate(points, hyperparameters)
+        .into_iter()
+        .map(|(run_id, accumulator)| accumulator.to_summary(&run_id))
         .collect()
 }
 
@@ -337,25 +263,6 @@ pub fn csv_set(value: Option<&str>) -> BTreeSet<String> {
         .filter(|item| !item.is_empty())
         .map(ToOwned::to_owned)
         .collect()
-}
-
-/// Page a vector of items based on cursor and limit.
-///
-/// Cursor-based pagination returns items at positions [cursor, cursor + limit)
-/// from the sorted dataset. Returns None for next_cursor when all items are returned.
-pub fn page_vec<T>(rows: Vec<T>, cursor: Option<usize>, limit: Option<usize>) -> (Vec<T>, Option<usize>) {
-    let start = cursor.unwrap_or(0);
-    let limit = limit.unwrap_or(rows.len().max(1));
-    let total = rows.len();
-
-    let paged: Vec<T> = rows.into_iter().skip(start).take(limit).collect();
-    let next_cursor = if start + paged.len() < total {
-        Some(start + paged.len())
-    } else {
-        None
-    };
-
-    (paged, next_cursor)
 }
 
 pub fn build_history_query_options(query: &HistoryQuery) -> HistoryQueryOptions {
@@ -381,189 +288,322 @@ pub fn build_image_query_options(query: &ImageHistoryQuery) -> ImageQueryOptions
     }
 }
 
+/// A JSON error body with a 500 status (or the given status).
+fn json_error<T: Serialize>(status: StatusCode, context: &str, error: &BoxError, body: impl FnOnce(String) -> T) -> Response {
+    let msg = error.to_string();
+    tracing::error!("{context}: {msg}");
+    (status, Json(body(msg))).into_response()
+}
+
+/// Encode history rows as an Arrow IPC stream. `run_id` and `name` are
+/// dictionary-encoded, so each distinct string is sent once.
+pub fn history_rows_to_arrow(rows: &[HistoryPoint]) -> Result<Vec<u8>, arrow::error::ArrowError> {
+    let dictionary = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        Field::new("run_id", dictionary.clone(), false),
+        Field::new("name", dictionary, false),
+        Field::new("value", DataType::Float64, false),
+        Field::new("step", DataType::Float64, true),
+    ]));
+
+    let mut run_ids = StringDictionaryBuilder::<Int32Type>::new();
+    let mut names = StringDictionaryBuilder::<Int32Type>::new();
+    for row in rows {
+        run_ids.append_value(&row.run_id);
+        names.append_value(&row.name);
+    }
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(TimestampMillisecondArray::from_iter_values(rows.iter().map(|row| row.ts_ms))),
+        Arc::new(run_ids.finish()),
+        Arc::new(names.finish()),
+        Arc::new(Float64Array::from_iter_values(rows.iter().map(|row| row.value))),
+        Arc::new(Float64Array::from_iter(rows.iter().map(|row| row.step))),
+    ];
+    let batch = RecordBatch::try_new(schema.clone(), columns)?;
+
+    let mut buf = Vec::new();
+    let mut writer = StreamWriter::try_new(&mut buf, &schema)?;
+    writer.write(&batch)?;
+    writer.finish()?;
+    drop(writer);
+    Ok(buf)
+}
+
 /// GET /api/history handler
-///
-/// Queries persisted history using the StorageEngine trait for backend-agnostic behavior.
 pub async fn history_handler(
     State(state): State<AppState>,
     Query(query): Query<HistoryQuery>,
-) -> Json<HistoryResponse> {
+) -> Response {
     let storage_query = build_history_query_options(&query);
+    let as_arrow = query.format.as_deref().is_some_and(|format| format.eq_ignore_ascii_case("arrow"));
 
-    match state.storage.query_history(&storage_query).await {
-        Ok(page) => {
-            let run_summaries = if query.include_summaries.unwrap_or(true) {
-                match state.storage.query_hyperparameters(&storage_query.run_ids).await {
-                    Ok(hyperparameters) => build_run_summaries(&page.rows, hyperparameters),
-                    Err(error) => {
-                        let msg = error.to_string();
-                        tracing::error!("Failed to query hyperparameters: {}", msg);
-                        return Json(HistoryResponse { rows: vec![], run_summaries: vec![], next_cursor: None, error: Some(msg) });
-                    }
-                }
-            } else {
-                vec![]
-            };
-
-            Json(HistoryResponse { rows: page.rows, run_summaries, next_cursor: page.next_cursor, error: None })
-        }
+    let page = match state.storage.query_history(&storage_query).await {
+        Ok(page) => page,
         Err(error) => {
-            let msg = error.to_string();
-            tracing::error!("Failed to query history: {}", msg);
-            Json(HistoryResponse { rows: vec![], run_summaries: vec![], next_cursor: None, error: Some(msg) })
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to query history", &error, |msg| {
+                HistoryResponse { rows: vec![], run_summaries: vec![], next_cursor: None, error: Some(msg) }
+            });
         }
+    };
+
+    if as_arrow {
+        return match history_rows_to_arrow(&page.rows) {
+            Ok(bytes) => {
+                let mut builder = Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, ARROW_STREAM_CONTENT_TYPE)
+                    .header(header::CACHE_CONTROL, "no-store");
+                if let Some(cursor) = page.next_cursor {
+                    builder = builder.header(NEXT_CURSOR_HEADER, cursor.to_string());
+                }
+                builder.body(Body::from(bytes)).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+            }
+            Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to encode history", &error.into(), |msg| {
+                HistoryResponse { rows: vec![], run_summaries: vec![], next_cursor: None, error: Some(msg) }
+            }),
+        };
     }
+
+    // Summaries cover whole runs, not just the requested page.
+    let run_summaries = if query.include_summaries.unwrap_or(true) {
+        match state.summaries.summaries(state.storage.as_ref(), &storage_query.run_ids).await {
+            Ok(summaries) => summaries,
+            Err(error) => {
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to build run summaries", &error, |msg| {
+                    HistoryResponse { rows: vec![], run_summaries: vec![], next_cursor: None, error: Some(msg) }
+                });
+            }
+        }
+    } else {
+        vec![]
+    };
+
+    Json(HistoryResponse { rows: page.rows, run_summaries, next_cursor: page.next_cursor, error: None }).into_response()
 }
 
 /// GET /api/runs/summary handler
 pub async fn run_summaries_handler(
     State(state): State<AppState>,
     Query(query): Query<RunSummaryQuery>,
-) -> Json<RunSummariesResponse> {
+) -> Response {
     let run_ids = csv_set(query.run_id.as_deref());
-    let storage_query = HistoryQueryOptions {
-        run_ids: run_ids.clone(),
-        ..HistoryQueryOptions::default()
-    };
-
-    match state.storage.query_history(&storage_query).await {
-        Ok(page) => match state.storage.query_hyperparameters(&run_ids).await {
-            Ok(hyperparameters) => {
-                let run_summaries = build_run_summaries(&page.rows, hyperparameters);
-                Json(RunSummariesResponse { run_summaries, error: None })
-            }
-            Err(error) => {
-                let msg = error.to_string();
-                tracing::error!("Failed to query hyperparameters: {}", msg);
-                Json(RunSummariesResponse { run_summaries: vec![], error: Some(msg) })
-            }
-        },
-        Err(error) => {
-            let msg = error.to_string();
-            tracing::error!("Failed to query history: {}", msg);
-            Json(RunSummariesResponse { run_summaries: vec![], error: Some(msg) })
-        },
+    match state.summaries.summaries(state.storage.as_ref(), &run_ids).await {
+        Ok(run_summaries) => Json(RunSummariesResponse { run_summaries, error: None }).into_response(),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to build run summaries", &error, |msg| {
+            RunSummariesResponse { run_summaries: vec![], error: Some(msg) }
+        }),
     }
 }
 
 /// GET /api/history/images handler
-///
-/// Queries image history using StorageEngine for backend-agnostic behavior.
 pub async fn image_history_handler(
     State(state): State<AppState>,
     Query(query): Query<ImageHistoryQuery>,
-) -> Json<ImageHistoryResponse> {
+) -> Response {
     let storage_query = build_image_query_options(&query);
 
     match state.storage.query_image_history(&storage_query).await {
-        Ok(page) => {
-            Json(ImageHistoryResponse { rows: page.rows, next_cursor: page.next_cursor, error: None })
-        }
-        Err(error) => {
-            let msg = error.to_string();
-            tracing::error!("Failed to query image history: {}", msg);
-            Json(ImageHistoryResponse { rows: vec![], next_cursor: None, error: Some(msg) })
-        }
+        Ok(page) => Json(ImageHistoryResponse { rows: page.rows, next_cursor: page.next_cursor, error: None }).into_response(),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to query image history", &error, |msg| {
+            ImageHistoryResponse { rows: vec![], next_cursor: None, error: Some(msg) }
+        }),
     }
 }
 
-pub async fn image_frame_content_handler(
-    State(state): State<AppState>,
-    Query(query): Query<ImageFrameContentQuery>,
-) -> Json<ImageFrameContentResponse> {
-    match state.storage.load_image_frame(&ImageFrameQuery {
-        run_id: query.run_id.clone(),
-        name: query.name.clone(),
-        ts_ms: query.ts_ms,
-    }).await {
-        Ok(Some(ImageFramePayload { format, image_base64 })) => Json(ImageFrameContentResponse {
-            run_id: query.run_id,
-            name: query.name,
-            ts_ms: query.ts_ms,
-            format,
-            image_base64,
-            error: None,
-        }),
-        Ok(None) => Json(ImageFrameContentResponse {
-            run_id: query.run_id,
-            name: query.name,
-            ts_ms: query.ts_ms,
-            format: String::new(),
-            image_base64: String::new(),
-            error: Some("image frame not found".to_string()),
-        }),
-        Err(error) => {
-            let msg = error.to_string();
-            tracing::error!("Failed to load image frame: {}", msg);
-            Json(ImageFrameContentResponse {
-                run_id: query.run_id,
-                name: query.name,
-                ts_ms: query.ts_ms,
-                format: String::new(),
-                image_base64: String::new(),
-                error: Some(msg),
-            })
-        }
-    }
-}
-
-/// GET /api/runs handler
-///
-/// Lists runs from the live t_junction and persisted storage.
-pub async fn runs_handler(
-    State(state): State<AppState>,
-) -> Json<RunsResponse> {
-    let mut runs: BTreeSet<String> = state.t_junction.current_runs().await.into_iter().collect();
+/// Live run IDs plus every persisted run.
+async fn known_runs(state: &AppState) -> BTreeSet<String> {
+    let mut runs: BTreeSet<String> = state.t_junction.current_runs().into_iter().collect();
     match state.storage.list_runs().await {
         Ok(stored_runs) => runs.extend(stored_runs),
         Err(error) => tracing::warn!("Failed to list persisted runs: {}", error),
     }
+    runs
+}
 
-    Json(RunsResponse {
-        runs: runs.into_iter().collect(),
-    })
+/// GET /api/runs handler
+pub async fn runs_handler(State(state): State<AppState>) -> Json<RunsResponse> {
+    Json(RunsResponse { runs: known_runs(&state).await.into_iter().collect() })
 }
 
 /// POST /api/runs/resolve handler
 ///
-/// Resolves the canonical run ID for a given base run ID.
+/// Resolves and reserves the run ID for a base name, so two training processes
+/// starting at the same moment with the same name get different versions.
 pub async fn resolve_run_id_handler(
     State(state): State<AppState>,
     Json(payload): Json<ResolveRunIdRequest>,
 ) -> Json<ResolveRunIdResponse> {
     let requested = normalize_run_id(&payload.base_run_id);
-    let mut existing: BTreeSet<String> = state.t_junction.current_runs().await.into_iter().collect();
-    match state.storage.list_runs().await {
-        Ok(stored_runs) => existing.extend(stored_runs),
-        Err(error) => tracing::warn!("Failed to list persisted runs while resolving run id: {}", error),
-    }
-
-    Json(ResolveRunIdResponse {
-        run_id: resolve_run_id(&requested, &existing),
-    })
+    let existing = known_runs(&state).await;
+    // Resolve-and-reserve happens under the run registry lock via `reserve_run`.
+    let run_id = state.t_junction.reserve_run(|live| {
+        let mut all = existing;
+        all.extend(live.iter().cloned());
+        resolve_run_id(&requested, &all)
+    });
+    Json(ResolveRunIdResponse { run_id })
 }
 
 /// DELETE /api/history handler
 ///
-/// Clears persisted history and live run cache using StorageEngine and TJunction.
-pub async fn delete_history_handler(
-    State(state): State<AppState>,
-) -> (StatusCode, Json<DeleteRunsResponse>) {
-    // Clear persisted storage
+/// Clears persisted history, cached summaries and the live run registry.
+pub async fn delete_history_handler(State(state): State<AppState>) -> (StatusCode, Json<DeleteRunsResponse>) {
     if let Err(error) = state.storage.clear_history().await {
         let msg = error.to_string();
         tracing::error!("Failed to delete persisted history: {}", msg);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(DeleteRunsResponse { deleted: false, error: Some(msg) })
+            Json(DeleteRunsResponse { deleted: false, error: Some(msg) }),
         );
     }
 
-    // Clear live run IDs from T-Junction so sidebar re-fetches fresh run list
-    state.t_junction.clear_live_runs().await;
+    state.summaries.clear().await;
+    state.t_junction.clear_live_runs();
 
-    (
-        StatusCode::OK,
-        Json(DeleteRunsResponse { deleted: true, error: None })
-    )
+    (StatusCode::OK, Json(DeleteRunsResponse { deleted: true, error: None }))
+}
+
+/// GET /api/history/media?kind=audio|video|image
+///
+/// Lists media items without payloads so the dashboard can render a timeline
+/// cheaply and only download the items the user actually views.
+pub async fn media_history_handler(
+    State(state): State<AppState>,
+    Query(query): Query<MediaHistoryQuery>,
+) -> Response {
+    let storage_query = ImageQueryOptions {
+        run_ids: csv_set(query.run_id.as_deref()),
+        metrics: csv_set(query.metric.as_deref()),
+        start_ms: query.start_ms,
+        end_ms: query.end_ms,
+        limit: query.limit,
+        cursor: query.cursor,
+        include_data: false,
+    };
+
+    match state.storage.query_media_history(query.kind, &storage_query).await {
+        Ok(page) => Json(ImageHistoryResponse { rows: page.rows, next_cursor: page.next_cursor, error: None }).into_response(),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to query {:?} history", query.kind), &error, |msg| {
+            ImageHistoryResponse { rows: vec![], next_cursor: None, error: Some(msg) }
+        }),
+    }
+}
+
+pub async fn media_content_handler(
+    State(state): State<AppState>,
+    Query(query): Query<MediaContentQuery>,
+    request: Request,
+) -> Response {
+    let frame_query = ImageFrameQuery {
+        run_id: query.run_id,
+        name: query.name,
+        ts_ms: query.ts_ms,
+    };
+
+    let payload = match state.storage.load_media(query.kind, &frame_query).await {
+        Ok(Some(payload)) => payload,
+        Ok(None) => return media_error(StatusCode::NOT_FOUND, "media item not found"),
+        Err(error) => {
+            tracing::error!("Failed to load {:?} payload: {}", query.kind, error);
+            return media_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+    };
+
+    let MediaPayload { format, source } = payload;
+    let mime = mime_guess::from_ext(&format).first_or_octet_stream();
+
+    let mut response = match source {
+        MediaSource::File(path) => {
+            match tower_http::services::ServeFile::new_with_mime(path, &mime).try_call(request).await {
+                Ok(response) => response.map(Body::new),
+                Err(error) => {
+                    tracing::error!("Failed to stream media file: {}", error);
+                    return media_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to read media file");
+                }
+            }
+        }
+        MediaSource::Bytes(bytes) => bytes_response(bytes, mime.as_ref(), request.headers()),
+    };
+
+    let cacheable = response.status().is_success() || response.status() == StatusCode::NOT_MODIFIED;
+    let headers = response.headers_mut();
+    if cacheable {
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=86400"));
+    }
+    // Payloads are user-supplied; never let the browser sniff or execute them
+    // (e.g. an "svg"/"html" format opened directly in a tab).
+    headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'; media-src 'self'; img-src 'self'; sandbox"),
+    );
+    response
+}
+
+fn media_error(status: StatusCode, message: &str) -> Response {
+    let mut response = (status, Json(serde_json::json!({ "error": message }))).into_response();
+    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+/// Build a response for an in-memory payload, honouring a single `Range: bytes=` header.
+fn bytes_response(bytes: Vec<u8>, content_type: &str, request_headers: &HeaderMap) -> Response {
+    // `Bytes` lets range responses share the buffer instead of copying the slice.
+    let bytes = Bytes::from(bytes);
+    let total = bytes.len() as u64;
+    let content_type = HeaderValue::from_str(content_type)
+        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+
+    let range = request_headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| parse_byte_range(value, total));
+
+    let builder = Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::ACCEPT_RANGES, "bytes");
+
+    let response = match range {
+        Some(Some((start, end))) => builder
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{total}"))
+            .header(header::CONTENT_LENGTH, end - start + 1)
+            .body(Body::from(bytes.slice(start as usize..=end as usize))),
+        Some(None) => builder
+            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+            .header(header::CONTENT_RANGE, format!("bytes */{total}"))
+            .body(Body::empty()),
+        None => builder
+            .status(StatusCode::OK)
+            .header(header::CONTENT_LENGTH, total)
+            .body(Body::from(bytes)),
+    };
+
+    response.unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// Parse a single-range `bytes=` header into an inclusive `(start, end)`.
+/// Returns `None` when the range cannot be satisfied. For multi-range requests
+/// only the first range is served.
+pub(crate) fn parse_byte_range(value: &str, total: u64) -> Option<(u64, u64)> {
+    let spec = value.trim().strip_prefix("bytes=")?.split(',').next()?.trim();
+    let (start, end) = spec.split_once('-')?;
+    if total == 0 {
+        return None;
+    }
+
+    let (start, end) = match (start.trim(), end.trim()) {
+        ("", suffix) => {
+            let suffix: u64 = suffix.parse().ok()?;
+            if suffix == 0 {
+                return None;
+            }
+            (total.saturating_sub(suffix), total - 1)
+        }
+        (start, "") => (start.parse().ok()?, total - 1),
+        (start, end) => (start.parse().ok()?, end.parse::<u64>().ok()?.min(total - 1)),
+    };
+
+    (start <= end && start < total).then_some((start, end))
 }

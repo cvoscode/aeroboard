@@ -47,10 +47,16 @@ cd aeroboard-server
 cargo fmt
 ```
 
-### Web linting
+<span id="web-linting"></span>
+
+### Web tests, build, and linting
+
+Use Node.js 22.18 or newer for the frontend regression tests. They use Node's test runner with TypeScript type stripping and cover dashboard configuration precedence and metric aliases.
 
 ```bash
 cd aeroboard-web
+npm test
+npm run build
 npm run lint
 ```
 
@@ -90,19 +96,21 @@ When changing frontend behavior:
 
 ## Documentation workflow
 
-The docs site is built with MkDocs.
+The docs site is built with Sphinx and MyST from the Markdown files in `docs/`. Use Python 3.11 or newer. Sphinx settings live in `docs/conf.py`; the toctrees in `docs/index.md` define the navigation.
 
-Preview locally:
-
-```bash
-pip install -r docs/requirements.txt
-mkdocs serve
-```
-
-Build the static site:
+Build from the repository root:
 
 ```bash
-mkdocs build
+python -m pip install -r docs/requirements.txt
+python -m sphinx -b dirhtml -W --keep-going docs docs/_build/dirhtml
 ```
+
+Preview the generated site at `http://localhost:8000`:
+
+```bash
+python -m http.server 8000 --directory docs/_build/dirhtml
+```
+
+Re-run the Sphinx build after changing a guide. Output in `docs/_build/` is ignored by Git. The `dirhtml` builder preserves directory-style URLs, and MyST resolves existing `.md` links and heading anchors. The heading-anchor hook in `docs/conf.py` also retains published Markdown fragment URLs for code headings, numbered steps, and repeated headings. CI and Read the Docs run strict builds that fail on warnings, including unresolved internal references.
 
 Documentation changes should track real code behavior. If you update a command, endpoint, or public API, update the docs in the same change.

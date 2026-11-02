@@ -1,6 +1,72 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, path::PathBuf};
 
-use crate::history::{HistoryPoint, ImageHistoryPoint};
+use serde::Deserialize;
+
+use crate::{
+    history::{HistoryPoint, ImageHistoryPoint},
+    telemetry::TelemetryKind,
+};
+
+/// Binary media kinds that share the "encoded blob + format" storage layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaKind {
+    Image,
+    Audio,
+    Video,
+}
+
+impl MediaKind {
+    pub fn from_telemetry(kind: &TelemetryKind) -> Option<Self> {
+        match kind {
+            TelemetryKind::Images => Some(Self::Image),
+            TelemetryKind::Audio => Some(Self::Audio),
+            TelemetryKind::Video => Some(Self::Video),
+            _ => None,
+        }
+    }
+
+    /// Filesystem directory and GreptimeDB table name.
+    pub fn dir_name(self) -> &'static str {
+        match self {
+            Self::Image => "images",
+            Self::Audio => "audio",
+            Self::Video => "video",
+        }
+    }
+
+    /// GreptimeDB field holding the hex-encoded payload.
+    pub fn hex_column(self) -> &'static str {
+        match self {
+            Self::Image => "image_hex",
+            Self::Audio => "audio_hex",
+            Self::Video => "video_hex",
+        }
+    }
+
+    /// Arrow column holding the binary payload.
+    pub fn data_column(self) -> &'static str {
+        match self {
+            Self::Image => "image_data",
+            Self::Audio => "audio_data",
+            Self::Video => "video_data",
+        }
+    }
+}
+
+/// Where the bytes of a stored media item live. Filesystem-backed items are
+/// streamed straight from disk (with Range support) instead of being buffered.
+#[derive(Clone, Debug)]
+pub enum MediaSource {
+    File(PathBuf),
+    Bytes(Vec<u8>),
+}
+
+#[derive(Clone, Debug)]
+pub struct MediaPayload {
+    pub format: String,
+    pub source: MediaSource,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct HistoryQueryOptions {
@@ -28,12 +94,6 @@ pub struct ImageFrameQuery {
     pub run_id: String,
     pub name: String,
     pub ts_ms: i64,
-}
-
-#[derive(Clone, Debug)]
-pub struct ImageFramePayload {
-    pub format: String,
-    pub image_base64: String,
 }
 
 #[derive(Clone, Debug)]

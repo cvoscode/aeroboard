@@ -29,7 +29,7 @@ interface DashboardSidebarProps {
   theme: "light" | "dark";
   onThemeToggle: () => void;
   nextTheme: "light" | "dark";
-  effectiveActiveTab: "scalars" | "images" | "analysis";
+  effectiveActiveTab: "scalars" | "images" | "media" | "analysis";
   mode: "single" | "compare";
   onChangeMode: (mode: "single" | "compare") => void;
   runs: string[];
@@ -52,6 +52,9 @@ interface DashboardSidebarProps {
   onRemoveOutliersChange: (value: boolean) => void;
   widthMode: WidthMode;
   onWidthModeChange: (mode: WidthMode) => void;
+  /** True when the user has changed stars, order, collapse state or target lines. */
+  canResetChartView: boolean;
+  onResetChartView: () => void;
   bounds: [number, number];
   globalXRange: [number, number] | null;
   onGlobalXRangeChange: (value: [number, number] | null) => void;
@@ -97,6 +100,8 @@ export function DashboardSidebar({
   onRemoveOutliersChange,
   widthMode,
   onWidthModeChange,
+  canResetChartView,
+  onResetChartView,
   bounds,
   globalXRange,
   onGlobalXRangeChange,
@@ -270,6 +275,17 @@ export function DashboardSidebar({
                   <button className={widthMode === "full" ? "active" : ""} onClick={() => onWidthModeChange("full")}>Full</button>
                 </div>
               </div>
+
+              {canResetChartView ? (
+                <button
+                  type="button"
+                  className="reset-range-btn"
+                  onClick={onResetChartView}
+                  title="Clear your starred charts, order, collapsed state and target lines, and return to the configured initial view"
+                >
+                  Reset chart layout
+                </button>
+              ) : null}
             </div>
           </div>
         ) : null}

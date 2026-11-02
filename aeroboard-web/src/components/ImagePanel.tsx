@@ -1,18 +1,18 @@
 import { ImageTimelineViewer } from './ImageTimelineViewer';
-import type { ImageSeries } from '../hooks/useAeroboard';
+import type { ImageFrame, ImageSeries } from '../hooks/useAeroboard';
 
 interface ImagePanelProps {
   series: ImageSeries | null;
-  onRequestFrame: (runId: string, name: string, tsMs: number) => Promise<void>;
+  getImageSource: (frame: ImageFrame, attempt?: number) => string;
 }
 
-export default function ImagePanel({ series, onRequestFrame }: ImagePanelProps) {
+export default function ImagePanel({ series, getImageSource }: ImagePanelProps) {
   return (
     <div className="image-section">
       <ImageTimelineViewer
         key={series ? `${series.run_id}:${series.name}` : 'empty-image-series'}
         series={series}
-        onRequestFrame={onRequestFrame}
+        getImageSource={getImageSource}
       />
     </div>
   );

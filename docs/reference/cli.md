@@ -4,13 +4,13 @@ Aeroboard exposes a `click`-based CLI through the `aeroboard` command.
 
 ## `aeroboard setup`
 
-Builds the frontend and Rust server.
+Prepares the frontend and Rust server runtime assets.
 
 Behavior:
 
-- installs frontend dependencies with `npm install`
-- builds the frontend with `npm run build`
-- builds the Rust server with `cargo build --release`
+- downloads matching release artifacts by default
+- with `--build-from-source`, installs frontend dependencies and builds the frontend and Rust server locally
+- with `--force-download`, refreshes cached release artifacts
 
 Typical usage:
 
@@ -20,7 +20,7 @@ uv run aeroboard setup
 
 ## `aeroboard start`
 
-Builds the project and starts the server.
+Prepares the runtime assets and starts the server.
 
 ```bash
 uv run aeroboard start [OPTIONS]
@@ -30,16 +30,31 @@ Options:
 
 | Option | Default | Description |
 | --- | --- | --- |
+| `--host` | `127.0.0.1` | Interface to listen on; `0.0.0.0` exposes the dashboard and ingestion to your network (no authentication) |
+| `--cors-origin` | unset | Extra browser origin allowed to call the API; repeatable, `*` allows any site |
 | `--port` | `3000` | HTTP port for the web UI, HTTP API, and WebSocket endpoint |
 | `--flight-port` | `50051` | Arrow Flight gRPC ingestion port |
 | `--storage` | `filesystem` | Storage backend: `filesystem`, `greptime`, or `live` |
 | `--data-dir` | unset | Filesystem storage root when `storage=filesystem` |
+| `--build-from-source` | off | Build the frontend and server locally from a source checkout |
+| `--force-download` | off | Refresh downloaded runtime artifacts |
 
 Notes:
 
-- the command tries to run the release binary after rebuilding it
-- if the binary is missing, it falls back to `cargo run --release`
 - storage mode is passed to the server through environment variables
+- `aeroboard.toml` is discovered in the directory where you invoke the command, before launching the server from its binary directory
+- `AEROBOARD_DASHBOARD_CONFIG` selects another dashboard configuration file; relative paths resolve from the directory where you invoke the command
+
+Example with shared initial chart settings:
+
+```bash
+# Create aeroboard.toml in this directory, then start:
+uv run aeroboard start
+# Or select a different file:
+AEROBOARD_DASHBOARD_CONFIG=config/dashboard.toml uv run aeroboard start
+```
+
+See the [configuration reference](configuration.md#initial-dashboard-view) for stars, chart order, target lines, and overrides.
 
 ## `aeroboard db`
 

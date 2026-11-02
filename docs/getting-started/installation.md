@@ -106,11 +106,12 @@ That command checks:
 
 ## Documentation dependencies
 
-The docs site is built with MkDocs and is configured for Read the Docs hosting.
+The docs site uses Sphinx with MyST for Markdown support and is configured for Read the Docs hosting. Use Python 3.11 or newer, and run these commands from the repository root:
 
 ```bash
-pip install -r docs/requirements.txt
-mkdocs serve
+python -m pip install -r docs/requirements.txt
+python -m sphinx -b dirhtml -W --keep-going docs docs/_build/dirhtml
+python -m http.server 8000 --directory docs/_build/dirhtml
 ```
 
-If you already use `uv` for everything, you can also run MkDocs through the environment you manage yourself after installing the dependency there.
+Open `http://localhost:8000` to preview the site. If you use `uv`, install the documentation dependencies into your environment with `uv pip install -r docs/requirements.txt`, then run the build and preview commands with `uv run python` in place of `python`.

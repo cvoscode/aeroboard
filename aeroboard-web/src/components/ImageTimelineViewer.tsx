@@ -1,19 +1,22 @@
-import { useEffect, useMemo, useState } from 'react';
-import type { ImageSeries } from '../hooks/useAeroboard';
+import { useMemo, useState } from 'react';
+import type { ImageFrame, ImageSeries } from '../hooks/useAeroboard';
 
 interface ImageTimelineViewerProps {
   series: ImageSeries | null;
-  onRequestFrame: (runId: string, name: string, tsMs: number) => Promise<void>;
+  getImageSource: (frame: ImageFrame, attempt?: number) => string;
 }
+
+/** A frame shown right after it was logged may not be on disk yet; retry a few times. */
+const MAX_FRAME_RETRIES = 3;
 
 function formatTimestamp(tsMs: number): string {
   return new Date(tsMs).toLocaleString();
 }
 
-export function ImageTimelineViewer({ series, onRequestFrame }: ImageTimelineViewerProps) {
+export function ImageTimelineViewer({ series, getImageSource }: ImageTimelineViewerProps) {
   const [index, setIndex] = useState(0);
   const [followLatest, setFollowLatest] = useState(true);
-  const [frameError, setFrameError] = useState<string | null>(null);
+  const [failure, setFailure] = useState<{ key: string; attempt: number } | null>(null);
 
   // `series` is included intentionally — it is the ImageSeries object reference, so any
   // new frame appended by the WS ingestion will trigger a recalculation to show the latest
@@ -24,7 +27,12 @@ export function ImageTimelineViewer({ series, onRequestFrame }: ImageTimelineVie
     return Math.min(index, series.frames.length - 1);
   }, [followLatest, index, series]);
 
-  if (!series || series.frames.length === 0) {
+  const frame = series && series.frames.length > 0 ? series.frames[clampedIndex] : undefined;
+  const frameKey = frame ? `${frame.run_id}:${frame.name}:${frame.ts_ms}` : '';
+  const attempt = failure?.key === frameKey ? failure.attempt : 0;
+  const failed = attempt > MAX_FRAME_RETRIES;
+
+  if (!series || !frame) {
     return (
       <div className="comparison-card empty-state-card">
         <h3>Image Timeline</h3>
@@ -33,28 +41,7 @@ export function ImageTimelineViewer({ series, onRequestFrame }: ImageTimelineVie
     );
   }
 
-  const frame = series.frames[clampedIndex];
-  const dataUrl = frame.image_base64 ? `data:image/${frame.format};base64,${frame.image_base64}` : null;
-
-  useEffect(() => {
-    if (frame.image_base64) return;
-    let cancelled = false;
-
-    void (async () => {
-      try {
-        setFrameError(null);
-        await onRequestFrame(frame.run_id, frame.name, frame.ts_ms);
-      } catch (error) {
-        if (!cancelled) {
-          setFrameError(error instanceof Error ? error.message : "Failed to load frame");
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [frame.image_base64, frame.name, frame.run_id, frame.ts_ms, onRequestFrame]);
+  const source = getImageSource(frame, attempt);
 
   return (
     <div className="comparison-card image-viewer-card">
@@ -66,13 +53,26 @@ export function ImageTimelineViewer({ series, onRequestFrame }: ImageTimelineVie
         <span className="image-time-pill">{formatTimestamp(frame.ts_ms)}</span>
       </div>
       <div className="image-viewer-stage">
-        {dataUrl ? (
-          <img src={dataUrl} alt={`${series.name} at ${formatTimestamp(frame.ts_ms)}`} className="image-viewer-frame" />
-        ) : (
+        {failed ? (
           <div className="empty-state-card">
-            <h3>Loading frame…</h3>
-            <p>{frameError ?? "Fetching persisted image bytes for the selected timestamp."}</p>
+            <h3>Frame unavailable</h3>
+            <p>The image for this timestamp could not be loaded.</p>
           </div>
+        ) : (
+          <img
+            key={source}
+            src={source}
+            alt={`${series.name} at ${formatTimestamp(frame.ts_ms)}`}
+            className="image-viewer-frame"
+            onError={() => {
+              const next = attempt + 1;
+              if (next > MAX_FRAME_RETRIES) {
+                setFailure({ key: frameKey, attempt: next });
+              } else {
+                setTimeout(() => setFailure({ key: frameKey, attempt: next }), 500 * next);
+              }
+            }}
+          />
         )}
       </div>
       <div className="image-slider-wrap">

@@ -30,7 +30,7 @@ class DummyFlightClient:
         self.url = url
         self.calls = []
 
-    def do_put(self, descriptor, schema):
+    def do_put(self, descriptor, schema, options=None):
         writer = DummyWriter()
         self.calls.append((descriptor, schema, writer))
         return writer, object()
@@ -104,6 +104,8 @@ def test_image_batch_flush_triggers_at_quarter_batch_size():
         client = AeroboardClient(run_id='demo', batch_size=8)
         client.log_image('samples/frame', b'raw-image', format='png')
         client.log_image('samples/frame', b'raw-image-2', format='png')
+        assert client._image_buffer == []  # handed to the background sender
+        client.flush()
 
         assert len(client.client.calls) == 1
         descriptor, schema, writer = client.client.calls[0]
@@ -119,13 +121,14 @@ def test_scalar_batch_flushes_when_batch_limit_reached():
         client.log({'train/loss': 0.3})
         assert len(client.client.calls) == 0
         client.log({'train/loss': 0.2})
+        assert client._scalar_buffer == []  # handed to the background sender
+        client.flush()
 
         assert len(client.client.calls) == 1
         descriptor, schema, writer = client.client.calls[0]
         assert descriptor.path == [b'scalars']
-        assert schema.names == ['timestamp', 'run_id', 'name', 'value']
+        assert schema.names == ['timestamp', 'run_id', 'name', 'value', 'step']
         assert writer.batches[0].num_rows == 2
-        assert client._scalar_buffer == []
 
 
 def test_log_metrics_adds_prefix_and_shared_step():
@@ -140,11 +143,23 @@ def test_log_metrics_adds_prefix_and_shared_step():
 
         descriptor, schema, writer = client.client.calls[0]
         assert descriptor.path == [b'scalars']
-        assert schema.names == ['timestamp', 'run_id', 'name', 'value']
-        names = writer.batches[0].column(2).to_pylist()
-        values = writer.batches[0].column(3).to_pylist()
-        assert names == ['train/loss', 'train/accuracy', 'optimizer/lr', 'step']
-        assert values == [0.3, 0.8, 0.01, 5.0]
+        batch = writer.batches[0].to_pydict()
+        assert batch['name'] == ['train/loss', 'train/accuracy', 'optimizer/lr']
+        assert batch['value'] == [0.3, 0.8, 0.01]
+        assert batch['step'] == [5.0, 5.0, 5.0]
+
+
+def test_log_takes_step_from_argument_or_metrics_dict():
+    with patch('aeroboard_client.client.fl.FlightClient', DummyFlightClient):
+        client = AeroboardClient(run_id='demo', batch_size=100)
+        client.log({'loss': 0.5, 'step': 3})
+        client.log({'loss': 0.4}, step=4)
+        client.log({'loss': 0.3})
+        client.flush()
+
+        batch = client.client.calls[0][2].batches[0].to_pydict()
+        assert batch['name'] == ['loss', 'loss', 'loss']
+        assert batch['step'] == [3.0, 4.0, None]
 
 
 def test_lightning_logger_reuses_existing_client():
@@ -185,11 +200,10 @@ def test_lightning_logger_logs_numeric_metrics_and_step():
 
         descriptor, schema, writer = client.client.calls[0]
         assert descriptor.path == [b'scalars']
-        assert schema.names == ['timestamp', 'run_id', 'name', 'value']
-        names = writer.batches[0].column(2).to_pylist()
-        values = writer.batches[0].column(3).to_pylist()
-        assert names == ['train/loss', 'epoch', 'step']
-        assert values == [0.25, 3.0, 7.0]
+        batch = writer.batches[0].to_pydict()
+        assert batch['name'] == ['train/loss', 'epoch']
+        assert batch['value'] == [0.25, 3.0]
+        assert batch['step'] == [7.0, 7.0]
 
 
 def test_ray_tune_callback_creates_trial_run_and_logs_metrics(monkeypatch):
@@ -221,11 +235,10 @@ def test_ray_tune_callback_creates_trial_run_and_logs_metrics(monkeypatch):
 
         scalar_descriptor, scalar_schema, scalar_writer = client.client.calls[0]
         assert scalar_descriptor.path == [b'scalars']
-        assert scalar_schema.names == ['timestamp', 'run_id', 'name', 'value']
-        scalar_names = scalar_writer.batches[0].column(2).to_pylist()
-        scalar_values = scalar_writer.batches[0].column(3).to_pylist()
-        assert scalar_names == ['train/loss', 'train/accuracy', 'step']
-        assert scalar_values == [0.4, 0.75, 4.0]
+        scalars = scalar_writer.batches[0].to_pydict()
+        assert scalars['name'] == ['train/loss', 'train/accuracy']
+        assert scalars['value'] == [0.4, 0.75]
+        assert scalars['step'] == [4.0, 4.0]
 
         hyper_descriptor, hyper_schema, hyper_writer = client.client.calls[1]
         assert hyper_descriptor.path == [b'hyperparameters']
@@ -243,10 +256,10 @@ def test_module_level_helpers_use_default_client():
         client = aeroboard_client.init(run_id='demo', batch_size=2)
         aeroboard_client.log_metrics({'loss': 0.3}, step=1, prefix='train')
         aeroboard_client.log_metrics({'loss': 0.2}, step=2, prefix='train')
+        aeroboard_client.flush()
 
         assert aeroboard_client.get_default_client() is client
-        assert len(client.client.calls) == 2
+        assert len(client.client.calls) == 1
         descriptor, schema, writer = client.client.calls[0]
         assert descriptor.path == [b'scalars']
-        assert schema.names == ['timestamp', 'run_id', 'name', 'value']
-        assert writer.batches[0].num_rows == 2
+        assert writer.batches[0].to_pydict()['step'] == [1.0, 2.0]

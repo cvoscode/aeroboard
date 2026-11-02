@@ -23,34 +23,40 @@ Filesystem storage is the default mode.
 
 The server writes run-scoped data under the configured data directory, currently defaulting to `.aeroboard`.
 
-Conceptually the layout looks like this:
+The layout:
 
 ```text
 .aeroboard/
   runs/
     <encoded-run-id>/
-      manifest.json
+      manifest.json                     {"run_id": "..."}
       scalars/
-        <timestamp>-<uuid>.arrow
+        index.jsonl                     {"t": <ms>, "n": "<metric>", "v": <value>, "s": <step>}
       hyperparameters/
-        <timestamp>-<uuid>.arrow
-      images/
-        <encoded-metric-name>/
-          index.json
-          <timestamp>-<uuid>.<format>
+        index.jsonl                     one entry per logged key; the last one wins
+      images/ | audio/ | video/
+        <encoded-stream-name>/
+          index.jsonl                   {"ts_ms", "run_id", "name", "format", "file_name"}
+          <timestamp>-<uuid>.<format>   the raw payload
 ```
 
 Important details:
 
+- indexes are append-only [JSON Lines](https://jsonlines.org/): persisting a batch costs time proportional to the batch, not to the length of the run
 - a manifest is written per run so the run can be enumerated later
-- scalar and hyperparameter data are stored as Arrow files
-- images are extracted and stored as individual files plus an index
+- media payloads are written before their index entry, so an index never points at a missing file
+- non-finite scalar values are stored as the strings `"NaN"`, `"inf"` and `"-inf"`
+- all file I/O runs on tokio's blocking thread pool, never on the async workers
+- after a crash, a torn last line is skipped with a warning; the rest of the run stays readable
+- older layouts are still read: `index.json` arrays and per-batch `*.arrow` files written by Aeroboard < 0.2
 
 Filesystem mode is usually the best place to validate new telemetry behavior because it keeps the persistence path transparent.
 
 ## GreptimeDB
 
-Greptime mode routes persistence and historical queries through the configured Greptime HTTP endpoint.
+Greptime mode writes through the InfluxDB line-protocol endpoint and reads with SQL over HTTP.
+
+Before the first write the store creates its tables with `run_id` plus the metric (or hyperparameter key) as the primary key and `append_mode = 'true'`. Rows from different runs therefore never collide, and several steps logged within one millisecond are all kept. **Delete All Runs** drops the tables; they are recreated on the next write. Writes are retried with jittered exponential backoff on transport errors, 429 and 5xx responses.
 
 Use it when you specifically want database-backed persistence or need to validate the Greptime-specific code path.
 
@@ -67,7 +73,7 @@ Expected semantics:
 
 ## Query semantics shared across backends
 
-The HTTP history layer applies consistent filters after retrieving rows from storage:
+Every backend implements the same filter semantics:
 
 - `run_id` accepts a comma-separated list
 - `metric` accepts a comma-separated list
@@ -84,7 +90,8 @@ If you add another storage engine:
 2. Wire it into backend selection in `build_storage`.
 3. Preserve the empty-history contract where appropriate.
 4. Make sure `list_runs()` supports run resolution and UI enumeration.
-5. Verify that failures in persistence do not break the live path.
+5. Return errors instead of panicking: the persistence loop reports each batch's outcome back to the uploading client, which retries failures.
+6. Batches arrive already validated against `schema.rs`, so positional, typed column access is safe.
 
 ## Adding a new telemetry type
 

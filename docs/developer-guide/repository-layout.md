@@ -45,7 +45,7 @@ Python tests covering run versioning, payload generation, and client-level behav
 
 ### `docs/`
 
-MkDocs source tree for this documentation site.
+Sphinx documentation source tree. Guides use Markdown through MyST, `conf.py` contains the build settings, and the toctrees in `index.md` define navigation.
 
 ## Package layout notes
 
@@ -59,7 +59,7 @@ Common generated output locations include:
 - `aeroboard-web/dist/` for the frontend bundle
 - `aeroboard-client/src/*.egg-info/` for packaging metadata generated during builds
 - `.aeroboard/` or custom data directories for filesystem persistence
-- `site/` for generated MkDocs output
+- `docs/_build/dirhtml/` for generated Sphinx documentation
 - `logs/` for captured example runs in this repository snapshot
 
 Do not document generated artifacts as if they are source-owned unless the workflow explicitly depends on them.

@@ -8,6 +8,26 @@ Base URL by default:
 http://localhost:3000
 ```
 
+## `GET /api/config`
+
+Reads the selected dashboard TOML file and returns server-wide initial-view defaults. The dashboard fetches this endpoint on page load, so file edits apply after reloading the page.
+
+### Response shape
+
+```json
+{
+  "dashboard": {
+    "starred": ["loss", "val/accuracy"],
+    "order": ["loss", "accuracy", "lr"],
+    "targets": {"loss": 0.05, "val/accuracy": 0.95}
+  }
+}
+```
+
+When no file is configured or discovered, the endpoint returns empty lists and an empty target map. If the selected file cannot be read or parsed, it returns HTTP 200 with empty defaults and an `error` string, which the dashboard displays in a banner.
+
+Per-run settings and saved browser overrides are applied by the frontend. See [configuration](configuration.md#initial-dashboard-view) for file selection and precedence.
+
 ## `GET /api/history`
 
 Returns persisted scalar history plus aggregated run summaries.
@@ -22,6 +42,17 @@ Returns persisted scalar history plus aggregated run summaries.
 | `end_ms` | integer | Inclusive upper timestamp bound in milliseconds |
 | `limit` | integer | Maximum number of rows to return |
 | `cursor` | integer | Position-based pagination cursor |
+| `include_summaries` | boolean | Include `run_summaries` (default `true`) |
+| `format` | string | `json` (default) or `arrow` |
+
+### Arrow format
+
+With `format=arrow` the response is an Arrow IPC stream
+(`Content-Type: application/vnd.apache.arrow.stream`) with the columns
+`timestamp` (ms), `run_id` and `name` (dictionary-encoded strings), `value` and the
+nullable `step`. It is several times smaller than the JSON rows and is what the
+dashboard uses. When paging, the next cursor is returned in the
+`x-aeroboard-next-cursor` header. Run summaries are not included.
 
 ### Response shape
 
@@ -32,7 +63,8 @@ Returns persisted scalar history plus aggregated run summaries.
       "ts_ms": 1740000000000,
       "run_id": "baseline",
       "name": "train/loss",
-      "value": 0.42
+      "value": 0.42,
+      "step": 100
     }
   ],
   "run_summaries": [
@@ -56,7 +88,9 @@ Returns persisted scalar history plus aggregated run summaries.
 - filtering happens with OR semantics within comma-separated `run_id` or `metric` sets
 - time bounds are inclusive
 - pagination is position-based rather than opaque-token based
-- the endpoint returns explicit empty arrays and an optional error string if storage fails
+- `step` is omitted for points logged without a step
+- `run_summaries` describe whole runs (last/min/max over all points), not just the returned page
+- if storage fails, the endpoint returns HTTP 500 with explicit empty arrays and an `error` string (all history endpoints behave this way)
 
 ## `DELETE /api/history`
 
@@ -106,32 +140,35 @@ Uses the same filter fields as `GET /api/history`:
 }
 ```
 
-When `include_data=true`, each row may also include `image_base64`. The default metadata-only mode keeps list responses smaller; fetch full frame bytes from the dedicated frame endpoint when needed.
+When `include_data=true`, each row also includes `image_base64`. The default metadata-only mode keeps list responses small; load individual frames from `GET /api/history/media/content?kind=image&...` instead.
 
-## `GET /api/history/images/frame`
+> The base64 frame endpoint `GET /api/history/images/frame` was removed in 0.2; use `/api/history/media/content` with `kind=image`.
 
-Returns the payload for one persisted image frame.
+## `GET /api/history/media`
 
-### Query parameters
+Lists persisted media items (metadata only).
 
 | Parameter | Type | Meaning |
 | --- | --- | --- |
+| `kind` | string | `image`, `audio` or `video` (required) |
+| `run_id`, `metric`, `start_ms`, `end_ms`, `limit`, `cursor` | | Same filters as `GET /api/history` |
+
+The response has the same shape as `GET /api/history/images` without payloads.
+
+## `GET /api/history/media/content`
+
+Serves the raw bytes of one persisted media item with the matching `Content-Type`,
+so it can be used directly as the `src` of an `<img>`, `<audio>` or `<video>` element.
+Filesystem-backed items support HTTP `Range` requests for seeking.
+
+| Parameter | Type | Meaning |
+| --- | --- | --- |
+| `kind` | string | `image`, `audio` or `video` |
 | `run_id` | string | Run ID |
-| `name` | string | Image metric name |
-| `ts_ms` | integer | Exact frame timestamp in milliseconds |
+| `name` | string | Stream name |
+| `ts_ms` | integer | Exact item timestamp in milliseconds |
 
-### Response shape
-
-```json
-{
-  "run_id": "baseline",
-  "name": "samples/prediction",
-  "ts_ms": 1740000000000,
-  "format": "png",
-  "image_base64": "...",
-  "error": null
-}
-```
+Returns `404` with a JSON `error` body when the item does not exist.
 
 ## `GET /api/runs`
 
@@ -196,12 +233,19 @@ Returns the canonical run ID that should be used for a proposed base run name.
 
 ### Versioning rules
 
+- the returned ID is reserved immediately, so two processes resolving the same name at once get different IDs
 - a brand new base name is returned unchanged
 - if the base name already exists, the next highest version suffix is used
-- framework suffixes such as `-pl2.5.1` are preserved while versioning
+- Lightning framework suffixes (`-pl` followed by a dotted version, such as `-pl2.5.1`) are preserved while versioning; names that merely contain `-pl` (`sample-placement`) are versioned normally
 
 ## `GET /ws/live`
 
-Upgrades to a WebSocket connection and streams live Arrow IPC batches.
+Upgrades to a WebSocket connection and streams live Arrow IPC batches as binary messages.
 
-The frontend uses this endpoint for real-time updates after loading persisted history.
+When persistence is enabled, audio and video payloads are stripped from live messages; clients load them from `/api/history/media/content`.
+
+If a client falls too far behind, the server drops batches for it and sends a text message `{"type": "lagged", "skipped": <n>}`. Clients should re-fetch history for the runs they show; the dashboard does this automatically, and also after reconnecting.
+
+## Access control
+
+The server has no authentication. By default it listens on `127.0.0.1` only and sends no CORS headers, so only the dashboard it serves (or the Vite dev proxy) can call the API. See `AEROBOARD_HOST` and `AEROBOARD_CORS_ORIGINS` in the [configuration reference](configuration.md).
