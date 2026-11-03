@@ -1,17 +1,38 @@
+//! Filesystem storage backend.
+//!
+//! Layout under `<root>/runs/<urlencoded run_id>/`:
+//!
+//! ```text
+//! manifest.json                         {"run_id": "..."}
+//! scalars/index.jsonl                   one JSON object per point
+//! hyperparameters/index.jsonl           one JSON object per entry (last write wins)
+//! <images|audio|video>/<name>/index.jsonl + one file per media item
+//! ```
+//!
+//! Indexes are append-only JSON Lines, so persisting a batch costs O(batch) no
+//! matter how long the run is. All disk I/O runs on tokio's blocking pool.
+//!
+//! Older layouts are still read: `index.json` arrays (rewritten on every batch by
+//! earlier versions) and raw `*.arrow` batch files (from the first versions).
+//! A torn final line after a crash is skipped with a warning rather than failing
+//! the whole query.
+
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs,
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use arrow::{
-    ipc::{reader::FileReader, writer::FileWriter},
+    array::{Array, AsArray},
+    ipc::reader::FileReader,
     record_batch::RecordBatch,
 };
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
 use crate::{
@@ -20,17 +41,29 @@ use crate::{
 };
 
 use super::{
-    codec::{
-        extract_first_run_id, now_ms, parse_hparam_batch, parse_image_batch, parse_scalar_batch,
-        sanitize_extension,
-    },
+    BoxError, HistoryQueryOptions, ImageFrameQuery, ImageQueryOptions, MediaKind, MediaPayload,
+    MediaSource, QueryPage, StorageEngine,
+    codec::{parse_hparam_batch, parse_image_batch, parse_scalar_batch, sanitize_extension},
     query::{apply_history_query, apply_image_query},
-    BoxError, HistoryQueryOptions, ImageFramePayload, ImageFrameQuery, ImageQueryOptions,
-    QueryPage, StorageEngine,
 };
 
+const INDEX_FILE: &str = "index.jsonl";
+const LEGACY_INDEX_FILE: &str = "index.json";
+const SCALARS_DIR: &str = "scalars";
+const HPARAMS_DIR: &str = "hyperparameters";
+
+#[derive(Clone)]
 pub struct FilesystemStore {
+    inner: Arc<FsInner>,
+}
+
+struct FsInner {
     root: PathBuf,
+    /// Serialises writers with `clear_history`. Readers don't take it: appends are
+    /// whole-line writes and readers tolerate a torn last line.
+    write_lock: Mutex<()>,
+    /// Runs whose manifest is known to exist, so appends skip the `stat`.
+    known_manifests: Mutex<HashSet<String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -38,21 +71,32 @@ struct RunManifest {
     run_id: String,
 }
 
+/// One scalar point in `scalars/index.jsonl`. The run is implied by the directory.
+#[derive(Serialize, Deserialize)]
+struct ScalarLine {
+    t: i64,
+    n: String,
+    #[serde(with = "lossless_f64")]
+    v: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    s: Option<f64>,
+}
+
+/// Row of the legacy `scalars/index.json` array. Non-finite values were written as `null`.
+#[derive(Deserialize)]
+struct LegacyScalarEntry {
+    ts_ms: i64,
+    name: String,
+    value: Option<f64>,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
-struct ImageIndexEntry {
+struct MediaIndexEntry {
     ts_ms: i64,
     run_id: String,
     name: String,
     format: String,
     file_name: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct ScalarIndexEntry {
-    ts_ms: i64,
-    run_id: String,
-    name: String,
-    value: f64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -63,494 +107,493 @@ struct HyperparameterIndexEntry {
     value_type: String,
 }
 
+/// JSON has no NaN/Infinity; store them as strings so diverged runs round-trip.
+mod lossless_f64 {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    pub fn serialize<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+        if value.is_finite() {
+            serializer.serialize_f64(*value)
+        } else if value.is_nan() {
+            serializer.serialize_str("NaN")
+        } else if *value > 0.0 {
+            serializer.serialize_str("inf")
+        } else {
+            serializer.serialize_str("-inf")
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Number(f64),
+            Text(String),
+        }
+        match Repr::deserialize(deserializer)? {
+            Repr::Number(value) => Ok(value),
+            Repr::Text(text) => match text.as_str() {
+                "NaN" => Ok(f64::NAN),
+                "inf" => Ok(f64::INFINITY),
+                "-inf" => Ok(f64::NEG_INFINITY),
+                other => Err(D::Error::custom(format!("invalid number {other:?}"))),
+            },
+        }
+    }
+}
+
 impl FilesystemStore {
     pub fn new(root: PathBuf) -> Result<Self, BoxError> {
         fs::create_dir_all(root.join("runs"))?;
-        Ok(Self { root })
+        Ok(Self {
+            inner: Arc::new(FsInner {
+                root,
+                write_lock: Mutex::new(()),
+                known_manifests: Mutex::new(HashSet::new()),
+            }),
+        })
     }
 
+    /// Run filesystem work on the blocking pool so it never stalls async workers.
+    async fn blocking<T, F>(&self, work: F) -> Result<T, BoxError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&FsInner) -> Result<T, BoxError> + Send + 'static,
+    {
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || work(&inner)).await?
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Low-level file helpers
+// ---------------------------------------------------------------------------
+
+/// Append rows as JSON lines with a single write. If a previous crash left a
+/// torn line without its newline, start on a fresh line so new rows stay parseable.
+fn append_lines<T: Serialize>(path: &Path, rows: &[T]) -> Result<(), BoxError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(path)?;
+
+    let mut buf = Vec::with_capacity(rows.len() * 64);
+    let len = file.metadata()?.len();
+    if len > 0 {
+        let mut last = [0u8; 1];
+        file.seek(SeekFrom::Start(len - 1))?;
+        file.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            buf.push(b'\n');
+        }
+    }
+    for row in rows {
+        serde_json::to_writer(&mut buf, row)?;
+        buf.push(b'\n');
+    }
+    file.write_all(&buf)?;
+    Ok(())
+}
+
+/// Read a JSON Lines file, skipping (and reporting) lines that don't parse.
+fn read_lines<T: DeserializeOwned>(path: &Path, mut visit: impl FnMut(T)) -> Result<(), BoxError> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+
+    let mut skipped = 0usize;
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<T>(&line) {
+            Ok(row) => visit(row),
+            Err(_) => skipped += 1,
+        }
+    }
+    if skipped > 0 {
+        tracing::warn!("Skipped {skipped} unreadable line(s) in {}", path.display());
+    }
+    Ok(())
+}
+
+/// Read a legacy JSON array index.
+fn read_legacy_array<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, BoxError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn has_index(dir: &Path) -> bool {
+    dir.join(INDEX_FILE).exists() || dir.join(LEGACY_INDEX_FILE).exists()
+}
+
+/// Read every `*.arrow` batch file directly inside `dir` (oldest storage format).
+fn read_arrow_batches(dir: &Path) -> Result<Vec<RecordBatch>, BoxError> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(error) => return Err(error.into()),
+    };
+
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_file()
+            && entry.path().extension().and_then(|ext| ext.to_str()) == Some("arrow")
+        {
+            paths.push(entry.path());
+        }
+    }
+    paths.sort();
+
+    let mut batches = Vec::new();
+    for path in paths {
+        for batch in FileReader::try_new(fs::File::open(&path)?, None)? {
+            batches.push(batch?);
+        }
+    }
+    Ok(batches)
+}
+
+/// Write via a temp file + rename so readers never see a half-written file.
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), BoxError> {
+    let tmp = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
+    fs::write(&tmp, bytes)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Store implementation (runs on the blocking pool)
+// ---------------------------------------------------------------------------
+
+impl FsInner {
     fn runs_dir(&self) -> PathBuf {
         self.root.join("runs")
     }
 
-    fn run_dir_for(&self, run_id: &str) -> PathBuf {
+    fn run_dir(&self, run_id: &str) -> PathBuf {
         self.runs_dir()
             .join(urlencoding::encode(run_id).into_owned())
     }
 
-    fn image_metric_dir(&self, run_id: &str, metric_name: &str) -> PathBuf {
-        self.run_dir_for(run_id)
-            .join("images")
-            .join(urlencoding::encode(metric_name).into_owned())
+    fn media_metric_dir(&self, kind: MediaKind, run_id: &str, name: &str) -> PathBuf {
+        self.run_dir(run_id)
+            .join(kind.dir_name())
+            .join(urlencoding::encode(name).into_owned())
     }
 
-    fn kind_dir_for(&self, run_id: &str, kind_dir: &str) -> PathBuf {
-        self.run_dir_for(run_id).join(kind_dir)
-    }
-
-    fn kind_index_path(&self, run_id: &str, kind_dir: &str) -> PathBuf {
-        self.kind_dir_for(run_id, kind_dir).join("index.json")
-    }
-
-    fn write_manifest(&self, run_id: &str) -> Result<(), BoxError> {
-        let run_dir = self.run_dir_for(run_id);
-        fs::create_dir_all(&run_dir)?;
-        let manifest_path = run_dir.join("manifest.json");
-        if manifest_path.exists() {
+    fn ensure_manifest(&self, run_id: &str) -> Result<(), BoxError> {
+        if self
+            .known_manifests
+            .lock()
+            .expect("manifest cache poisoned")
+            .contains(run_id)
+        {
             return Ok(());
         }
-
-        let manifest = RunManifest {
-            run_id: run_id.to_string(),
-        };
-        fs::write(manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
+        let run_dir = self.run_dir(run_id);
+        fs::create_dir_all(&run_dir)?;
+        let manifest_path = run_dir.join("manifest.json");
+        if !manifest_path.exists() {
+            let manifest = RunManifest {
+                run_id: run_id.to_string(),
+            };
+            write_atomic(&manifest_path, &serde_json::to_vec_pretty(&manifest)?)?;
+        }
+        self.known_manifests
+            .lock()
+            .expect("manifest cache poisoned")
+            .insert(run_id.to_string());
         Ok(())
     }
 
-    fn run_dirs(&self, run_ids: &BTreeSet<String>) -> Result<Vec<PathBuf>, BoxError> {
-        let runs_dir = self.runs_dir();
-        if !runs_dir.exists() {
-            return Ok(vec![]);
-        }
+    fn list_runs(&self) -> Result<Vec<String>, BoxError> {
+        let entries = match fs::read_dir(self.runs_dir()) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(error) => return Err(error.into()),
+        };
 
-        if run_ids.is_empty() {
-            let mut dirs = Vec::new();
-            for entry in fs::read_dir(runs_dir)? {
-                let entry = entry?;
-                if entry.file_type()?.is_dir() {
-                    dirs.push(entry.path());
-                }
-            }
-            return Ok(dirs);
-        }
-
-        Ok(run_ids
-            .iter()
-            .map(|run_id| self.run_dir_for(run_id))
-            .filter(|path| path.exists())
-            .collect())
-    }
-
-    fn list_runs_from_manifests(&self) -> Result<Vec<String>, BoxError> {
         let mut runs = Vec::new();
-        let runs_dir = self.runs_dir();
-        if !runs_dir.exists() {
-            return Ok(runs);
-        }
-
-        for run_entry in fs::read_dir(runs_dir)? {
-            let run_entry = run_entry?;
-            if !run_entry.file_type()?.is_dir() {
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
                 continue;
             }
-
-            let manifest_path = run_entry.path().join("manifest.json");
-            if !manifest_path.exists() {
-                continue;
+            let manifest_path = entry.path().join("manifest.json");
+            match fs::read(&manifest_path) {
+                Ok(bytes) => match serde_json::from_slice::<RunManifest>(&bytes) {
+                    Ok(manifest) => runs.push(manifest.run_id),
+                    Err(error) => {
+                        tracing::warn!("Ignoring unreadable {}: {error}", manifest_path.display())
+                    }
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
             }
-
-            let manifest: RunManifest = serde_json::from_slice(&fs::read(manifest_path)?)?;
-            runs.push(manifest.run_id);
         }
-
         runs.sort();
         runs.dedup();
         Ok(runs)
     }
 
-    fn candidate_run_ids(&self, run_ids: &BTreeSet<String>) -> Result<Vec<String>, BoxError> {
+    /// Runs to scan for a query: every run when the filter is empty.
+    fn candidate_runs(&self, run_ids: &BTreeSet<String>) -> Result<Vec<String>, BoxError> {
         if run_ids.is_empty() {
-            return self.list_runs_from_manifests();
+            return self.list_runs();
         }
-
         Ok(run_ids
             .iter()
-            .filter(|run_id| self.run_dir_for(run_id).exists())
+            .filter(|run_id| self.run_dir(run_id).exists())
             .cloned()
             .collect())
     }
 
-    fn partition_indexed_runs(
-        &self,
-        kind_dir: &str,
-        run_ids: &BTreeSet<String>,
-    ) -> Result<(Vec<String>, BTreeSet<String>), BoxError> {
-        let mut indexed = Vec::new();
-        let mut fallback = BTreeSet::new();
+    // -- writes -------------------------------------------------------------
 
-        for run_id in self.candidate_run_ids(run_ids)? {
-            if self.kind_index_path(&run_id, kind_dir).exists() {
-                indexed.push(run_id);
-            } else {
-                fallback.insert(run_id);
+    fn append_batch(&self, telemetry: &TelemetryBatch) -> Result<(), BoxError> {
+        let _guard = self.write_lock.lock().expect("write lock poisoned");
+        let batch = &telemetry.batch;
+        if let Some(kind) = MediaKind::from_telemetry(&telemetry.kind) {
+            return self.append_media(kind, batch);
+        }
+        match telemetry.kind {
+            TelemetryKind::Scalars => self.append_scalars(batch),
+            TelemetryKind::Hyperparameters => self.append_hyperparameters(batch),
+            ref other => {
+                tracing::debug!("Filesystem storage does not persist {:?} batches", other);
+                Ok(())
             }
         }
-
-        Ok((indexed, fallback))
     }
 
-    fn batch_file_paths(&self, kind_dir: &str, run_ids: &BTreeSet<String>) -> Result<Vec<PathBuf>, BoxError> {
-        let mut files = Vec::new();
-
-        for run_dir in self.run_dirs(run_ids)? {
-            let kind_path = run_dir.join(kind_dir);
-            if !kind_path.exists() {
-                continue;
-            }
-
-            for file_entry in fs::read_dir(kind_path)? {
-                let file_entry = file_entry?;
-                if file_entry.file_type()?.is_file()
-                    && file_entry.path().extension().and_then(|ext| ext.to_str()) == Some("arrow")
-                {
-                    files.push(file_entry.path());
-                }
-            }
-        }
-
-        files.sort();
-        Ok(files)
-    }
-
-    fn read_batches(&self, kind_dir: &str, run_ids: &BTreeSet<String>) -> Result<Vec<RecordBatch>, BoxError> {
-        let mut batches = Vec::new();
-        for path in self.batch_file_paths(kind_dir, run_ids)? {
-            let file = fs::File::open(&path)?;
-            let reader = FileReader::try_new(file, None)?;
-            for batch in reader {
-                batches.push(batch?);
-            }
-        }
-        Ok(batches)
-    }
-
-    fn read_index<T: DeserializeOwned>(&self, path: &Path) -> Result<Vec<T>, BoxError> {
-        if !path.exists() {
-            return Ok(vec![]);
-        }
-
-        Ok(serde_json::from_slice(&fs::read(path)?)?)
-    }
-
-    fn write_index<T: Serialize>(&self, path: &Path, rows: &[T]) -> Result<(), BoxError> {
-        fs::write(path, serde_json::to_vec_pretty(rows)?)?;
-        Ok(())
-    }
-
-    fn append_scalar_index(&self, batch: &RecordBatch) -> Result<(), BoxError> {
-        use arrow::array::{Array, AsArray};
-
-        let timestamp_col = batch
+    fn append_scalars(&self, batch: &RecordBatch) -> Result<(), BoxError> {
+        let timestamps = batch
             .column(0)
             .as_primitive::<arrow::datatypes::TimestampMillisecondType>();
-        let run_id_col = batch.column(1).as_string::<i32>();
-        let name_col = batch.column(2).as_string::<i32>();
-        let value_col = batch
+        let run_ids = batch.column(1).as_string::<i32>();
+        let names = batch.column(2).as_string::<i32>();
+        let values = batch
             .column(3)
             .as_primitive::<arrow::datatypes::Float64Type>();
-        let mut pending: BTreeMap<String, Vec<ScalarIndexEntry>> = BTreeMap::new();
+        let steps = batch
+            .column(4)
+            .as_primitive::<arrow::datatypes::Float64Type>();
 
+        let mut per_run: BTreeMap<&str, Vec<ScalarLine>> = BTreeMap::new();
         for i in 0..batch.num_rows() {
-            if timestamp_col.is_null(i)
-                || run_id_col.is_null(i)
-                || name_col.is_null(i)
-                || value_col.is_null(i)
+            if timestamps.is_null(i) || run_ids.is_null(i) || names.is_null(i) || values.is_null(i)
             {
                 continue;
             }
-
-            let run_id = run_id_col.value(i).to_string();
-            pending.entry(run_id.clone()).or_default().push(ScalarIndexEntry {
-                ts_ms: timestamp_col.value(i),
-                run_id,
-                name: name_col.value(i).to_string(),
-                value: value_col.value(i),
-            });
+            per_run
+                .entry(run_ids.value(i))
+                .or_default()
+                .push(ScalarLine {
+                    t: timestamps.value(i),
+                    n: names.value(i).to_string(),
+                    v: values.value(i),
+                    s: (!steps.is_null(i)).then(|| steps.value(i)),
+                });
         }
 
-        for (run_id, mut entries) in pending {
-            self.write_manifest(&run_id)?;
-            let output_dir = self.kind_dir_for(&run_id, "scalars");
-            fs::create_dir_all(&output_dir)?;
-            let index_path = output_dir.join("index.json");
-            let mut index = self.read_index::<ScalarIndexEntry>(&index_path)?;
-            index.append(&mut entries);
-            index.sort_by_key(|entry| entry.ts_ms);
-            self.write_index(&index_path, &index)?;
+        for (run_id, lines) in per_run {
+            self.ensure_manifest(run_id)?;
+            let dir = self.run_dir(run_id).join(SCALARS_DIR);
+            fs::create_dir_all(&dir)?;
+            append_lines(&dir.join(INDEX_FILE), &lines)?;
         }
-
         Ok(())
     }
 
-    fn append_hyperparameter_index(&self, batch: &RecordBatch) -> Result<(), BoxError> {
-        use arrow::array::{Array, AsArray};
-
-        let run_id_col = batch.column(1).as_string::<i32>();
-        let key_col = batch.column(2).as_string::<i32>();
-        let value_col = batch.column(3).as_string::<i32>();
-        let value_type_col = batch.column(4).as_string::<i32>();
-        let mut pending: BTreeMap<String, Vec<HyperparameterIndexEntry>> = BTreeMap::new();
-
-        for i in 0..batch.num_rows() {
-            if run_id_col.is_null(i)
-                || key_col.is_null(i)
-                || value_col.is_null(i)
-                || value_type_col.is_null(i)
-            {
-                continue;
-            }
-
-            let run_id = run_id_col.value(i).to_string();
-            pending
+    fn append_hyperparameters(&self, batch: &RecordBatch) -> Result<(), BoxError> {
+        let mut per_run: BTreeMap<String, Vec<HyperparameterIndexEntry>> = BTreeMap::new();
+        for (run_id, entry) in parse_hparam_batch(batch) {
+            per_run
                 .entry(run_id.clone())
                 .or_default()
                 .push(HyperparameterIndexEntry {
                     run_id,
-                    key: key_col.value(i).to_string(),
-                    value: value_col.value(i).to_string(),
-                    value_type: value_type_col.value(i).to_string(),
+                    key: entry.key,
+                    value: entry.value,
+                    value_type: entry.value_type,
                 });
         }
 
-        for (run_id, mut entries) in pending {
-            self.write_manifest(&run_id)?;
-            let output_dir = self.kind_dir_for(&run_id, "hyperparameters");
-            fs::create_dir_all(&output_dir)?;
-            let index_path = output_dir.join("index.json");
-            let mut index = self.read_index::<HyperparameterIndexEntry>(&index_path)?;
-            index.append(&mut entries);
-            self.write_index(&index_path, &index)?;
+        for (run_id, entries) in per_run {
+            self.ensure_manifest(&run_id)?;
+            let dir = self.run_dir(&run_id).join(HPARAMS_DIR);
+            fs::create_dir_all(&dir)?;
+            append_lines(&dir.join(INDEX_FILE), &entries)?;
         }
-
         Ok(())
     }
 
-    fn append_image_batch(&self, batch: &RecordBatch) -> Result<(), BoxError> {
-        use arrow::array::{Array, AsArray};
-
-        let timestamp_col = batch
+    /// Persist each media payload as its own file, then record it in the
+    /// per-stream index (payload first, so the index never points at a missing file).
+    fn append_media(&self, kind: MediaKind, batch: &RecordBatch) -> Result<(), BoxError> {
+        let timestamps = batch
             .column(0)
             .as_primitive::<arrow::datatypes::TimestampMillisecondType>();
-        let run_id_col = batch.column(1).as_string::<i32>();
-        let name_col = batch.column(2).as_string::<i32>();
-        let image_col = batch.column(3).as_binary::<i32>();
-        let format_col = batch.column(4).as_string::<i32>();
+        let run_ids = batch.column(1).as_string::<i32>();
+        let names = batch.column(2).as_string::<i32>();
+        let payloads = batch.column(3).as_binary::<i32>();
+        let formats = batch.column(4).as_string::<i32>();
+        let mut pending: BTreeMap<(String, String), Vec<MediaIndexEntry>> = BTreeMap::new();
 
         for i in 0..batch.num_rows() {
-            if timestamp_col.is_null(i)
-                || run_id_col.is_null(i)
-                || name_col.is_null(i)
-                || image_col.is_null(i)
-                || format_col.is_null(i)
+            if timestamps.is_null(i)
+                || run_ids.is_null(i)
+                || names.is_null(i)
+                || payloads.is_null(i)
+                || formats.is_null(i)
             {
                 continue;
             }
+            let (ts_ms, run_id, name) = (timestamps.value(i), run_ids.value(i), names.value(i));
+            let format = sanitize_extension(formats.value(i));
 
-            let ts_ms = timestamp_col.value(i);
-            let run_id = run_id_col.value(i);
-            let name = name_col.value(i);
-            let format = sanitize_extension(format_col.value(i));
-            let bytes = image_col.value(i);
-
-            self.write_manifest(run_id)?;
-            let metric_dir = self.image_metric_dir(run_id, name);
+            let metric_dir = self.media_metric_dir(kind, run_id, name);
             fs::create_dir_all(&metric_dir)?;
-
             let file_name = format!("{}-{}.{}", ts_ms, Uuid::new_v4(), format);
-            let file_path = metric_dir.join(&file_name);
-            fs::write(&file_path, bytes)?;
+            fs::write(metric_dir.join(&file_name), payloads.value(i))?;
 
-            let index_path = metric_dir.join("index.json");
-            let mut index = self.read_image_index(&index_path)?;
-            index.push(ImageIndexEntry {
-                ts_ms,
-                run_id: run_id.to_string(),
-                name: name.to_string(),
-                format,
-                file_name,
-            });
-            index.sort_by_key(|entry| entry.ts_ms);
-            fs::write(index_path, serde_json::to_vec_pretty(&index)?)?;
+            pending
+                .entry((run_id.to_string(), name.to_string()))
+                .or_default()
+                .push(MediaIndexEntry {
+                    ts_ms,
+                    run_id: run_id.to_string(),
+                    name: name.to_string(),
+                    format,
+                    file_name,
+                });
         }
 
+        for ((run_id, name), entries) in pending {
+            self.ensure_manifest(&run_id)?;
+            append_lines(
+                &self.media_metric_dir(kind, &run_id, &name).join(INDEX_FILE),
+                &entries,
+            )?;
+        }
         Ok(())
     }
 
-    fn read_image_index(&self, path: &Path) -> Result<Vec<ImageIndexEntry>, BoxError> {
-        self.read_index(path)
+    fn clear(&self) -> Result<(), BoxError> {
+        let _guard = self.write_lock.lock().expect("write lock poisoned");
+        let runs_dir = self.runs_dir();
+        if runs_dir.exists() {
+            fs::remove_dir_all(&runs_dir)?;
+        }
+        fs::create_dir_all(runs_dir)?;
+        self.known_manifests
+            .lock()
+            .expect("manifest cache poisoned")
+            .clear();
+        Ok(())
     }
 
-    fn query_history_from_indexes(
+    // -- reads --------------------------------------------------------------
+
+    fn query_history(
         &self,
         query: &HistoryQueryOptions,
-    ) -> Result<(Vec<HistoryPoint>, BTreeSet<String>), BoxError> {
-        let (indexed_runs, fallback_runs) = self.partition_indexed_runs("scalars", &query.run_ids)?;
+    ) -> Result<QueryPage<HistoryPoint>, BoxError> {
+        let keep = |name: &str, ts_ms: i64| {
+            (query.metrics.is_empty() || query.metrics.contains(name))
+                && query.start_ms.is_none_or(|start| ts_ms >= start)
+                && query.end_ms.is_none_or(|end| ts_ms <= end)
+        };
+
         let mut rows = Vec::new();
-
-        for run_id in indexed_runs {
-            let index_path = self.kind_index_path(&run_id, "scalars");
-            rows.extend(
-                self.read_index::<ScalarIndexEntry>(&index_path)?
-                    .into_iter()
-                    .map(|entry| HistoryPoint {
-                        ts_ms: entry.ts_ms,
-                        run_id: entry.run_id,
-                        name: entry.name,
-                        value: entry.value,
-                    }),
-            );
-        }
-
-        Ok((rows, fallback_runs))
-    }
-
-    fn query_hyperparameters_from_indexes(
-        &self,
-        run_ids: &BTreeSet<String>,
-    ) -> Result<(Vec<(String, HyperparameterEntry)>, BTreeSet<String>), BoxError> {
-        let (indexed_runs, fallback_runs) =
-            self.partition_indexed_runs("hyperparameters", run_ids)?;
-        let mut rows = Vec::new();
-
-        for run_id in indexed_runs {
-            let index_path = self.kind_index_path(&run_id, "hyperparameters");
-            rows.extend(
-                self.read_index::<HyperparameterIndexEntry>(&index_path)?
-                    .into_iter()
-                    .map(|entry| {
-                        (
-                            entry.run_id,
-                            HyperparameterEntry {
-                                key: entry.key,
-                                value: entry.value,
-                                value_type: entry.value_type,
-                            },
-                        )
-                    }),
-            );
-        }
-
-        Ok((rows, fallback_runs))
-    }
-
-    fn query_image_history_from_files(&self, query: &ImageQueryOptions) -> Result<Vec<ImageHistoryPoint>, BoxError> {
-        let mut rows = Vec::new();
-        for run_dir in self.run_dirs(&query.run_ids)? {
-            let images_dir = run_dir.join("images");
-            if !images_dir.exists() {
+        for run_id in self.candidate_runs(&query.run_ids)? {
+            let dir = self.run_dir(&run_id).join(SCALARS_DIR);
+            if !has_index(&dir) {
+                // Oldest format: raw Arrow batches only.
+                for batch in read_arrow_batches(&dir)? {
+                    rows.extend(
+                        parse_scalar_batch(&batch)
+                            .into_iter()
+                            .filter(|row| keep(&row.name, row.ts_ms)),
+                    );
+                }
                 continue;
             }
 
-            for metric_entry in fs::read_dir(images_dir)? {
-                let metric_entry = metric_entry?;
-                if !metric_entry.file_type()?.is_dir() {
-                    continue;
-                }
-
-                let metric_dir = metric_entry.path();
-                let index_path = metric_dir.join("index.json");
-                let entries = self.read_image_index(&index_path)?;
-                for entry in entries {
-                    rows.push(ImageHistoryPoint {
+            for entry in read_legacy_array::<LegacyScalarEntry>(&dir.join(LEGACY_INDEX_FILE))? {
+                if let Some(value) = entry.value
+                    && keep(&entry.name, entry.ts_ms)
+                {
+                    rows.push(HistoryPoint {
                         ts_ms: entry.ts_ms,
-                        run_id: entry.run_id,
+                        run_id: run_id.clone(),
                         name: entry.name,
-                        format: entry.format,
-                        image_base64: if query.include_data {
-                            let file_path = metric_dir.join(&entry.file_name);
-                            if file_path.exists() {
-                                Some(BASE64_STANDARD.encode(fs::read(file_path)?))
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        },
+                        value,
+                        step: None,
+                        segment: None,
                     });
                 }
             }
-        }
-
-        rows.sort_by_key(|row| row.ts_ms);
-        Ok(rows)
-    }
-
-    fn load_image_frame_from_files(&self, query: &ImageFrameQuery) -> Result<Option<ImageFramePayload>, BoxError> {
-        let metric_dir = self.image_metric_dir(&query.run_id, &query.name);
-        let index_path = metric_dir.join("index.json");
-        for entry in self.read_image_index(&index_path)? {
-            if entry.ts_ms != query.ts_ms || entry.run_id != query.run_id || entry.name != query.name {
-                continue;
-            }
-
-            let file_path = metric_dir.join(&entry.file_name);
-            if !file_path.exists() {
-                return Ok(None);
-            }
-
-            let bytes = fs::read(file_path)?;
-            return Ok(Some(ImageFramePayload {
-                format: entry.format,
-                image_base64: BASE64_STANDARD.encode(bytes),
-            }));
-        }
-
-        Ok(None)
-    }
-}
-
-#[async_trait]
-impl StorageEngine for FilesystemStore {
-    async fn append_batch(&self, batch: Arc<TelemetryBatch>) -> Result<(), BoxError> {
-        let kind = &batch.kind;
-        let Some(kind_dir) = kind.as_dir_name() else {
-            tracing::debug!("Skipping unsupported filesystem batch kind: {:?}", kind);
-            return Ok(());
-        };
-
-        if *kind == TelemetryKind::Images {
-            return self.append_image_batch(&batch.batch);
-        }
-
-        if *kind == TelemetryKind::Scalars {
-            self.append_scalar_index(&batch.batch)?;
-        } else if *kind == TelemetryKind::Hyperparameters {
-            self.append_hyperparameter_index(&batch.batch)?;
-        }
-
-        let run_id =
-            extract_first_run_id(&batch.batch).unwrap_or_else(|| "unknown_run".to_string());
-        self.write_manifest(&run_id)?;
-
-        let output_dir = self.run_dir_for(&run_id).join(kind_dir);
-        fs::create_dir_all(&output_dir)?;
-
-        let file_name = format!("{}-{}.arrow", now_ms(), Uuid::new_v4());
-        let file_path = output_dir.join(file_name);
-        let file = fs::File::create(file_path)?;
-        let mut writer = FileWriter::try_new(file, &batch.batch.schema())?;
-        writer.write(&batch.batch)?;
-        writer.finish()?;
-
-        Ok(())
-    }
-
-    async fn query_history(&self, query: &HistoryQueryOptions) -> Result<QueryPage<HistoryPoint>, BoxError> {
-        let (mut rows, fallback_runs) = self.query_history_from_indexes(query)?;
-        if !fallback_runs.is_empty() || (query.run_ids.is_empty() && rows.is_empty()) {
-            for batch in self.read_batches("scalars", &fallback_runs)? {
-                rows.extend(parse_scalar_batch(&batch));
-            }
+            read_lines::<ScalarLine>(&dir.join(INDEX_FILE), |line| {
+                if keep(&line.n, line.t) {
+                    rows.push(HistoryPoint {
+                        ts_ms: line.t,
+                        run_id: run_id.clone(),
+                        name: line.n,
+                        value: line.v,
+                        step: line.s,
+                        segment: None,
+                    });
+                }
+            })?;
         }
         Ok(apply_history_query(rows, query))
     }
 
-    async fn query_hyperparameters(&self, run_ids: &BTreeSet<String>) -> Result<Vec<(String, HyperparameterEntry)>, BoxError> {
-        let (mut rows, fallback_runs) = self.query_hyperparameters_from_indexes(run_ids)?;
-        if !fallback_runs.is_empty() || (run_ids.is_empty() && rows.is_empty()) {
-            for batch in self.read_batches("hyperparameters", &fallback_runs)? {
-                rows.extend(parse_hparam_batch(&batch));
+    fn query_hyperparameters(
+        &self,
+        run_ids: &BTreeSet<String>,
+    ) -> Result<Vec<(String, HyperparameterEntry)>, BoxError> {
+        let mut rows = Vec::new();
+        for run_id in self.candidate_runs(run_ids)? {
+            let dir = self.run_dir(&run_id).join(HPARAMS_DIR);
+            if !has_index(&dir) {
+                for batch in read_arrow_batches(&dir)? {
+                    rows.extend(parse_hparam_batch(&batch));
+                }
+                continue;
             }
+
+            let to_row = |entry: HyperparameterIndexEntry| {
+                (
+                    entry.run_id,
+                    HyperparameterEntry {
+                        key: entry.key,
+                        value: entry.value,
+                        value_type: entry.value_type,
+                    },
+                )
+            };
+            rows.extend(
+                read_legacy_array::<HyperparameterIndexEntry>(&dir.join(LEGACY_INDEX_FILE))?
+                    .into_iter()
+                    .map(to_row),
+            );
+            read_lines::<HyperparameterIndexEntry>(&dir.join(INDEX_FILE), |entry| {
+                rows.push(to_row(entry))
+            })?;
         }
         if !run_ids.is_empty() {
             rows.retain(|(run_id, _)| run_ids.contains(run_id));
@@ -558,28 +601,185 @@ impl StorageEngine for FilesystemStore {
         Ok(rows)
     }
 
-    async fn query_image_history(&self, query: &ImageQueryOptions) -> Result<QueryPage<ImageHistoryPoint>, BoxError> {
-        let mut rows = self.query_image_history_from_files(query)?;
-        for batch in self.read_batches("images", &query.run_ids)? {
-            rows.extend(parse_image_batch(&batch, query.include_data));
+    fn read_media_index(&self, metric_dir: &Path) -> Result<Vec<MediaIndexEntry>, BoxError> {
+        let mut entries =
+            read_legacy_array::<MediaIndexEntry>(&metric_dir.join(LEGACY_INDEX_FILE))?;
+        read_lines::<MediaIndexEntry>(&metric_dir.join(INDEX_FILE), |entry| entries.push(entry))?;
+        Ok(entries)
+    }
+
+    fn query_media(
+        &self,
+        kind: MediaKind,
+        query: &ImageQueryOptions,
+    ) -> Result<QueryPage<ImageHistoryPoint>, BoxError> {
+        let mut rows = Vec::new();
+        for run_id in self.candidate_runs(&query.run_ids)? {
+            let media_dir = self.run_dir(&run_id).join(kind.dir_name());
+            let metric_dirs = match fs::read_dir(&media_dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+
+            for metric_entry in metric_dirs {
+                let metric_entry = metric_entry?;
+                if !metric_entry.file_type()?.is_dir() {
+                    continue;
+                }
+                let metric_dir = metric_entry.path();
+                for entry in self.read_media_index(&metric_dir)? {
+                    if !query.metrics.is_empty() && !query.metrics.contains(&entry.name) {
+                        continue;
+                    }
+                    let image_base64 = if query.include_data {
+                        match fs::read(metric_dir.join(&entry.file_name)) {
+                            Ok(bytes) => Some(BASE64_STANDARD.encode(bytes)),
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                            Err(error) => return Err(error.into()),
+                        }
+                    } else {
+                        None
+                    };
+                    rows.push(ImageHistoryPoint {
+                        asset_id: None,
+                        step: None,
+                        ts_ms: entry.ts_ms,
+                        run_id: entry.run_id,
+                        name: entry.name,
+                        format: entry.format,
+                        image_base64,
+                    });
+                }
+            }
+
+            if kind == MediaKind::Image {
+                // Oldest format: image batches stored as raw Arrow files.
+                for batch in read_arrow_batches(&media_dir)? {
+                    rows.extend(parse_image_batch(&batch, query.include_data));
+                }
+            }
         }
         Ok(apply_image_query(rows, query))
     }
 
-    async fn load_image_frame(&self, query: &ImageFrameQuery) -> Result<Option<ImageFramePayload>, BoxError> {
-        self.load_image_frame_from_files(query)
+    fn load_media(
+        &self,
+        kind: MediaKind,
+        query: &ImageFrameQuery,
+    ) -> Result<Option<MediaPayload>, BoxError> {
+        let metric_dir = self.media_metric_dir(kind, &query.run_id, &query.name);
+        let index = self.read_media_index(&metric_dir)?;
+        if let Some(entry) = index.into_iter().rev().find(|entry| {
+            entry.ts_ms == query.ts_ms && entry.run_id == query.run_id && entry.name == query.name
+        }) {
+            let file_path = metric_dir.join(&entry.file_name);
+            return Ok(file_path.exists().then_some(MediaPayload {
+                format: entry.format,
+                source: MediaSource::File(file_path),
+            }));
+        }
+
+        if kind == MediaKind::Image {
+            // Oldest format: payload embedded in an Arrow batch file.
+            for batch in read_arrow_batches(&self.run_dir(&query.run_id).join(kind.dir_name()))? {
+                let timestamps = batch
+                    .column(0)
+                    .as_primitive::<arrow::datatypes::TimestampMillisecondType>();
+                let run_ids = batch.column(1).as_string::<i32>();
+                let names = batch.column(2).as_string::<i32>();
+                let payloads = batch.column(3).as_binary::<i32>();
+                let formats = batch.column(4).as_string::<i32>();
+                for i in 0..batch.num_rows() {
+                    if !timestamps.is_null(i)
+                        && timestamps.value(i) == query.ts_ms
+                        && run_ids.value(i) == query.run_id
+                        && names.value(i) == query.name
+                    {
+                        return Ok(Some(MediaPayload {
+                            format: formats.value(i).to_string(),
+                            source: MediaSource::Bytes(payloads.value(i).to_vec()),
+                        }));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+#[async_trait]
+impl StorageEngine for FilesystemStore {
+    async fn delete_run(&self, run_id: &str) -> Result<(), BoxError> {
+        if run_id == "." || run_id == ".." || run_id.is_empty() {
+            return Err(super::boxed_error("invalid run ID"));
+        }
+        let run_id = run_id.to_owned();
+        self.blocking(move |inner| {
+            let _guard = inner
+                .write_lock
+                .lock()
+                .map_err(|_| super::boxed_error("write lock poisoned"))?;
+            let path = inner.run_dir(&run_id);
+            if path.exists() {
+                fs::remove_dir_all(path)?;
+            }
+            inner
+                .known_manifests
+                .lock()
+                .map_err(|_| super::boxed_error("manifest lock poisoned"))?
+                .remove(&run_id);
+            Ok(())
+        })
+        .await
+    }
+    async fn append_batch(&self, batch: Arc<TelemetryBatch>) -> Result<(), BoxError> {
+        self.blocking(move |inner| inner.append_batch(&batch)).await
+    }
+
+    async fn query_history(
+        &self,
+        query: &HistoryQueryOptions,
+    ) -> Result<QueryPage<HistoryPoint>, BoxError> {
+        let query = query.clone();
+        self.blocking(move |inner| inner.query_history(&query))
+            .await
+    }
+
+    async fn query_hyperparameters(
+        &self,
+        run_ids: &BTreeSet<String>,
+    ) -> Result<Vec<(String, HyperparameterEntry)>, BoxError> {
+        let run_ids = run_ids.clone();
+        self.blocking(move |inner| inner.query_hyperparameters(&run_ids))
+            .await
+    }
+
+    async fn query_media_history(
+        &self,
+        kind: MediaKind,
+        query: &ImageQueryOptions,
+    ) -> Result<QueryPage<ImageHistoryPoint>, BoxError> {
+        let query = query.clone();
+        self.blocking(move |inner| inner.query_media(kind, &query))
+            .await
+    }
+
+    async fn load_media(
+        &self,
+        kind: MediaKind,
+        query: &ImageFrameQuery,
+    ) -> Result<Option<MediaPayload>, BoxError> {
+        let query = query.clone();
+        self.blocking(move |inner| inner.load_media(kind, &query))
+            .await
     }
 
     async fn list_runs(&self) -> Result<Vec<String>, BoxError> {
-        self.list_runs_from_manifests()
+        self.blocking(|inner| inner.list_runs()).await
     }
 
     async fn clear_history(&self) -> Result<(), BoxError> {
-        let runs_dir = self.runs_dir();
-        if runs_dir.exists() {
-            fs::remove_dir_all(&runs_dir)?;
-        }
-        fs::create_dir_all(runs_dir)?;
-        Ok(())
+        self.blocking(|inner| inner.clear()).await
     }
 }

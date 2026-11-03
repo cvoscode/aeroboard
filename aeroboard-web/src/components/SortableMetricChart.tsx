@@ -1,13 +1,20 @@
-import type { CSSProperties } from "react";
-import { ChevronDown, ChevronRight, GripVertical, Star } from "lucide-react";
+import { useRef, useState, type CSSProperties, type FormEvent } from "react";
+import { ChevronDown, ChevronRight, Crosshair, GripVertical, Star } from "lucide-react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
-import { LineChart, type XAxisType } from "./LineChart";
+import { LineChart, type ChartMarker, type XAxisType } from "./LineChart";
+import { exportChart } from "../lib/export";
+import { formatReferenceValue } from "../lib/format";
 import type { TimeSeriesData } from "../hooks/useAeroboard";
 import type { WidthMode } from "../hooks/useDashboardPreferences";
 
 interface SortableMetricChartProps {
+  logarithmic: boolean;
+  onToggleLog: () => void;
+  onHide: () => void;
+  markers: ChartMarker[];
+  onMarkerSelect: (id: string) => void;
   id: string;
   groupKey: string;
   seriesData: { name: string; fullData: TimeSeriesData; color?: string }[];
@@ -22,9 +29,12 @@ interface SortableMetricChartProps {
   collapsed: boolean;
   favorite: boolean;
   onToggleFavorite: () => void;
+  optimalValue: number | null;
+  onOptimalValueChange: (value: number | null) => void;
 }
 
 export function SortableMetricChart({
+  logarithmic, onToggleLog, onHide, markers, onMarkerSelect,
   id,
   groupKey,
   seriesData,
@@ -39,8 +49,34 @@ export function SortableMetricChart({
   collapsed,
   favorite,
   onToggleFavorite,
+  optimalValue,
+  onOptimalValueChange,
 }: SortableMetricChartProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const [editingOptimal, setEditingOptimal] = useState(false);
+  const [optimalDraft, setOptimalDraft] = useState("");
+
+  const openOptimalEditor = () => {
+    setOptimalDraft(optimalValue === null ? "" : String(optimalValue));
+    setEditingOptimal(true);
+  };
+
+  const submitOptimal = (event: FormEvent) => {
+    event.preventDefault();
+    const trimmed = optimalDraft.trim();
+    if (trimmed === "") {
+      onOptimalValueChange(null);
+      setEditingOptimal(false);
+      return;
+    }
+    const parsed = Number(trimmed);
+    if (!Number.isFinite(parsed)) return;
+    onOptimalValueChange(parsed);
+    setEditingOptimal(false);
+  };
+
+  const optimalDraftInvalid = optimalDraft.trim() !== "" && !Number.isFinite(Number(optimalDraft.trim()));
 
   const style: CSSProperties = {
     transform: CSS.Transform.toString(transform),
@@ -52,7 +88,7 @@ export function SortableMetricChart({
 
   return (
     <div
-      ref={setNodeRef}
+      ref={node => {setNodeRef(node);cardRef.current = node;}}
       style={style}
       className={`chart-card width-${widthMode} ${collapsed ? "collapsed" : ""} ${favorite ? "favorite" : ""}`}
     >
@@ -78,9 +114,29 @@ export function SortableMetricChart({
               <span className="legend-label">{series.name}</span>
             </div>
           ))}
+          {optimalValue !== null ? (
+            <button type="button" className="legend-item legend-optimal" onClick={openOptimalEditor} title="Edit optimal value">
+              <span className="legend-optimal-swatch" aria-hidden="true" />
+              <span className="legend-val legend-optimal-val">{formatReferenceValue(optimalValue)}</span>
+              <span className="legend-label">optimal</span>
+            </button>
+          ) : null}
         </div>
 
         <div className="chart-actions">
+          <button type="button" className="chip-btn" aria-pressed={logarithmic} onClick={onToggleLog} title="Toggle logarithmic y-axis">{logarithmic ? "Log" : "Linear"}</button>
+          <button type="button" className="chip-btn" disabled={collapsed} onClick={() => exportChart(cardRef.current,`${groupKey} · ${xAxisType} · smoothing ${smoothing} · ${removeOutliers ? "trimmed" : "all values"}`)}>PNG</button>
+          <button type="button" className="chip-btn" onClick={onHide} title="Hide this chart">Hide</button>
+          <button
+            className={`favorite-toggle optimal-toggle ${optimalValue !== null ? "is-active" : ""}`}
+            type="button"
+            onClick={() => (editingOptimal ? setEditingOptimal(false) : openOptimalEditor())}
+            title={optimalValue !== null ? "Edit optimal value line" : "Add optimal value line"}
+            aria-pressed={optimalValue !== null}
+            aria-expanded={editingOptimal}
+          >
+            <Crosshair size={16} />
+          </button>
           <button
             className={`favorite-toggle ${favorite ? "is-favorite" : ""}`}
             type="button"
@@ -96,6 +152,41 @@ export function SortableMetricChart({
         </div>
       </div>
 
+      {editingOptimal ? (
+        <form className="optimal-editor" onSubmit={submitOptimal}>
+          <label htmlFor={`optimal-${id}`}>Optimal value</label>
+          <input
+            id={`optimal-${id}`}
+            className={`optimal-input ${optimalDraftInvalid ? "is-invalid" : ""}`}
+            type="text"
+            inputMode="decimal"
+            value={optimalDraft}
+            placeholder="e.g. 0.95 (empty to remove)"
+            autoFocus
+            aria-invalid={optimalDraftInvalid}
+            onChange={(event) => setOptimalDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") setEditingOptimal(false);
+            }}
+          />
+          <button type="submit" className="selector-action-btn" disabled={optimalDraftInvalid}>Set</button>
+          {optimalValue !== null ? (
+            <button
+              type="button"
+              className="selector-action-btn"
+              onClick={() => {
+                onOptimalValueChange(null);
+                setEditingOptimal(false);
+              }}
+            >
+              Remove
+            </button>
+          ) : null}
+        </form>
+      ) : null}
+
+      {logarithmic ? <p className="workspace-hint">Log scale shows positive finite samples only.{optimalValue !== null && optimalValue <= 0 ? " The nonpositive target line is hidden." : ""}</p> : null}
+      {markers.length ? <div className="chart-event-markers">{markers.slice(-12).map(marker => <button key={marker.id} type="button" onClick={() => onMarkerSelect(marker.id)} title={marker.label}>◆ {marker.label}</button>)}</div> : null}
       {!collapsed && (
         <div className="plot-container">
           <LineChart
@@ -107,6 +198,8 @@ export function SortableMetricChart({
             smoothing={smoothing}
             removeOutliers={removeOutliers}
             xRange={xRange}
+            referenceValue={optimalValue}
+            logarithmic={logarithmic} markers={markers} onMarkerSelect={onMarkerSelect}
             height={280}
           />
         </div>

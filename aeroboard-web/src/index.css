@@ -56,6 +56,7 @@
   --scrollbar-thumb: rgba(255, 255, 255, 0.12);
   --plot-axis: #9ba1a6;
   --plot-grid: rgba(255, 255, 255, 0.05);
+  --plot-reference: #ffc940;
   --plot-selection: rgba(0, 210, 255, 0.12);
   --plot-selection-border: rgba(0, 210, 255, 0.78);
   --plot-selection-inset: rgba(255, 255, 255, 0.08);
@@ -118,6 +119,7 @@
   --scrollbar-thumb: rgba(19, 32, 59, 0.18);
   --plot-axis: #51627d;
   --plot-grid: rgba(19, 32, 59, 0.12);
+  --plot-reference: #b26a00;
   --plot-selection: rgba(0, 114, 245, 0.12);
   --plot-selection-border: rgba(0, 114, 245, 0.55);
   --plot-selection-inset: rgba(255, 255, 255, 0.5);

@@ -1,7 +1,9 @@
-mod codec;
+pub(crate) mod codec;
+mod durable;
 mod filesystem;
 mod greptime;
-mod query;
+pub(crate) mod query;
+pub use durable::DurableStore;
 
 use std::{collections::BTreeSet, io, sync::Arc};
 
@@ -13,20 +15,56 @@ use crate::{
     telemetry::TelemetryBatch,
 };
 
-pub use codec::record_batch_to_line_protocol;
+#[cfg(test)]
+pub(crate) use codec::{decode_hex as decode_hex_for_tests, record_batch_to_line_protocol};
 pub use filesystem::FilesystemStore;
 pub use greptime::GreptimeStore;
-pub use query::{HistoryQueryOptions, ImageFramePayload, ImageFrameQuery, ImageQueryOptions, QueryPage};
+pub use query::{
+    HistoryQueryOptions, ImageFrameQuery, ImageQueryOptions, MediaKind, MediaPayload, MediaSource,
+    QueryPage,
+};
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 #[async_trait]
 pub trait StorageEngine: Send + Sync {
+    async fn load_asset(&self, _id: &str) -> Result<Option<MediaPayload>, BoxError> {
+        Ok(None)
+    }
+    async fn delete_run(&self, _run_id: &str) -> Result<(), BoxError> {
+        Err(boxed_error(
+            "this storage backend does not support deleting individual runs",
+        ))
+    }
     async fn append_batch(&self, batch: Arc<TelemetryBatch>) -> Result<(), BoxError>;
-    async fn query_history(&self, query: &HistoryQueryOptions) -> Result<QueryPage<HistoryPoint>, BoxError>;
-    async fn query_hyperparameters(&self, run_ids: &BTreeSet<String>) -> Result<Vec<(String, HyperparameterEntry)>, BoxError>;
-    async fn query_image_history(&self, query: &ImageQueryOptions) -> Result<QueryPage<ImageHistoryPoint>, BoxError>;
-    async fn load_image_frame(&self, query: &ImageFrameQuery) -> Result<Option<ImageFramePayload>, BoxError>;
+    async fn query_history(
+        &self,
+        query: &HistoryQueryOptions,
+    ) -> Result<QueryPage<HistoryPoint>, BoxError>;
+    async fn query_hyperparameters(
+        &self,
+        run_ids: &BTreeSet<String>,
+    ) -> Result<Vec<(String, HyperparameterEntry)>, BoxError>;
+    /// Query media metadata (and, for images with `include_data`, inline payloads).
+    async fn query_media_history(
+        &self,
+        kind: MediaKind,
+        query: &ImageQueryOptions,
+    ) -> Result<QueryPage<ImageHistoryPoint>, BoxError>;
+    /// Locate the payload of a single media item.
+    async fn load_media(
+        &self,
+        kind: MediaKind,
+        query: &ImageFrameQuery,
+    ) -> Result<Option<MediaPayload>, BoxError>;
+
+    async fn query_image_history(
+        &self,
+        query: &ImageQueryOptions,
+    ) -> Result<QueryPage<ImageHistoryPoint>, BoxError> {
+        self.query_media_history(MediaKind::Image, query).await
+    }
+
     async fn list_runs(&self) -> Result<Vec<String>, BoxError>;
     async fn clear_history(&self) -> Result<(), BoxError>;
 }
@@ -34,7 +72,7 @@ pub trait StorageEngine: Send + Sync {
 pub fn build_storage(config: &AppConfig) -> Result<Arc<dyn StorageEngine>, BoxError> {
     match config.storage_mode {
         StorageMode::Filesystem => Ok(Arc::new(FilesystemStore::new(config.data_dir.clone())?)),
-        StorageMode::Greptime => Ok(Arc::new(GreptimeStore::new(config.greptime_url.clone()))),
+        StorageMode::Greptime => Ok(Arc::new(GreptimeStore::new(config.greptime_url.clone())?)),
         StorageMode::LiveOnly => Ok(Arc::new(LiveOnlyStore)),
     }
 }
@@ -48,22 +86,36 @@ impl StorageEngine for LiveOnlyStore {
         Ok(())
     }
 
-    async fn query_history(&self, _query: &HistoryQueryOptions) -> Result<QueryPage<HistoryPoint>, BoxError> {
+    async fn query_history(
+        &self,
+        _query: &HistoryQueryOptions,
+    ) -> Result<QueryPage<HistoryPoint>, BoxError> {
         tracing::debug!("LiveOnlyStore::query_history - returning empty history");
         Ok(QueryPage::default())
     }
 
-    async fn query_hyperparameters(&self, _run_ids: &BTreeSet<String>) -> Result<Vec<(String, HyperparameterEntry)>, BoxError> {
+    async fn query_hyperparameters(
+        &self,
+        _run_ids: &BTreeSet<String>,
+    ) -> Result<Vec<(String, HyperparameterEntry)>, BoxError> {
         tracing::debug!("LiveOnlyStore::query_hyperparameters - returning empty set");
         Ok(vec![])
     }
 
-    async fn query_image_history(&self, _query: &ImageQueryOptions) -> Result<QueryPage<ImageHistoryPoint>, BoxError> {
-        tracing::debug!("LiveOnlyStore::query_image_history - returning empty set");
+    async fn query_media_history(
+        &self,
+        _kind: MediaKind,
+        _query: &ImageQueryOptions,
+    ) -> Result<QueryPage<ImageHistoryPoint>, BoxError> {
+        tracing::debug!("LiveOnlyStore::query_media_history - returning empty set");
         Ok(QueryPage::default())
     }
 
-    async fn load_image_frame(&self, _query: &ImageFrameQuery) -> Result<Option<ImageFramePayload>, BoxError> {
+    async fn load_media(
+        &self,
+        _kind: MediaKind,
+        _query: &ImageFrameQuery,
+    ) -> Result<Option<MediaPayload>, BoxError> {
         Ok(None)
     }
 

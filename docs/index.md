@@ -21,6 +21,51 @@ The result is a system that can support real-time updates without pushing chart 
 
 ## Documentation map
 
+```{toctree}
+:hidden:
+:maxdepth: 2
+:caption: Getting Started
+
+getting-started/installation
+getting-started/quickstart
+```
+
+```{toctree}
+:hidden:
+:maxdepth: 2
+:caption: User Guide
+
+user-guide/core-concepts
+user-guide/logging-data
+user-guide/integrations
+user-guide/dashboard
+user-guide/workspaces
+```
+
+```{toctree}
+:hidden:
+:maxdepth: 2
+:caption: Developer Guide
+
+developer-guide/architecture
+developer-guide/repository-layout
+developer-guide/development-workflow
+developer-guide/storage-model
+developer-guide/feature-implementation-plan
+developer-guide/workspace-verification
+```
+
+```{toctree}
+:hidden:
+:maxdepth: 2
+:caption: Reference
+
+reference/cli
+reference/python-sdk
+reference/http-api
+reference/configuration
+```
+
 ### Getting started
 
 - Installation covers prerequisites, environment setup, and the basic local workflow.
@@ -39,6 +84,7 @@ The result is a system that can support real-time updates without pushing chart 
 - Repository Layout describes where code lives and which directory owns which concern.
 - Development Workflow gives setup, test, lint, and local debugging guidance.
 - Storage Model explains the storage abstraction and how filesystem, GreptimeDB, and live-only modes behave.
+- Feature Implementation Plan records the scope and verification gates for lifecycle, metric goals, saved views, comparisons, events, and offline capture.
 
 ### Reference
 
@@ -61,17 +107,17 @@ Then open `http://localhost:3000` and inspect the generated run.
 
 ## Build the docs locally
 
-Aeroboard uses MkDocs and is configured for hosting on Read the Docs.
+Aeroboard uses Sphinx with MyST to build these Markdown guides and is configured for hosting on Read the Docs. Documentation builds require Python 3.11 or newer. Run these commands from the repository root:
 
 ```bash
-pip install -r docs/requirements.txt
-mkdocs serve
+python -m pip install -r docs/requirements.txt
+python -m sphinx -b dirhtml -W --keep-going docs docs/_build/dirhtml
 ```
 
-To produce the static site:
+To preview the generated site:
 
 ```bash
-mkdocs build
+python -m http.server 8000 --directory docs/_build/dirhtml
 ```
 
-The generated output is written to `site/`.
+Open `http://localhost:8000`. Re-run the Sphinx build after editing a guide. Generated output lives in `docs/_build/dirhtml/` and is ignored by Git.

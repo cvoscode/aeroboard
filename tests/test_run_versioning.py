@@ -1,4 +1,7 @@
 from unittest.mock import Mock, patch
+import pytest
+
+pytestmark = pytest.mark.legacy_server
 
 from aeroboard_client.client import AeroboardClient, resolve_run_id, _fetch_existing_run_ids, _normalize_run_id
 
@@ -22,6 +25,12 @@ def test_resolve_run_id_ignores_other_framework_suffixes():
     assert resolve_run_id("experiment-pl2.5.1", existing) == "experiment-pl2.5.1"
 
 
+def test_resolve_run_id_only_treats_versioned_pl_as_framework_suffix():
+    # "-pl" inside an ordinary name must not be split off as a Lightning suffix.
+    assert resolve_run_id("sample-placement", {"sample-placement"}) == "sample-placement-v2"
+    assert resolve_run_id("demo-plot", {"demo-plot", "demo-plot-v2"}) == "demo-plot-v3"
+
+
 def test_normalize_run_id_replaces_missing_default():
     resolved = _normalize_run_id("   ")
     assert resolved.startswith("run-")
@@ -32,8 +41,10 @@ def test_fetch_existing_run_ids_uses_server_fallback():
     runs_response = Mock(status_code=200)
     runs_response.json.return_value = {"runs": ["experiment", "experiment-v2", "other-run"]}
 
-    with patch("requests.get", return_value=runs_response):
+    with patch("requests.get", return_value=runs_response) as get:
         assert _fetch_existing_run_ids("experiment") == {"experiment", "experiment-v2"}
+    # Only the Aeroboard server is asked, never the storage backend directly.
+    assert [call.args[0] for call in get.call_args_list] == ["http://localhost:3000/api/runs"]
 
 
 def test_client_prefers_server_side_run_resolution():

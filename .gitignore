@@ -9,3 +9,9 @@ runs/*
 .aeroboard/runs
 aeroboard-web/dist/
 aeroboard-server/target/
+docs/_build/
+/site/
+# Local tool state (regenerated; not source)
+.repowise/wiki.db*
+.playwright-mcp/
+aeroboard-spool/

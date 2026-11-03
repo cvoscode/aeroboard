@@ -2,11 +2,11 @@ import { Menu, X } from "lucide-react";
 
 interface DashboardHeaderProps {
   connected: boolean;
-  effectiveActiveTab: "scalars" | "images" | "analysis";
+  effectiveActiveTab: "scalars" | "images" | "media" | "analysis";
   effectiveSelectedRuns: string[];
-  visibleTabs: { id: "scalars" | "images" | "analysis"; label: string }[];
-  activeTab: "scalars" | "images" | "analysis";
-  onTabChange: (tab: "scalars" | "images" | "analysis") => void;
+  visibleTabs: { id: "scalars" | "images" | "media" | "analysis"; label: string }[];
+  activeTab: "scalars" | "images" | "media" | "analysis";
+  onTabChange: (tab: "scalars" | "images" | "media" | "analysis") => void;
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
   deleteError: string | null;

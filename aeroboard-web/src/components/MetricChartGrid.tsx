@@ -5,6 +5,7 @@ import type { TimeSeriesData } from "../hooks/useAeroboard";
 import type { XAxisType } from "./LineChart";
 import type { WidthMode } from "../hooks/useDashboardPreferences";
 import { SortableMetricChart } from "./SortableMetricChart";
+import type { RunEvent } from "../hooks/useWorkspace";
 
 const STAGE_COLORS: Record<string, string> = {
   train: "#00d2ff",
@@ -13,6 +14,11 @@ const STAGE_COLORS: Record<string, string> = {
 };
 
 interface MetricChartGridProps {
+  logCharts: Record<string, boolean>;
+  onToggleLog: (key: string) => void;
+  onHideChart: (key: string) => void;
+  events: RunEvent[];
+  onEventSelect: (event: RunEvent) => void;
   visibleMetricKeys: string[];
   groupedMetrics: Record<string, string[]>;
   currentMode: "single" | "compare";
@@ -31,9 +37,13 @@ interface MetricChartGridProps {
   setFavoriteCharts: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
   setCollapsedCharts: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
   setOrderedMetrics: React.Dispatch<React.SetStateAction<string[]>>;
+  /** Effective target line per chart (user override, else configured default). */
+  optimalValues: Record<string, number | null>;
+  setOptimalValues: React.Dispatch<React.SetStateAction<Record<string, number | null>>>;
 }
 
 export function MetricChartGrid({
+  logCharts, onToggleLog, onHideChart, events, onEventSelect,
   visibleMetricKeys,
   groupedMetrics,
   currentMode,
@@ -52,6 +62,8 @@ export function MetricChartGrid({
   setFavoriteCharts,
   setCollapsedCharts,
   setOrderedMetrics,
+  optimalValues,
+  setOptimalValues,
 }: MetricChartGridProps) {
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -59,6 +71,11 @@ export function MetricChartGrid({
   );
 
   const isChartCollapsed = (groupKey: string) => collapsedCharts[groupKey] ?? !favoriteCharts[groupKey];
+
+  // Removal is stored as null, not deleted, so a configured default target stays off.
+  const setOptimalValue = (groupKey: string, value: number | null) => {
+    setOptimalValues((prev) => ({ ...prev, [groupKey]: value }));
+  };
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
@@ -118,9 +135,17 @@ export function MetricChartGrid({
                 widthMode={widthMode}
                 revisionKey={`${singleRunRevision}:${groupKey}:${xAxisType}:${removeOutliers ? "trim" : "full"}`}
                 favorite={!!favoriteCharts[groupKey]}
-                onToggleFavorite={() => setFavoriteCharts((prev) => ({ ...prev, [groupKey]: !prev[groupKey] }))}
+                onToggleFavorite={() => setFavoriteCharts((prev) => ({ ...prev, [groupKey]: !favoriteCharts[groupKey] }))}
                 collapsed={isChartCollapsed(groupKey)}
                 onToggleCollapse={() => setCollapsedCharts((prev) => ({ ...prev, [groupKey]: !isChartCollapsed(groupKey) }))}
+                optimalValue={optimalValues[groupKey] ?? null}
+                onOptimalValueChange={(value) => setOptimalValue(groupKey, value)}
+                logarithmic={!!logCharts[groupKey]} onToggleLog={() => onToggleLog(groupKey)} onHide={() => onHideChart(groupKey)}
+                markers={events.flatMap(event => {
+                  const position = xAxisType === "step" ? event.data.step : xAxisType === "wall" ? event.data.timestamp_ms / 1000 : seriesData[0] ? event.data.timestamp_ms / 1000 - seriesData[0].fullData.wallTimes[0] : null;
+                  return position === null ? [] : [{id: event.id, x: position, label: event.data.label}];
+                })}
+                onMarkerSelect={id => {const event = events.find(event => event.id === id);if(event) onEventSelect(event);}}
               />
             );
           })}

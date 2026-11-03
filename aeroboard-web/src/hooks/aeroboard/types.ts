@@ -27,11 +27,14 @@ export interface RunSummary {
 }
 
 export interface ImageFrame {
+  asset_id?: string;
+  step?: number | null;
   ts_ms: number;
   run_id: string;
   name: string;
   format: string;
-  image_base64?: string;
+  /** Blob URL for frames pushed live with their bytes; persisted frames load by URL. */
+  objectUrl?: string;
 }
 
 export interface ImageSeries {
@@ -45,6 +48,29 @@ export type ScalarRow = {
   run_id: string;
   name: string;
   value: number;
+  /** Training step sent with the value (null/absent for data from older clients). */
+  step?: number | null;
 };
 
 export type LoadStatus = "idle" | "loading" | "ready" | "error";
+
+export type MediaKind = "audio" | "video";
+
+export interface MediaClip {
+  asset_id?: string;
+  step?: number | null;
+  kind: MediaKind;
+  ts_ms: number;
+  run_id: string;
+  name: string;
+  format: string;
+  /** Blob URL for clips pushed with their bytes (live-only mode). */
+  objectUrl?: string;
+}
+
+export interface MediaSeries {
+  kind: MediaKind;
+  run_id: string;
+  name: string;
+  clips: MediaClip[];
+}

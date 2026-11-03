@@ -31,10 +31,27 @@ The module also keeps a default client so helpers like `aeroboard.log(...)` can 
 Use `log()` when you already have the exact metric payload you want to send:
 
 ```python
-client.log({"train/loss": 0.42, "train/accuracy": 0.91, "step": 10})
+client.log({"train/loss": 0.42, "train/accuracy": 0.91}, step=10)
 ```
 
 Only numeric values are emitted. Non-numeric entries are ignored.
+
+The step is stored with every value and is what the dashboard's step axis uses. A
+`"step"` key inside the dict is treated the same as the `step` argument (it is not
+logged as a separate metric).
+
+## Delivery and failures
+
+Logging calls only buffer data; a background thread sends it to the server, so
+your training loop never waits on the network. `flush()` waits (up to
+`flush_timeout`) until the server confirms everything is stored, and `close()` —
+also run automatically at interpreter exit — does the same before disconnecting.
+
+If the server is unreachable, batches are retried with backoff and `flush()`
+returns immediately instead of stalling training. Unsent data is capped by
+`max_queue_bytes`; beyond it the oldest batches are dropped and a warning is
+printed. Batches the server rejects as malformed are dropped. `had_error()`
+reports whether any of this happened.
 
 ## Log metrics with prefixing and shared step
 

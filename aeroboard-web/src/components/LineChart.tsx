@@ -2,10 +2,15 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
 import type { TimeSeriesData } from '../hooks/useAeroboard';
+import { formatReferenceValue } from '../lib/format';
 
 export type XAxisType = 'wall' | 'rel' | 'step';
+export interface ChartMarker { id: string; x: number; label: string }
 
 interface LineChartProps {
+    logarithmic?: boolean;
+    markers?: ChartMarker[];
+    onMarkerSelect?: (id: string) => void;
     title: string;
     seriesData: { name: string; fullData: TimeSeriesData; color?: string }[];
     themeKey: 'light' | 'dark';
@@ -13,10 +18,41 @@ interface LineChartProps {
     smoothing?: number;
     removeOutliers?: boolean;
     xRange?: [number, number] | null;
+    /** Optional horizontal reference line (e.g. the optimal/target value). */
+    referenceValue?: number | null;
     height?: number;
 }
 
 const DEFAULT_COLORS = ['#00d2ff', '#ff4c6b', '#00e676', '#ffeb3b', '#e040fb'];
+
+/** Dashed horizontal line drawn straight onto uPlot's canvas: no extra series or DOM. */
+function drawReferenceLine(u: uPlot, value: number | null, color: string) {
+    if (value == null || !Number.isFinite(value)) return;
+    const { left, top, width, height } = u.bbox;
+    const y = Math.round(u.valToPos(value, 'y', true)) + 0.5;
+    if (!Number.isFinite(y) || y < top || y > top + height) return;
+
+    const ctx = u.ctx;
+    const dpr = uPlot.pxRatio;
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.setLineDash([6 * dpr, 4 * dpr]);
+    ctx.beginPath();
+    ctx.moveTo(left, y);
+    ctx.lineTo(left + width, y);
+    ctx.stroke();
+
+    ctx.setLineDash([]);
+    ctx.fillStyle = color;
+    ctx.font = `600 ${11 * dpr}px system-ui, sans-serif`;
+    ctx.textAlign = 'right';
+    const label = `optimal ${formatReferenceValue(value)}`;
+    const labelAbove = y - top > 16 * dpr;
+    ctx.textBaseline = labelAbove ? 'bottom' : 'top';
+    ctx.fillText(label, left + width - 4 * dpr, labelAbove ? y - 3 * dpr : y + 3 * dpr);
+    ctx.restore();
+}
 
 const xRelFormat = (v: number) => {
     const h = Math.floor(v / 3600).toString().padStart(2, '0');
@@ -25,63 +61,100 @@ const xRelFormat = (v: number) => {
     return `${h}:${m}:${s}`;
 };
 
+type ChartTheme = { axis: string; grid: string; reference: string };
+
+function readChartTheme(): ChartTheme {
+    if (typeof window === 'undefined') {
+        return { axis: '#9ba1a6', grid: 'rgba(255,255,255,0.05)', reference: '#ffb300' };
+    }
+    const styles = getComputedStyle(document.documentElement);
+    return {
+        axis: styles.getPropertyValue('--plot-axis').trim() || '#9ba1a6',
+        grid: styles.getPropertyValue('--plot-grid').trim() || 'rgba(255,255,255,0.05)',
+        reference: styles.getPropertyValue('--plot-reference').trim() || '#ffb300',
+    };
+}
+
+/** Stable identity for the mutable TimeSeriesData buffers, so a cleared store never aliases old data. */
+const seriesIds = new WeakMap<TimeSeriesData, number>();
+let nextSeriesId = 1;
+function seriesId(data: TimeSeriesData): number {
+    let id = seriesIds.get(data);
+    if (id === undefined) {
+        id = nextSeriesId++;
+        seriesIds.set(data, id);
+    }
+    return id;
+}
+
 export function LineChart({
+    logarithmic = false, markers = [], onMarkerSelect,
     title, seriesData, themeKey, xAxisType,
     smoothing = 0, removeOutliers = false,
     xRange = null,
+    referenceValue = null,
     height = 250
 }: LineChartProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const plotRef = useRef<uPlot | null>(null);
     const suppressSyncRef = useRef(false);  // prevent feedback loop
     const [localXRange, setLocalXRange] = useState<[number, number] | null>(null);
-    const [seriesSignature, setSeriesSignature] = useState('');
+    const referenceValueRef = useRef<number | null>(referenceValue);
+    referenceValueRef.current = logarithmic && referenceValue !== null && referenceValue <= 0 ? null : referenceValue;
+    const markersRef = useRef(markers); markersRef.current = markers;
+    const markerActionRef = useRef(onMarkerSelect); markerActionRef.current = onMarkerSelect;
+    const markerSignature = markers.map(marker => `${marker.id}:${marker.x}:${marker.label}`).join("|");
 
     const colorKey = seriesData.map(s => s.color ?? '').join(',');
     const hasSmoothingKey = smoothing > 0;
-    const dataSignature = seriesData.map(s => `${s.name}:${s.fullData.count}`).join('|');
-    const axisRevisionKey = `${themeKey}:${xAxisType}:${removeOutliers ? 'trim' : 'full'}`;
-    const chartTheme = (() => {
-        if (typeof window === 'undefined') {
-            return {
-                axis: '#9ba1a6',
-                grid: 'rgba(255,255,255,0.05)',
-            };
-        }
+    // Which series are plotted: changing it resets the user's zoom.
+    const seriesKey = seriesData.map(s => `${s.name}#${seriesId(s.fullData)}`).join('|');
+    // What data is plotted: the store mutates buffers in place, so the point count is
+    // the cheap change marker. Parents rebuild `seriesData` on every render, so keying
+    // on this avoids reprocessing (and redrawing) when nothing actually changed.
+    const dataSignature = seriesData.map(s => `${s.name}#${seriesId(s.fullData)}:${s.fullData.count}`).join('|');
+    const axisRevisionKey = `${themeKey}:${xAxisType}:${removeOutliers ? 'trim' : 'full'}:${logarithmic ? 'log' : 'linear'}`;
+    // CSS variables only change with the theme; reading them per render forces a style recalc.
+    const chartTheme = useMemo(readChartTheme, [themeKey]);
 
-        const styles = getComputedStyle(document.documentElement);
-        return {
-            axis: styles.getPropertyValue('--plot-axis').trim() || '#9ba1a6',
-            grid: styles.getPropertyValue('--plot-grid').trim() || 'rgba(255,255,255,0.05)',
-        };
-    })();
+    const seriesDataRef = useRef(seriesData);
+    seriesDataRef.current = seriesData;
 
     const processedData = useMemo(
-        () => buildProcessedData(seriesData, xAxisType, smoothing, xRange),
-        [seriesData, xAxisType, smoothing, xRange]
+        () => buildProcessedData(seriesDataRef.current, xAxisType, smoothing, xRange, logarithmic),
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [dataSignature, xAxisType, smoothing, xRange, logarithmic]
     );
 
     const focusedRange = useMemo(
-        () => getFocusedRanges(processedData, removeOutliers),
-        [processedData, removeOutliers]
+        () => getFocusedRanges(processedData, removeOutliers, logarithmic && referenceValue !== null && referenceValue <= 0 ? null : referenceValue, logarithmic),
+        [processedData, removeOutliers, referenceValue, logarithmic]
     );
+    const focusedRangeRef = useRef(focusedRange);
+    focusedRangeRef.current = focusedRange;
 
-    const defaultRange = focusedRange.defaultXRange;
-
-    // Reset EVERYTHING when axis type changes.
-    // This is crucial to avoid applying e.g. "step 100" zoom to "wall time" axis.
+    // A different set of series or a different axis invalidates any manual zoom.
+    // Live points arriving for the same series keep it.
     useEffect(() => {
         setLocalXRange(null);
-    }, [axisRevisionKey]);
+    }, [seriesKey, axisRevisionKey]);
 
-    useEffect(() => {
-        setLocalXRange(null);
-        setSeriesSignature(dataSignature);
-    }, [dataSignature, axisRevisionKey]);
+    // Apply scale changes synchronously (uPlot otherwise commits, and fires its
+    // setScale hook, in a microtask) so programmatic zooms aren't read back as user zooms.
+    const applyQuietly = (plot: uPlot, fn: () => void) => {
+        suppressSyncRef.current = true;
+        try {
+            plot.batch(fn);
+        } finally {
+            suppressSyncRef.current = false;
+        }
+    };
 
     // ── Effect 1: Create & destroy the uPlot instance ────────────────────────
+    // Only structural changes rebuild the canvas; data updates go through Effect 2.
     useEffect(() => {
-        if (!containerRef.current || seriesData.length === 0) return;
+        const container = containerRef.current;
+        if (!container || seriesData.length === 0) return;
 
         const xDateFormat = uPlot.fmtDate("{HH}:{mm}:{ss}");
 
@@ -119,17 +192,14 @@ export function LineChart({
 
         const opts: uPlot.Options = {
             title,
-            width: containerRef.current.clientWidth,
+            width: container.clientWidth,
             height,
             padding: [10, 10, 0, 10],
             scales: {
                 y: {
+                    distr: logarithmic ? 3 : 1,
                     auto: true,
-                    range: (_u, min, max) => {
-                        const range = focusedRange.focusedYRange;
-                        if (range) return range;
-                        return [min, max];
-                    }
+                    range: (_u, min, max) => focusedRangeRef.current.focusedYRange ?? (logarithmic ? [0.1,1] : [min,max])
                 }
             },
             axes: [
@@ -150,7 +220,10 @@ export function LineChart({
             series,
             cursor: {
                 drag: { setScale: true },
-                points: { show: false }
+                points: { show: false },
+                // Double-click resets via React state (below) instead of uPlot's
+                // autoScaleX, which would ignore the outlier-trimmed default range.
+                bind: { dblclick: () => null },
             },
             select: {
                 show: true,
@@ -162,80 +235,78 @@ export function LineChart({
             },
             legend: { show: false },
             hooks: {
+                draw: [u => {
+                    drawReferenceLine(u, referenceValueRef.current, chartTheme.reference);
+                    const ctx = u.ctx;ctx.save();ctx.strokeStyle=chartTheme.reference;ctx.setLineDash([3*uPlot.pxRatio,3*uPlot.pxRatio]);
+                    for(const marker of markersRef.current) {
+                        const x=u.valToPos(marker.x,'x',true);
+                        if(x<u.bbox.left || x>u.bbox.left+u.bbox.width) continue;
+                        ctx.beginPath();ctx.moveTo(x,u.bbox.top);ctx.lineTo(x,u.bbox.top+u.bbox.height);ctx.stroke();
+                    }
+                    ctx.restore();
+                }],
                 ready: [
                     u => {
-                        u.over.addEventListener('dblclick', () => {
-                            setLocalXRange(null);
-                            if (!xRange && defaultRange && defaultRange[0] !== defaultRange[1]) {
-                                suppressSyncRef.current = true;
-                                u.setScale('x', { min: defaultRange[0], max: defaultRange[1] });
-                                suppressSyncRef.current = false;
-                            }
+                        u.over.addEventListener('dblclick', () => setLocalXRange(null));
+                        u.over.addEventListener('click', event => {
+                            const position=event.clientX-u.over.getBoundingClientRect().left;
+                            const marker=markersRef.current.find(marker => Math.abs(u.valToPos(marker.x,'x')-position)<8);
+                            if(marker) markerActionRef.current?.(marker.id);
                         });
                     }
                 ],
                 setScale: [
                     (u, key) => {
-                        if (key === 'x' && !suppressSyncRef.current) {
-                            const { min, max } = u.scales.x;
-                            if (min != null && max != null) {
-                                // If uPlot's internal auto-resize triggered (not from drag),
-                                // it might report full range. We usually want to know if it's user-driven.
-                                setLocalXRange([min, max]);
-                            }
-                        }
+                        // status 0 = initial layout, not a user action.
+                        if (key !== 'x' || suppressSyncRef.current || u.status === 0) return;
+                        const { min, max } = u.scales.x;
+                        if (min != null && max != null) setLocalXRange([min, max]);
                     }
                 ]
             }
         };
 
-        const plot = new uPlot(opts, processedData.alignedData, containerRef.current);
+        const plot = new uPlot(opts, processedData.alignedData, container);
         plotRef.current = plot;
 
-        const onResize = () => {
-            if (containerRef.current)
-                plot.setSize({ width: containerRef.current.clientWidth, height });
-        };
-        window.addEventListener('resize', onResize);
+        // Track the container, not the window: the sidebar and width-mode toggles
+        // resize charts without any window resize event.
+        let lastWidth = container.clientWidth;
+        const observer = new ResizeObserver(() => {
+            const width = container.clientWidth;
+            if (width <= 0 || width === lastWidth) return;
+            lastWidth = width;
+            applyQuietly(plot, () => plot.setSize({ width, height }));
+        });
+        observer.observe(container);
         return () => {
-            window.removeEventListener('resize', onResize);
+            observer.disconnect();
             plot.destroy();
             plotRef.current = null;
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [title, seriesData.length, colorKey, chartTheme.axis, chartTheme.grid, xAxisType, height, hasSmoothingKey, axisRevisionKey, processedData.alignedData, focusedRange.focusedYRange]);
+    }, [title, seriesData.length, colorKey, chartTheme, xAxisType, height, hasSmoothingKey, axisRevisionKey]);
 
-    // ── Effect 2: Update data whenever filter/data changes ────────────────────
+    // ── Effect 2: Push data and ranges into the existing instance ────────────
+    // Also covers reference-line edits: focusedRange depends on referenceValue, and
+    // the synchronous batch commit repaints (running the draw hook).
     useEffect(() => {
         const plot = plotRef.current;
         if (!plot || seriesData.length === 0) return;
 
-        // Data is only filtered by the global master window (xRange from slider)
-        plot.setData(processedData.alignedData, false); // Don't reset scales automatically
+        // Priority: global window slider > user's manual zoom > outlier focus > full extent.
+        const preferred = xRange || localXRange || (removeOutliers ? focusedRange.focusedXRange : null) || focusedRange.defaultXRange;
 
-        // Final effective range preference: 
-        // 1. Mandatory Global Window (xRange)
-        // 2. User's manual local zoom (localXRange)
-        const effRange = xRange || localXRange || (removeOutliers ? focusedRange.focusedXRange : null);
-        const shouldResetToDefault = seriesSignature !== dataSignature;
-
-        if (effRange && effRange[0] !== effRange[1]) {
-            suppressSyncRef.current = true;
-            plot.setScale('x', { min: effRange[0], max: effRange[1] });
-            suppressSyncRef.current = false;
-        } else if ((shouldResetToDefault || (!xRange && !localXRange)) && defaultRange && defaultRange[0] !== defaultRange[1]) {
-            suppressSyncRef.current = true;
-            plot.setScale('x', { min: defaultRange[0], max: defaultRange[1] });
-            suppressSyncRef.current = false;
-        }
-        if (focusedRange.focusedYRange) {
-            suppressSyncRef.current = true;
-            plot.setScale('y', { min: focusedRange.focusedYRange[0], max: focusedRange.focusedYRange[1] });
-            suppressSyncRef.current = false;
-        }
-
-        plot.redraw(false, true);
-    }, [processedData, removeOutliers, xRange, localXRange, defaultRange, dataSignature, seriesSignature, focusedRange, seriesData.length]);
+        applyQuietly(plot, () => {
+            plot.setData(processedData.alignedData, false); // keep scales; set below
+            if (preferred && preferred[0] !== preferred[1]) {
+                plot.setScale('x', { min: preferred[0], max: preferred[1] });
+            }
+            if (focusedRange.focusedYRange) {
+                plot.setScale('y', { min: focusedRange.focusedYRange[0], max: focusedRange.focusedYRange[1] });
+            }
+        });
+    }, [processedData, focusedRange, removeOutliers, xRange, localXRange, seriesData.length, title, colorKey, chartTheme, height, hasSmoothingKey, axisRevisionKey, markerSignature]);
 
     return <div key={axisRevisionKey} ref={containerRef} className="uplot-wrapper" />;
 }
@@ -258,7 +329,8 @@ function buildProcessedData(
     seriesData: { fullData: TimeSeriesData }[],
     xAxis: XAxisType,
     smoothing: number,
-    xRange: [number, number] | null
+    xRange: [number, number] | null,
+    logarithmic = false
 ): ProcessedChartData {
     if (seriesData.length === 0) return { processed: [], alignedData: [[]] };
 
@@ -275,6 +347,9 @@ function buildProcessedData(
             const x = xArr[i];
             const v = values[i];
             if (xAxis === 'step' && x < 0) continue;
+            if (!Number.isFinite(v) || logarithmic && v <= 0) {
+                resX.push(x); rawV.push(NaN);if(smoothing>0)smoothV.push(NaN);continue;
+            }
             resX.push(x);
             rawV.push(v);
             if (smoothing > 0) {
@@ -302,9 +377,9 @@ function buildProcessedData(
         const xToIdx = new Map<number, number>();
         for (let i = 0; i < p.x.length; i++) xToIdx.set(p.x[i], i);
 
-        const alignedRaw = filteredX.map(x => { const i = xToIdx.get(x); return i !== undefined ? p.raw[i] : null; });
+        const alignedRaw = filteredX.map(x => { const i = xToIdx.get(x); return i !== undefined && Number.isFinite(p.raw[i]) ? p.raw[i] : null; });
         const alignedSmooth = smoothing > 0
-            ? filteredX.map(x => { const i = xToIdx.get(x); return i !== undefined ? p.smooth[i] : null; })
+            ? filteredX.map(x => { const i = xToIdx.get(x); return i !== undefined && Number.isFinite(p.smooth[i]) ? p.smooth[i] : null; })
             : null;
 
         if (alignedSmooth) result.push(alignedRaw as number[]);
@@ -315,12 +390,15 @@ function buildProcessedData(
 
 function getFocusedRanges(
     processedData: ProcessedChartData,
-    removeOutliers: boolean
+    removeOutliers: boolean,
+    referenceValue: number | null = null,
+    logarithmic = false
 ): { defaultXRange: [number, number] | null; focusedXRange: [number, number] | null; focusedYRange: [number, number] | null } {
     const visiblePoints: { x: number; y: number }[] = [];
 
     for (const series of processedData.processed) {
         for (let i = 0; i < series.x.length; i++) {
+            if (!Number.isFinite(series.smooth[i] ?? series.raw[i])) continue;
             visiblePoints.push({
                 x: series.x[i],
                 y: series.smooth[i] ?? series.raw[i],
@@ -332,28 +410,46 @@ function getFocusedRanges(
         return { defaultXRange: null, focusedXRange: null, focusedYRange: null };
     }
 
-    const xValues = visiblePoints.map(point => point.x);
-    const defaultXRange: [number, number] = [Math.min(...xValues), Math.max(...xValues)];
+    let minAllX = Infinity;
+    let maxAllX = -Infinity;
+    for (const point of visiblePoints) {
+        if (point.x < minAllX) minAllX = point.x;
+        if (point.x > maxAllX) maxAllX = point.x;
+    }
+    const defaultXRange: [number, number] = [minAllX, maxAllX];
 
-    const sortedY = [...visiblePoints].sort((a, b) => a.y - b.y);
-    const trimFraction = removeOutliers ? 0.1 : 0;
-    const lowIdx = Math.floor((sortedY.length - 1) * trimFraction);
-    const highIdx = Math.ceil((sortedY.length - 1) * (1 - trimFraction));
-    const clippedPoints = sortedY.slice(lowIdx, highIdx + 1);
+    // Sorting is only needed to trim outliers; the default path is a single pass.
+    let clippedPoints = visiblePoints;
+    if (removeOutliers) {
+        const sortedY = [...visiblePoints].sort((a, b) => a.y - b.y);
+        const lowIdx = Math.floor((sortedY.length - 1) * 0.1);
+        const highIdx = Math.ceil((sortedY.length - 1) * 0.9);
+        clippedPoints = sortedY.slice(lowIdx, highIdx + 1);
+    }
 
     if (clippedPoints.length === 0) {
         return { defaultXRange, focusedXRange: defaultXRange, focusedYRange: null };
     }
 
-    const ys = clippedPoints.map(point => point.y);
-    const xs = clippedPoints.map(point => point.x);
-    const minY = Math.min(...ys);
-    const maxY = Math.max(...ys);
-    const minX = Math.min(...xs);
-    const maxX = Math.max(...xs);
+    let minY = Infinity;
+    let maxY = -Infinity;
+    let minX = Infinity;
+    let maxX = -Infinity;
+    for (const point of clippedPoints) {
+        if (point.y < minY) minY = point.y;
+        if (point.y > maxY) maxY = point.y;
+        if (point.x < minX) minX = point.x;
+        if (point.x > maxX) maxX = point.x;
+    }
+    // Keep the reference line in view even when it lies outside the data.
+    if (referenceValue != null && Number.isFinite(referenceValue)) {
+        minY = Math.min(minY, referenceValue);
+        maxY = Math.max(maxY, referenceValue);
+    }
 
     const yPad = minY === maxY ? (Math.abs(minY || 1) * 0.05 || 1) : (maxY - minY) * (removeOutliers ? 0.03 : 0.08);
-    const focusedYRange: [number, number] = [minY - yPad, maxY + yPad];
+    const logPad = minY === maxY ? 1.1 : Math.pow(maxY/minY,0.08);
+    const focusedYRange: [number, number] = logarithmic ? [minY/logPad,maxY*logPad] : [minY - yPad, maxY + yPad];
 
     return {
         defaultXRange,

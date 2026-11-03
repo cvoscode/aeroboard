@@ -1,13 +1,10 @@
-use std::{
-    collections::HashMap,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashMap, fmt::Write as _};
 
 use arrow::{
     array::{Array, AsArray},
     record_batch::RecordBatch,
 };
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde_json::Value;
 
 use crate::{
@@ -15,15 +12,22 @@ use crate::{
     telemetry::TelemetryKind,
 };
 
-use super::{boxed_error, BoxError};
+use super::{BoxError, MediaKind, boxed_error};
 
+/// Encode a validated batch as InfluxDB line protocol for GreptimeDB.
+///
+/// `run_id` and the stream name (`name` / `key`) are **tags**, so together with the
+/// timestamp they form the primary key. Rows from different runs that share a
+/// metric name and millisecond therefore never overwrite each other, and filtering
+/// by run uses the primary-key index.
+///
+/// Non-finite scalar values are skipped: line protocol cannot represent NaN/inf.
 pub fn record_batch_to_line_protocol(
     batch: &RecordBatch,
     kind: &TelemetryKind,
 ) -> Result<String, BoxError> {
     let mut lines = String::new();
     let num_rows = batch.num_rows();
-
     if num_rows == 0 {
         return Ok(lines);
     }
@@ -33,107 +37,84 @@ pub fn record_batch_to_line_protocol(
         .as_primitive::<arrow::datatypes::TimestampMillisecondType>();
     let run_id_col = batch.column(1).as_string::<i32>();
     let text_col = batch.column(2).as_string::<i32>();
+    let row_ok = |i: usize| {
+        !timestamp_col.is_null(i)
+            && !run_id_col.is_null(i)
+            && !text_col.is_null(i)
+            && !run_id_col.value(i).is_empty()
+            && !text_col.value(i).is_empty()
+    };
 
     if *kind == TelemetryKind::Scalars {
         let value_col = batch
             .column(3)
             .as_primitive::<arrow::datatypes::Float64Type>();
+        let step_col = (batch.num_columns() > 4).then(|| {
+            batch
+                .column(4)
+                .as_primitive::<arrow::datatypes::Float64Type>()
+        });
 
         for i in 0..num_rows {
-            if timestamp_col.is_null(i)
-                || run_id_col.is_null(i)
-                || text_col.is_null(i)
-                || value_col.is_null(i)
-            {
+            if !row_ok(i) || value_col.is_null(i) || !value_col.value(i).is_finite() {
                 continue;
             }
-
-            let ts = timestamp_col.value(i);
-            let run_id = run_id_col.value(i);
-            let name = text_col.value(i);
-            let val = value_col.value(i);
-
-            let safe_name = name.replace(' ', "\\ ").replace(',', "\\,");
-            let safe_run_id = run_id
-                .replace(' ', "\\ ")
-                .replace(',', "\\,")
-                .replace('"', "\\\"");
-
-            lines.push_str(&format!(
-                "scalars,name={safe_name} run_id=\"{safe_run_id}\",value={val} {ts_ns}\n",
-                ts_ns = ts * 1_000_000
-            ));
+            let _ = write!(
+                lines,
+                "scalars,run_id={},name={} value={}",
+                escape_tag_value(run_id_col.value(i)),
+                escape_tag_value(text_col.value(i)),
+                value_col.value(i)
+            );
+            if let Some(steps) = step_col
+                && !steps.is_null(i)
+                && steps.value(i).is_finite()
+            {
+                let _ = write!(lines, ",step={}", steps.value(i));
+            }
+            let _ = writeln!(lines, " {}", timestamp_col.value(i) * 1_000_000);
         }
-    } else if *kind == TelemetryKind::Images {
-        let image_col = batch.column(3).as_binary::<i32>();
+    } else if let Some(media_kind) = MediaKind::from_telemetry(kind) {
+        let table = media_kind.dir_name();
+        let hex_column = media_kind.hex_column();
+        let payload_col = batch.column(3).as_binary::<i32>();
         let format_col = batch.column(4).as_string::<i32>();
 
         for i in 0..num_rows {
-            if timestamp_col.is_null(i)
-                || run_id_col.is_null(i)
-                || text_col.is_null(i)
-                || image_col.is_null(i)
-                || format_col.is_null(i)
-            {
+            if !row_ok(i) || payload_col.is_null(i) || format_col.is_null(i) {
                 continue;
             }
-
-            let ts = timestamp_col.value(i);
-            let run_id = run_id_col.value(i);
-            let name = text_col.value(i);
-            let format = format_col.value(i);
-            let encoded = hex_encode(image_col.value(i));
-
-            let safe_name = escape_tag_value(name);
-            let safe_run_id = escape_field_string(run_id);
-            let safe_format = escape_field_string(format);
-            let safe_image = escape_field_string(&encoded);
-
-            lines.push_str(&format!(
-                "images,name={safe_name} run_id=\"{safe_run_id}\",format=\"{safe_format}\",image_hex=\"{safe_image}\" {ts_ns}\n",
-                ts_ns = ts * 1_000_000
-            ));
+            let _ = writeln!(
+                lines,
+                "{table},run_id={},name={} format=\"{}\",{hex_column}=\"{}\" {}",
+                escape_tag_value(run_id_col.value(i)),
+                escape_tag_value(text_col.value(i)),
+                escape_field_string(format_col.value(i)),
+                hex_encode(payload_col.value(i)),
+                timestamp_col.value(i) * 1_000_000
+            );
         }
     } else if *kind == TelemetryKind::Hyperparameters {
         let value_col = batch.column(3).as_string::<i32>();
         let value_type_col = batch.column(4).as_string::<i32>();
 
         for i in 0..num_rows {
-            if timestamp_col.is_null(i)
-                || run_id_col.is_null(i)
-                || text_col.is_null(i)
-                || value_col.is_null(i)
-                || value_type_col.is_null(i)
-            {
+            if !row_ok(i) || value_col.is_null(i) || value_type_col.is_null(i) {
                 continue;
             }
-
-            let ts = timestamp_col.value(i);
-            let run_id = run_id_col.value(i);
-            let key = text_col.value(i);
-            let value = value_col.value(i);
-            let value_type = value_type_col.value(i);
-
-            let safe_key = escape_tag_value(key);
-            let safe_run_id = escape_field_string(run_id);
-            let safe_value = escape_field_string(value);
-            let safe_type = escape_field_string(value_type);
-
-            lines.push_str(&format!(
-                "hyperparameters,key={safe_key} run_id=\"{safe_run_id}\",value=\"{safe_value}\",value_type=\"{safe_type}\" {ts_ns}\n",
-                ts_ns = ts * 1_000_000
-            ));
+            let _ = writeln!(
+                lines,
+                "hyperparameters,run_id={},key={} value=\"{}\",value_type=\"{}\" {}",
+                escape_tag_value(run_id_col.value(i)),
+                escape_tag_value(text_col.value(i)),
+                escape_field_string(value_col.value(i)),
+                escape_field_string(value_type_col.value(i)),
+                timestamp_col.value(i) * 1_000_000
+            );
         }
     }
 
     Ok(lines)
-}
-
-pub(crate) fn extract_first_run_id(batch: &RecordBatch) -> Option<String> {
-    let run_id_col = batch.column(1).as_string::<i32>();
-    (0..batch.num_rows())
-        .find(|&index| !run_id_col.is_null(index))
-        .map(|index| run_id_col.value(index).to_string())
 }
 
 pub(crate) fn parse_scalar_batch(batch: &RecordBatch) -> Vec<HistoryPoint> {
@@ -145,6 +126,11 @@ pub(crate) fn parse_scalar_batch(batch: &RecordBatch) -> Vec<HistoryPoint> {
     let value_col = batch
         .column(3)
         .as_primitive::<arrow::datatypes::Float64Type>();
+    let step_col = (batch.num_columns() > 4).then(|| {
+        batch
+            .column(4)
+            .as_primitive::<arrow::datatypes::Float64Type>()
+    });
     let mut rows = Vec::with_capacity(batch.num_rows());
 
     for i in 0..batch.num_rows() {
@@ -157,10 +143,12 @@ pub(crate) fn parse_scalar_batch(batch: &RecordBatch) -> Vec<HistoryPoint> {
         }
 
         rows.push(HistoryPoint {
+            segment: None,
             ts_ms: timestamp_col.value(i),
             run_id: run_id_col.value(i).to_string(),
             name: name_col.value(i).to_string(),
             value: value_col.value(i),
+            step: step_col.and_then(|steps| (!steps.is_null(i)).then(|| steps.value(i))),
         });
     }
 
@@ -217,6 +205,8 @@ pub(crate) fn parse_image_batch(batch: &RecordBatch, include_data: bool) -> Vec<
         }
 
         rows.push(ImageHistoryPoint {
+            asset_id: None,
+            step: None,
             ts_ms: timestamp_col.value(i),
             run_id: run_id_col.value(i).to_string(),
             name: name_col.value(i).to_string(),
@@ -249,31 +239,36 @@ pub(crate) fn sanitize_extension(format: &str) -> String {
     }
 }
 
+/// Escape a tag value: commas, equals signs and spaces are delimiters, and a
+/// line break would end the line.
 fn escape_tag_value(value: &str) -> String {
-    value
-        .replace(' ', "\\ ")
-        .replace(',', "\\,")
-        .replace('=', "\\=")
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            ',' | '=' | ' ' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            '\n' | '\r' => out.push_str("\\ "),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
+/// Escape a quoted field string: only `"` and `\` are special inside the quotes.
 fn escape_field_string(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(&mut out, "{:02x}", byte);
+    for &byte in bytes {
+        out.push(DIGITS[(byte >> 4) as usize] as char);
+        out.push(DIGITS[(byte & 0x0f) as usize] as char);
     }
     out
-}
-
-pub(crate) fn now_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0)
 }
 
 pub(crate) fn extract_rows(body: &Value) -> Result<&Vec<Value>, BoxError> {
@@ -311,16 +306,20 @@ pub(crate) fn parse_i64(value: Option<&Value>) -> i64 {
 }
 
 pub(crate) fn decode_hex(hex: &str) -> Result<Vec<u8>, BoxError> {
-    if !hex.len().is_multiple_of(2) {
+    fn nibble(byte: u8) -> Result<u8, BoxError> {
+        match byte {
+            b'0'..=b'9' => Ok(byte - b'0'),
+            b'a'..=b'f' => Ok(byte - b'a' + 10),
+            b'A'..=b'F' => Ok(byte - b'A' + 10),
+            _ => Err(boxed_error("Invalid hex digit in payload")),
+        }
+    }
+
+    let raw = hex.as_bytes();
+    if !raw.len().is_multiple_of(2) {
         return Err(boxed_error("Invalid hex payload length"));
     }
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    let chars: Vec<char> = hex.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let part = [chars[i], chars[i + 1]].iter().collect::<String>();
-        bytes.push(u8::from_str_radix(&part, 16)?);
-        i += 2;
-    }
-    Ok(bytes)
+    raw.chunks_exact(2)
+        .map(|pair| Ok((nibble(pair[0])? << 4) | nibble(pair[1])?))
+        .collect()
 }

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import json
+import time
+from pathlib import Path
 import subprocess
 import sys
 
@@ -27,6 +30,56 @@ def main():
     real-time ML dashboard system.
     """
     pass
+
+
+@main.command()
+@click.option("--spool-dir", required=True, type=click.Path(exists=True, path_type=Path))
+@click.option("--status", "inspect_only", is_flag=True, help="Inspect queues without contacting the server.")
+@click.option("--timeout", default=30.0, type=click.FloatRange(min=0), show_default=True)
+def sync(spool_dir, inspect_only, timeout):
+    """Recover locally committed telemetry from stopped SDK sessions."""
+    from ._outbox import DiskOutbox, OutboxError
+    from ._delivery import OutboxTransport
+    databases = sorted(spool_dir.rglob("outbox.sqlite"))
+    if not databases:
+        raise click.ClickException("No outboxes found")
+    failed = False
+    errors = False
+    for database in databases:
+        outbox = None
+        transport = None
+        try:
+            outbox = DiskOutbox(database.parent)
+            if not inspect_only:
+                transport = OutboxTransport(outbox)
+                deadline = time.monotonic()+timeout
+                while True:
+                    item = outbox.next()
+                    if item is None: break
+                    if time.monotonic()>=deadline:
+                        raise OutboxError("delivery timeout; pending data was retained")
+                    ordinal,kind,path,body,_rows = item
+                    try:
+                        transport(kind,path,body)
+                    except Exception as exc:
+                        import pyarrow as pa
+                        status = getattr(exc,"status",500)
+                        if isinstance(exc,(OutboxError,pa.ArrowInvalid,pa.ArrowTypeError)) or 400<=status<500 and status!=429:
+                            outbox.reject(ordinal,exc)
+                        raise
+                    outbox.acknowledge(ordinal)
+            result = outbox.status()
+            click.echo(json.dumps(result))
+            failed = failed or bool(result["pending_batches"] or result["rejected_batches"])
+        except Exception as exc:
+            failed = True
+            errors = True
+            click.echo(f"{database.parent}: {exc}", err=True)
+        finally:
+            if transport: transport.close()
+            if outbox: outbox.close()
+    if errors or failed and not inspect_only:
+        raise click.ClickException("Some outboxes still need attention; committed entries were retained")
 
 
 def _prepare_runtime_assets(build_from_source: bool, force_download: bool) -> tuple[str, str]:
@@ -77,6 +130,19 @@ def setup(build_from_source, force_download):
 
 
 @main.command()
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    show_default=True,
+    help="Interface to listen on. Use 0.0.0.0 to accept telemetry and dashboard "
+    "traffic from other machines (there is no authentication).",
+)
+@click.option(
+    "--cors-origin",
+    "cors_origins",
+    multiple=True,
+    help="Extra browser origin allowed to call the API (repeatable; '*' allows any site).",
+)
 @click.option("--port", default=3000, help="HTTP port for the web UI")
 @click.option("--flight-port", default=50051, help="gRPC Flight port for ingestion")
 @click.option(
@@ -101,11 +167,13 @@ def setup(build_from_source, force_download):
     is_flag=True,
     help="Refresh the downloaded runtime artifacts before starting the server.",
 )
-def start(port, flight_port, storage, data_dir, build_from_source, force_download):
+def start(host, cors_origins, port, flight_port, storage, data_dir, build_from_source, force_download):
     """
     Start the Aeroboard server and web UI.
 
     Args:
+        host: Interface to bind (default: 127.0.0.1, local machine only)
+        cors_origins: Additional origins allowed to call the HTTP API
         port: HTTP port for serving the web UI (default: 3000)
         flight_port: gRPC Flight port for telemetry ingestion (default: 50051)
         storage: Storage backend - 'filesystem', 'greptime', or 'live' (default: filesystem)
@@ -114,18 +182,30 @@ def start(port, flight_port, storage, data_dir, build_from_source, force_downloa
     click.echo("--- 🚀 Starting Aeroboard Server ---")
     binary_path, web_dist_dir = _prepare_runtime_assets(build_from_source, force_download)
 
-    click.echo(f"📍 HTTP UI:     http://localhost:{port}")
-    click.echo(f"📍 Flight API:  grpc://localhost:{flight_port}")
+    display_host = "localhost" if host in ("127.0.0.1", "localhost", "::1") else host
+    click.echo(f"📍 HTTP UI:     http://{display_host}:{port}")
+    click.echo(f"📍 Flight API:  grpc://{display_host}:{flight_port}")
     click.echo(f"📍 Storage:     {storage}")
     click.echo("   (Serving metrics stream and live dashboard)")
 
     env = os.environ.copy()
+    env["AEROBOARD_HOST"] = host
+    if cors_origins:
+        env["AEROBOARD_CORS_ORIGINS"] = ",".join(cors_origins)
     env["AEROBOARD_HTTP_PORT"] = str(port)
     env["AEROBOARD_FLIGHT_PORT"] = str(flight_port)
     env["AEROBOARD_STORAGE"] = storage.lower()
     env["AEROBOARD_WEB_DIST_DIR"] = web_dist_dir
     if data_dir:
         env["AEROBOARD_DATA_DIR"] = os.path.abspath(data_dir)
+
+    # The server runs beside its binary; resolve dashboard settings from the
+    # caller's directory before launching it there.
+    dashboard_config = env.get("AEROBOARD_DASHBOARD_CONFIG")
+    if dashboard_config and dashboard_config.strip():
+        env["AEROBOARD_DASHBOARD_CONFIG"] = os.path.abspath(dashboard_config)
+    elif os.path.isfile("aeroboard.toml"):
+        env["AEROBOARD_DASHBOARD_CONFIG"] = os.path.abspath("aeroboard.toml")
 
     try:
         result = subprocess.run([binary_path], cwd=os.path.dirname(binary_path), env=env, check=False)

@@ -1,4 +1,6 @@
-import type { ImageFrame, RunSummary, ScalarRow } from "./types";
+import { tableFromIPC } from "apache-arrow";
+import type { ImageFrame, MediaClip, MediaKind, RunSummary, ScalarRow } from "./types";
+import { parseDashboardDefaults, type PartialDashboardDefaults } from "../../lib/dashboardDefaults";
 
 function buildUrl(base: string, path: string, params?: Record<string, string | number | boolean | undefined>) {
   const url = new URL(path, base);
@@ -51,17 +53,41 @@ export async function fetchRunSummaries(apiBase: string, runIds?: string[]): Pro
   return data.run_summaries ?? [];
 }
 
+/**
+ * Scalar history for `runIds`, sorted by time. Fetched as a single Arrow IPC
+ * stream: values stay binary and run/metric names are dictionary-encoded, which
+ * is several times smaller than the JSON rows and avoids paging.
+ */
 export async function fetchScalarHistory(apiBase: string, runIds: string[]): Promise<ScalarRow[]> {
-  const rows = await fetchPagedRows<ScalarRow>(
-    buildUrl(apiBase, "/api/history", {
-      run_id: runIds.join(","),
-      include_summaries: false,
-    }),
-  );
+  const resp = await fetch(buildUrl(apiBase, "/api/history", { run_id: runIds.join(","), format: "arrow" }));
+  if (!resp.ok) {
+    throw new Error(`Request failed with status ${resp.status}`);
+  }
+  const table = tableFromIPC(new Uint8Array(await resp.arrayBuffer()));
+  const rows: ScalarRow[] = [];
+  for (const batch of table.batches) {
+    const timestamps = batch.getChild("timestamp");
+    const runs = batch.getChild("run_id");
+    const names = batch.getChild("name");
+    const values = batch.getChild("value");
+    const steps = batch.getChild("step");
+    if (!timestamps || !runs || !names || !values) continue;
+    for (let i = 0; i < batch.numRows; i++) {
+      const step = steps?.get(i);
+      rows.push({
+        ts_ms: Number(timestamps.get(i)),
+        run_id: String(runs.get(i)),
+        name: String(names.get(i)),
+        value: Number(values.get(i)),
+        step: step === null || step === undefined ? null : Number(step),
+      });
+    }
+  }
   rows.sort((a, b) => a.ts_ms - b.ts_ms);
   return rows;
 }
 
+/** Image metadata for a run; frame bytes load lazily via `imageContentUrl`. */
 export async function fetchImageHistory(apiBase: string, runId: string): Promise<ImageFrame[]> {
   return fetchPagedRows<ImageFrame>(
     buildUrl(apiBase, "/api/history/images", {
@@ -71,34 +97,39 @@ export async function fetchImageHistory(apiBase: string, runId: string): Promise
   );
 }
 
-export async function fetchImageFrame(
-  apiBase: string,
-  runId: string,
-  name: string,
-  tsMs: number,
-): Promise<ImageFrame | null> {
-  const data = await fetchJson<{
-    run_id: string;
-    name: string;
-    ts_ms: number;
-    format: string;
-    image_base64: string;
-    error?: string | null;
-  }>(
-    buildUrl(apiBase, "/api/history/images/frame", {
-      run_id: runId,
-      name,
-      ts_ms: tsMs,
-    }),
+/** URL of a persisted image frame's raw bytes (usable directly as `<img src>`). */
+export function imageContentUrl(apiBase: string, frame: ImageFrame, attempt = 0): string {
+  if (frame.asset_id) return buildUrl(apiBase,`/api/assets/${encodeURIComponent(frame.asset_id)}/content`,{attempt: attempt || undefined});
+  return buildUrl(apiBase, "/api/history/media/content", {
+    kind: "image",
+    run_id: frame.run_id,
+    name: frame.name,
+    ts_ms: frame.ts_ms,
+    attempt: attempt > 0 ? attempt : undefined,
+  });
+}
+
+export async function fetchMediaHistory(apiBase: string, kind: MediaKind, runId: string): Promise<MediaClip[]> {
+  const rows = await fetchPagedRows<Omit<MediaClip, "kind">>(
+    buildUrl(apiBase, "/api/history/media", { kind, run_id: runId }),
   );
+  return rows.map((row) => ({ ...row, kind }));
+}
 
-  if (data.error) return null;
+/** URL of the raw clip bytes; the server streams it with Range support. */
+export function mediaContentUrl(apiBase: string, clip: MediaClip, attempt = 0): string {
+  if (clip.asset_id) return buildUrl(apiBase,`/api/assets/${encodeURIComponent(clip.asset_id)}/content`,{attempt: attempt || undefined});
+  return buildUrl(apiBase, "/api/history/media/content", {
+    kind: clip.kind,
+    run_id: clip.run_id,
+    name: clip.name,
+    ts_ms: clip.ts_ms,
+    attempt: attempt > 0 ? attempt : undefined,
+  });
+}
 
-  return {
-    run_id: data.run_id,
-    name: data.name,
-    ts_ms: data.ts_ms,
-    format: data.format,
-    image_base64: data.image_base64,
-  };
+/** Server-wide dashboard defaults from `aeroboard.toml`; `error` describes a broken config file. */
+export async function fetchServerDashboardDefaults(apiBase: string): Promise<{ defaults: PartialDashboardDefaults; error: string | null }> {
+  const body = await fetchJson<{ dashboard?: unknown; error?: string }>(buildUrl(apiBase, "/api/config"));
+  return { defaults: parseDashboardDefaults(body.dashboard), error: body.error ?? null };
 }

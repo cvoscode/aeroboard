@@ -1,0 +1,70 @@
+// Run against a server seeded with examples/workspace_example.py.
+import assert from "node:assert/strict";
+import { mkdir, readFile } from "node:fs/promises";
+const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright");
+const base = process.env.AEROBOARD_TEST_WEB_URL || "http://127.0.0.1:3000";
+const output = process.env.AEROBOARD_BROWSER_OUTPUT || "/tmp/aeroboard-browser";
+await mkdir(output, {recursive: true});
+const browser = await chromium.launch({headless: true, ...(process.env.CHROMIUM_PATH ? {executablePath: process.env.CHROMIUM_PATH} : {})});
+const errors = [];
+const context = await browser.newContext({viewport: {width: 1440, height: 1100}});
+const page = await context.newPage();
+page.on("pageerror", error => errors.push(String(error)));
+try {
+  await page.goto(`${base}/?project=examples`);
+  await page.getByLabel("Project", {exact: true}).waitFor();
+  await page.waitForFunction(() => document.querySelectorAll(".metric-scorecard").length > 0);
+  await page.getByRole("searchbox", {name: "Search metrics"}).fill("loss");
+  await page.getByTitle("Toggle logarithmic y-axis").first().click();
+  await page.getByLabel("View name").fill(`Browser check ${Date.now()}`);
+  const saved = page.waitForResponse(response => response.request().method() === "POST" && response.url().includes("/views"));
+  await page.getByRole("button", {name: "Save view", exact: true}).click();
+  const view = await (await saved).json();
+  assert.ok(view.id);
+  const fresh = await browser.newContext({viewport: {width: 1440, height: 1100}});
+  const shared = await fresh.newPage();
+  shared.on("pageerror", error => errors.push(String(error)));
+  await shared.goto(`${base}/?project=examples&view=${view.id}`);
+  await shared.waitForFunction(() => document.querySelector('input[aria-label="Search metrics"]')?.value === "loss");
+  assert.equal(await shared.getByTitle("Toggle logarithmic y-axis").first().textContent(), "Log");
+  await shared.locator(".chart-card canvas").first().waitFor();
+  const image = shared.waitForEvent("download");
+  await shared.getByRole("button", {name: "PNG", exact: true}).first().click();
+  await (await image).saveAs(`${output}/chart.png`);
+  assert.equal((await readFile(`${output}/chart.png`)).subarray(0,8).toString("hex"), "89504e470d0a1a0a");
+  const csv = shared.waitForEvent("download");
+  await shared.getByRole("link", {name: "Export raw CSV"}).click();
+  await (await csv).saveAs(`${output}/metrics.csv`);
+  assert.match(await readFile(`${output}/metrics.csv`, "utf8"), /val\/loss/);
+  // A live metadata refresh must not silently upgrade an editor's expected
+  // revision and overwrite another browser's save.
+  const refreshed = page.waitForResponse(response => response.request().method() === "GET" && response.url().includes("/projects/examples/views"));
+  await shared.getByRole("button", {name: "Save view", exact: true}).click();
+  await refreshed;
+  await page.getByRole("button", {name: "Save view", exact: true}).click();
+  await page.getByRole("status").filter({hasText: "409"}).waitFor();
+  await page.getByRole("button", {name: "Reload view", exact: true}).click();
+  await page.getByRole("status").filter({hasText: "Latest saved view loaded"}).waitFor();
+  await shared.screenshot({path: `${output}/desktop.png`, fullPage: true});
+  await shared.locator("summary").filter({hasText: "Runs and project settings"}).click();
+  const boxes = shared.locator(".workspace-run-list input[type=checkbox]");
+  await boxes.nth(0).check(); await boxes.nth(1).check();
+  await shared.getByRole("button", {name: "Compare selected (2)"}).click();
+  await shared.getByRole("tab", {name: "Hyperparameter Analysis"}).click();
+  await shared.getByRole("button", {name: "val/loss", exact: true}).click();
+  await shared.getByLabel("Metric reducer").selectOption("best");
+  const baseline = shared.getByLabel("Baseline run");
+  const option = await baseline.locator("option").nth(1).getAttribute("value");
+  await baseline.selectOption(option);
+  await shared.getByRole("tab", {name: /Images/}).click();
+  await shared.getByRole("button", {name: "Show step 20 on charts"}).click();
+  await shared.getByRole("heading", {name: "prediction", exact: true}).waitFor();
+  await shared.setViewportSize({width: 390, height: 844});
+  await shared.waitForFunction(() => document.querySelector(".sidebar").getBoundingClientRect().right <= 0);
+  await shared.screenshot({path: `${output}/mobile.png`, fullPage: true});
+  assert.deepEqual(errors, []);
+  await fresh.close();
+  console.log(JSON.stringify({savedView: view.id, checks: ["fresh-browser sharing", "save conflicts and reload", "log scale", "PNG", "CSV", "comparison", "media-to-chart navigation", "mobile render"], output}));
+} finally {
+  await context.close(); await browser.close();
+}

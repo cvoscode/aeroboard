@@ -4,80 +4,79 @@ This page describes the runtime architecture of Aeroboard as implemented today.
 
 ## High-level topology
 
-Aeroboard consists of three main runtime components and one optional persistence service:
-
-1. Python SDK for telemetry production.
-2. Rust server for ingestion, routing, persistence, and history APIs.
-3. React dashboard for visualization.
-4. GreptimeDB as an optional storage backend.
+1. **Python SDK**: buffers telemetry and sends Arrow `RecordBatch`es over Arrow Flight from a background thread.
+2. **Rust server**: one binary for Flight ingestion, live WebSocket streaming, persistence, the HTTP history API and the dashboard bundle.
+3. **React dashboard**: loads history as Arrow IPC, then merges live Arrow batches from the WebSocket.
+4. **Storage backend**: filesystem (default), GreptimeDB, or none (live-only).
 
 ## Data path
 
-The core design goal is a low-copy telemetry path.
+### Ingestion
 
-### Ingestion path
+`do_put` decodes the Flight stream with `arrow_flight`'s decoder (schema and
+dictionary messages are handled correctly). The telemetry kind comes from the Flight
+descriptor path, or from the column names when there is none. Every batch then goes
+through `schema::normalize_batch`, which checks column names, casts compatible types
+(e.g. `int64` values, `us` timestamps, `large_string`) to the canonical schema, and
+rejects anything else with `INVALID_ARGUMENT`. Code after this point can rely on the
+canonical layout.
 
-The Python client buffers telemetry in process and periodically builds Arrow `RecordBatch` objects. It sends those batches to the Rust server over Arrow Flight.
+### T-junction
 
-### T-junction fan-out
+`TJunction` splits each validated batch into two paths with different guarantees:
 
-Inside the server, ingestion publishes batches into a `tokio::sync::broadcast`-based hub called `TJunction`.
+- **Persistence**: a bounded `mpsc` queue drained by one persistence loop. When it is
+  full, ingestion waits, so a slow backend slows uploads down (backpressure) rather
+  than losing data. The loop reports each batch's outcome back to the request that
+  sent it, and `do_put` acknowledges an upload only once all of its batches are
+  stored. A client's `flush()` therefore means "durably stored", and storage errors
+  reach the client, which retries.
+- **Live**: a `broadcast` channel for WebSocket subscribers. A slow browser lags,
+  loses batches, and is told so with a `{"type": "lagged"}` message so it can
+  re-fetch history. Each batch is IPC-encoded once and shared by all subscribers.
 
-That hub splits traffic into two logical paths:
+### Summaries
 
-- persistence
-- live streaming
+`SummaryCache` holds per-run last/min/max per metric plus hyperparameters. A run is
+loaded from storage the first time it is requested; after that, the persistence loop
+folds every stored batch into it, so `/api/runs/summary` doesn't rescan history.
 
-### Persistence path
+### Shutdown
 
-The persistence loop subscribes to the same broadcast source and forwards supported telemetry into the configured `StorageEngine` implementation.
-
-Important property: live streaming should continue even if persistence fails.
-
-### Live path
-
-WebSocket clients receive Arrow IPC-serialized batches from the same source. The frontend decodes those bytes with `apache-arrow` and merges them into typed-array stores.
-
-## Server responsibilities
-
-The Rust server currently owns several concerns in one binary:
-
-- Arrow Flight ingestion
-- HTTP API endpoints
-- WebSocket live streaming
-- storage abstraction selection
-- static frontend serving
-
-This is operationally simple for local use but deliberately centralizes a lot of responsibility into one process.
+On Ctrl-C both servers stop accepting work and finish in-flight requests, the
+persistence queue is closed and drained (up to 30 s), and the process exits.
 
 ## Frontend data model
 
-The frontend avoids putting high-frequency series updates into React state. Instead, it maintains a store of typed arrays and only uses React for the surrounding view composition.
+High-frequency series live in typed-array stores held in refs, not React state.
+`useAeroboard` exposes a `tick` counter, bumped at most once per animation frame,
+that memos reading the stores depend on.
 
-That design matches the fact that timeseries updates are append-heavy and performance-sensitive.
+- History is fetched as one Arrow IPC response per run selection.
+- `mergeHistoryRows` merges fetched history with live points that are already
+  present, sorted by (timestamp, step) and de-duplicated, so loading history mid-run
+  doesn't duplicate or reorder points.
+- The step for each point comes from the `step` column. Data from older clients,
+  which logged a separate `step` metric, is matched by timestamp.
+- The WebSocket reconnects with exponential backoff. After a reconnect or a `lagged`
+  message, the dashboard re-fetches what it shows.
+- Images and other media are shown through URLs: Blob URLs for frames pushed live,
+  `/api/history/media/content` for persisted ones.
 
-## Current architectural strengths
+## Security model
 
-- Arrow is used end to end across ingestion and live streaming.
-- `Arc<RecordBatch>` keeps Rust-side clone costs low.
-- The storage boundary is explicit in the server.
-- Live updates are intentionally decoupled from persistence success.
-
-## Current architectural constraints
-
-- The server is still a single binary with several responsibilities.
-- The Python client knows about run resolution through the HTTP API.
-- Only a subset of possible telemetry shapes is supported end to end.
-- The frontend expects certain history semantics regardless of storage mode, so empty but explicit responses matter.
+There is no authentication. The server listens on `127.0.0.1` and sends no CORS
+headers by default; `AEROBOARD_HOST` and `AEROBOARD_CORS_ORIGINS` opt in to wider
+access.
 
 ## When you change the architecture
 
-If you add a new telemetry type, do not stop at one layer. You usually need coordinated changes in:
+A new telemetry type needs coordinated changes in:
 
-1. Python schema and client buffering (see `aeroboard-client/src/aeroboard_client/schema.py`).
-2. Rust ingestion and telemetry-kind detection.
-3. Storage serialization and query support.
+1. Python schema and client buffering (`aeroboard-client/src/aeroboard_client/schema.py`).
+2. The canonical schema in `aeroboard-server/src/schema.rs` and kind detection in `telemetry.rs`.
+3. Storage serialization and queries in each backend.
 4. HTTP response shaping if the UI reads it.
 5. Frontend decoding and rendering.
 
-The fastest way to create bugs in Aeroboard is to change only one half of the pipeline.
+Changing only one layer is the fastest way to create bugs in Aeroboard.

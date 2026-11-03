@@ -1,57 +1,58 @@
-use crate::app_state::AppState;
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-/// Start the persistence loop that buffers telemetry batches and appends them to storage.
-///
-/// This loop receives batches via the t_junction broadcast channel and uses StorageEngine
-/// to persist them to the configured backend. Errors are logged but do not terminate
-/// the loop - persistence failures are handled gracefully to allow live streaming to continue.
-///
-/// The returned `JoinHandle` must be awaited to ensure the loop runs to completion.
-/// If dropped without awaiting, the persistence task is silently cancelled.
-///
-/// The loop handles broadcast channel errors gracefully:
-/// - `Lagged`: Warns but continues (persistence is behind but live streaming continues)
-/// - `Closed`: Normal shutdown condition
-pub fn start_persistence_loop(state: AppState) -> JoinHandle<()> {
-    let mut rx = state.t_junction.subscribe();
-    let storage = state.storage.clone();
+use crate::app_state::AppState;
+use crate::t_junction::PersistJob;
 
+/// Start the loop that appends every published batch to the configured storage.
+///
+/// It drains the T-junction's bounded persistence queue, so no batch is skipped
+/// when storage is slow: the queue fills up and ingestion waits instead. A failed
+/// append is logged and the loop moves on (the backend may be temporarily
+/// unavailable; GreptimeDB writes are retried inside the store).
+///
+/// Each job's outcome is sent back to the Flight request that published it, which
+/// acknowledges the upload only once it is stored (or reports the failure so the
+/// client retries).
+///
+/// The loop ends once `TJunction::close_persistence` has been called and the queue
+/// is empty, which lets shutdown flush everything that was already accepted.
+pub fn start_persistence_loop(
+    state: AppState,
+    mut rx: mpsc::Receiver<PersistJob>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
-        loop {
-            match rx.recv().await {
-                Ok(telemetry) => {
-                    match storage.append_batch(telemetry.clone()).await {
-                        Err(error) => {
-                            tracing::warn!(
-                                "Failed to persist {:?} batch of {} rows: {}",
-                                telemetry.kind,
-                                telemetry.batch.num_rows(),
-                                error
-                            );
-                            // Continue processing - don't terminate on persistence errors
-                            // The backend may be temporarily unavailable
-                        }
-                        Ok(()) => {
-                            tracing::debug!(
-                                "Persisted {:?} batch of {} rows",
-                                telemetry.kind,
-                                telemetry.batch.num_rows()
-                            );
-                        }
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::warn!(
-                        "Persistence loop lagged and skipped {} batches",
-                        skipped
+        while let Some(PersistJob {
+            batch: telemetry,
+            done,
+        }) = rx.recv().await
+        {
+            let _gate = state.analysis.gate.lock().await;
+            let outcome = match state.storage.append_batch(telemetry.clone()).await {
+                Ok(()) => {
+                    state.analysis.invalidate();
+                    state.analysis.record(&telemetry).await;
+                    state.summaries.record(&telemetry).await;
+                    tracing::debug!(
+                        "Persisted {:?} batch of {} rows",
+                        telemetry.kind,
+                        telemetry.batch.num_rows()
                     );
-                    // Continue processing - don't terminate on lag events
-                    // Live streaming continues even if persistence is behind
+                    Ok(())
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
-            }
+                Err(error) => {
+                    tracing::error!(
+                        "Failed to persist {:?} batch of {} rows: {}",
+                        telemetry.kind,
+                        telemetry.batch.num_rows(),
+                        error
+                    );
+                    Err(error.to_string())
+                }
+            };
+            // The uploader may have disconnected; the batch is stored either way.
+            let _ = done.send(outcome);
         }
+        tracing::info!("Persistence queue drained");
     })
 }

@@ -1,32 +1,43 @@
-use std::{sync::Arc, net::SocketAddr, env};
+use std::{net::SocketAddr, time::Duration};
+
+use arrow_flight::flight_service_server::FlightServiceServer;
 use axum::{
-    http::{header, StatusCode, HeaderValue},
+    Router,
+    http::{HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
-    serve, Router,
+    serve,
 };
+use tokio::sync::watch;
 use tonic::transport::Server;
-use arrow_flight::flight_service_server::FlightServiceServer;
-use tower_http::cors::{CorsLayer, Any};
+use tower_http::cors::{Any, CorsLayer};
 
+mod analytics;
 mod app_state;
+mod catalog;
 mod config;
-mod telemetry;
-mod t_junction;
-mod ingestion;
-mod streaming;
-mod persistence;
-mod schema;
+mod dashboard_config;
 mod history;
-mod storage;
+mod ingestion;
+mod persistence;
 mod retry;
+mod schema;
+mod storage;
+mod streaming;
+mod summaries;
+mod t_junction;
+mod telemetry;
 mod tests;
+mod workspace;
+mod workspace_tests;
 
 use crate::app_state::AppState;
-use crate::config::AppConfig;
-use crate::t_junction::TJunction;
+use crate::config::{AppConfig, CorsPolicy};
 use crate::ingestion::AeroboardFlightServer;
 use crate::storage::build_storage;
+
+/// How long shutdown waits for queued batches to reach storage.
+const PERSISTENCE_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Return a 404 JSON response for unmatched `/api/*` requests so the SPA
 /// fallback never gets cached as the response of an API call.
@@ -38,55 +49,105 @@ async fn api_not_found_fallback() -> Response {
         })),
     )
         .into_response();
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
     response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+fn cors_layer(policy: &CorsPolicy) -> Option<CorsLayer> {
+    let methods = [
+        Method::GET,
+        Method::POST,
+        Method::PATCH,
+        Method::DELETE,
+        Method::OPTIONS,
+    ];
+    match policy {
+        CorsPolicy::SameOrigin => None,
+        CorsPolicy::Any => {
+            tracing::warn!(
+                "CORS: allowing every origin; any website you visit can read and delete your runs"
+            );
+            Some(
+                CorsLayer::new()
+                    .allow_origin(Any)
+                    .allow_methods(methods)
+                    .allow_headers(Any),
+            )
+        }
+        CorsPolicy::Origins(origins) => {
+            let parsed: Vec<HeaderValue> = origins
+                .iter()
+                .filter_map(|origin| match origin.parse::<HeaderValue>() {
+                    Ok(value) => Some(value),
+                    Err(_) => {
+                        tracing::warn!("CORS: ignoring invalid origin {origin:?}");
+                        None
+                    }
+                })
+                .collect();
+            tracing::info!("CORS: allowing origins {}", origins.join(", "));
+            Some(
+                CorsLayer::new()
+                    .allow_origin(parsed)
+                    .allow_methods(methods)
+                    .allow_headers(Any),
+            )
+        }
+    }
 }
 
 pub fn build_app(app_state: AppState) -> Router {
     let config = app_state.config.clone();
     let api_routes = Router::new()
-        .route("/history", get(history::history_handler).delete(history::delete_history_handler))
+        .route(
+            "/history",
+            get(history::history_handler).delete(history::delete_history_handler),
+        )
         .route("/history/images", get(history::image_history_handler))
-        .route("/history/images/frame", get(history::image_frame_content_handler))
+        .route("/history/media", get(history::media_history_handler))
+        .route(
+            "/history/media/content",
+            get(history::media_content_handler),
+        )
         .route("/runs", get(history::runs_handler))
         .route("/runs/summary", get(history::run_summaries_handler))
         .route("/runs/resolve", post(history::resolve_run_id_handler))
+        .route("/config", get(dashboard_config::config_handler))
+        .merge(workspace::routes())
+        .merge(analytics::routes())
         .fallback(api_not_found_fallback);
 
-    Router::new()
+    let router = Router::new()
         .route("/ws/live", get(streaming::ws_handler))
         .nest("/api", api_routes)
         .fallback_service(
-            tower_http::services::ServeDir::new(config.web_dist_dir.clone())
-                .fallback(tower_http::services::ServeFile::new(config.web_dist_dir.join("index.html"))),
-        )
-        .layer({
-            let cors = CorsLayer::new();
-            match env::var("CORS_ORIGIN") {
-                Ok(origins) if !origins.is_empty() => {
-                    tracing::info!("CORS: allowing origins: {}", origins);
-                    cors.allow_origin(
-                        origins.split(',')
-                            .map(|s| s.trim())
-                            .filter(|s| !s.is_empty())
-                            .map(|s| s.parse::<axum::http::HeaderValue>().unwrap())
-                            .collect::<Vec<_>>(),
-                    )
-                },
-                _ => {
-                    tracing::warn!("CORS: allowing all origins (set CORS_ORIGIN env var to restrict)");
-                    cors.allow_origin(Any)
-                }
-            }.allow_methods(Any).allow_headers(Any)
-        })
-        .with_state(app_state)
+            tower_http::services::ServeDir::new(config.web_dist_dir.clone()).fallback(
+                tower_http::services::ServeFile::new(config.web_dist_dir.join("index.html")),
+            ),
+        );
+
+    let router = match cors_layer(&config.cors) {
+        Some(layer) => router.layer(layer),
+        None => router,
+    };
+    router.with_state(app_state)
+}
+
+fn server_outcome<E: std::fmt::Display>(
+    name: &str,
+    result: Result<Result<(), E>, tokio::task::JoinError>,
+) -> Result<(), crate::storage::BoxError> {
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(format!("{name} server failed: {error}").into()),
+        Err(error) => Err(format!("{name} server task failed: {error}").into()),
+    }
+}
+
+async fn wait_for_shutdown(mut signal: watch::Receiver<bool>) {
+    let _ = signal.wait_for(|stop| *stop).await;
 }
 
 #[tokio::main]
@@ -94,53 +155,102 @@ async fn main() -> Result<(), crate::storage::BoxError> {
     tracing_subscriber::fmt::init();
     let config = AppConfig::from_env();
     tracing::info!(
-        "Starting Aeroboard Server with storage={} http_port={} flight_port={}",
+        "Starting Aeroboard Server with storage={} host={} http_port={} flight_port={}",
         config.storage_mode.as_str(),
+        config.host,
         config.http_port,
         config.flight_port
     );
+    if !config.host.is_loopback() {
+        tracing::warn!(
+            "Listening on {}: anyone who can reach this machine can send telemetry and delete runs",
+            config.host
+        );
+    }
 
-    // 1. Initialize T-Junction Hub
-    let t_junction = Arc::new(TJunction::new(100));
     let storage = build_storage(&config)?;
-    let app_state = AppState {
-        config: config.clone(),
-        t_junction: t_junction.clone(),
-        storage: storage.clone(),
-    };
+    let (app_state, persist_rx) = AppState::new(config.clone(), storage)?;
+    let t_junction = app_state.t_junction.clone();
 
-    // 2. Start Persistence Loop (Path A) — must be awaited so shutdown waits for it
-    let persistence_loop = persistence::start_persistence_loop(app_state.clone());
+    // Path A: persistence. Awaited during shutdown so queued batches are written.
+    let persistence_loop = persistence::start_persistence_loop(app_state.clone(), persist_rx);
 
-    // 3. Setup HTTP + WebSocket Server
-    let app = build_app(app_state.clone());
-
-    let ws_addr = SocketAddr::from(([0, 0, 0, 0], config.http_port));
-    let ws_listener = tokio::net::TcpListener::bind(ws_addr).await.map_err(|e| {
-        format!("Failed to bind HTTP server to {}: {}", ws_addr, e)
-    })?;
-
-    let ws_server = tokio::spawn(async move {
-        tracing::info!("HTTP+WebSocket Server listening on {}", ws_addr);
-        serve(ws_listener, app).await.unwrap();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            tracing::info!("Shutdown requested; finishing in-flight uploads");
+            let _ = shutdown_tx.send(true);
+        }
     });
 
-    // 4. Setup gRPC Flight Server (Ingestion)
-    let flight_addr = format!("[::]:{}", config.flight_port).parse()?;
+    // HTTP + WebSocket server (dashboard, history API, live stream).
+    let http_addr = SocketAddr::new(config.host, config.http_port);
+    let http_listener = tokio::net::TcpListener::bind(http_addr)
+        .await
+        .map_err(|e| format!("Failed to bind HTTP server to {}: {}", http_addr, e))?;
+    let app = build_app(app_state.clone());
+    let http_shutdown = wait_for_shutdown(shutdown_rx.clone());
+    let mut http_server = tokio::spawn(async move {
+        tracing::info!("HTTP+WebSocket Server listening on {}", http_addr);
+        serve(http_listener, app)
+            .with_graceful_shutdown(http_shutdown)
+            .await
+    });
+
+    // gRPC Flight server (ingestion). tonic defaults to 4 MiB per message, which is
+    // too small for audio/video clips.
+    let flight_addr = SocketAddr::new(config.host, config.flight_port);
     let flight_service = FlightServiceServer::new(AeroboardFlightServer {
         t_junction: t_junction.clone(),
-    });
-
-    let grpc_server = tokio::spawn(async move {
+        catalog: Some(app_state.catalog.clone()),
+    })
+    .max_decoding_message_size(config.max_message_bytes);
+    let grpc_shutdown = wait_for_shutdown(shutdown_rx.clone());
+    let mut grpc_server = tokio::spawn(async move {
         tracing::info!("gRPC Flight Server listening on {}", flight_addr);
         Server::builder()
             .add_service(flight_service)
-            .serve(flight_addr)
+            .serve_with_shutdown(flight_addr, grpc_shutdown)
             .await
-            .unwrap();
     });
 
-    tokio::try_join!(ws_server, grpc_server, persistence_loop)?;
+    // Run until both servers stop (normally via Ctrl-C). If one fails, stop the other.
+    let first = tokio::select! {
+        result = &mut http_server => server_outcome("HTTP", result),
+        result = &mut grpc_server => server_outcome("gRPC", result),
+    };
+    let first_error = match first {
+        Ok(()) => {
+            // Graceful shutdown: let the other server finish its in-flight requests too.
+            let (http, grpc) = (http_server.is_finished(), grpc_server.is_finished());
+            let other = match (http, grpc) {
+                (true, false) => server_outcome("gRPC", grpc_server.await),
+                (false, true) => server_outcome("HTTP", http_server.await),
+                _ => Ok(()),
+            };
+            other.err()
+        }
+        Err(error) => {
+            http_server.abort();
+            grpc_server.abort();
+            Some(error)
+        }
+    };
 
-    Ok(())
+    // Everything accepted so far is in the persistence queue; write it out.
+    t_junction.close_persistence();
+    if tokio::time::timeout(PERSISTENCE_DRAIN_TIMEOUT, persistence_loop)
+        .await
+        .is_err()
+    {
+        tracing::error!(
+            "Timed out after {:?} writing queued telemetry; some batches were not persisted",
+            PERSISTENCE_DRAIN_TIMEOUT
+        );
+    }
+
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }

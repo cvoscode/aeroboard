@@ -2,6 +2,8 @@
 
 The dashboard is the browser-facing part of Aeroboard. It combines persisted history with the live telemetry stream so runs appear immediately while still remaining queryable after reload.
 
+See [projects, objectives, and recovery](workspaces.md) for project organization, lifecycle badges, saved views, goal-aware scorecards, baseline and multi-seed comparison, linked annotations/media, exports, and offline delivery.
+
 ## How the dashboard gets data
 
 On startup, the frontend does two things:
@@ -35,6 +37,31 @@ The history API returns `run_summaries` alongside raw rows. Those summaries incl
 - per-metric maximum
 
 These summaries drive overview and comparison-oriented widgets.
+
+### Initial view and target lines
+
+To start with your most important charts expanded and pinned to the top, configure the training run:
+
+```python
+import aeroboard_client as aeroboard
+
+aeroboard.init(
+    run_id="baseline",
+    dashboard={
+        "starred": ["loss", "accuracy"],
+        "order": ["loss", "accuracy", "lr"],
+        "targets": {"val/loss": 0.1, "accuracy": 0.95},
+    },
+)
+```
+
+For defaults shared by all runs, create `aeroboard.toml` in the directory where you run `aeroboard start`. The [configuration reference](../reference/configuration.md#initial-dashboard-view) covers the file format and custom paths.
+
+Use each chart's star button to pin it, drag to reorder, or click the crosshair to add or edit a target. Targets appear as dashed horizontal lines, and the y-axis grows to keep them visible.
+
+Your browser saves chart changes and gives them priority over the training script and server defaults. Choose **Reset chart layout** in the sidebar to apply the configured initial view again, including any target you removed manually.
+
+Full metric names such as `val/loss` also match the grouped `loss` chart in single-run mode. Per-run targets override server targets even when one uses a full name and the other uses a chart name. When comparing runs, the first selected run with a matching target supplies that chart's line.
 
 ### Comparison views
 
