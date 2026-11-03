@@ -78,7 +78,7 @@ Mean curves and **sample standard deviation** bands use exact step matching, wit
 
 ## Save and share a view
 
-Name the current view and choose **Save view**. Views capture selected runs, stars, order, display targets, removed targets, collapsed charts, metric search, hidden charts, logarithmic axes, smoothing, range, comparison settings, and run-browser filters. **Make default** selects the project's initial view. **Copy view link** shares a URL on the same deployment.
+Use the **Project** and **View** selectors in the top bar to switch workspaces. Open **Project and view settings** beside them to name the current view and choose **Save view**, or manage projects and run metadata. Views capture selected runs, stars, order, display targets, removed targets, collapsed charts, metric search, hidden charts, logarithmic axes, smoothing, range, comparison settings, and run-browser filters. **Make default** selects the project's initial view. **Copy view link** shares a URL on the same deployment.
 
 Precedence is browser overrides, saved view, run dashboard settings, then server configuration. **Reset chart layout** clears the current scope's browser overrides and restores inherited settings. Theme remains a browser preference. The Default project offers **Import previous browser layout** for preferences saved by older versions.
 

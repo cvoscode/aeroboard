@@ -1,4 +1,5 @@
 import { Menu, X } from "lucide-react";
+import type { ReactNode } from "react";
 
 interface DashboardHeaderProps {
   connected: boolean;
@@ -11,6 +12,7 @@ interface DashboardHeaderProps {
   onToggleSidebar: () => void;
   deleteError: string | null;
   onDismissDeleteError: () => void;
+  children?: ReactNode;
 }
 
 export function DashboardHeader({
@@ -24,6 +26,7 @@ export function DashboardHeader({
   onToggleSidebar,
   deleteError,
   onDismissDeleteError,
+  children,
 }: DashboardHeaderProps) {
   return (
     <header className="main-header">
@@ -53,6 +56,8 @@ export function DashboardHeader({
             <span>{connected ? "LIVE" : "OFFLINE"}</span>
           </div>
         </div>
+
+        {children}
 
         <div className="page-tabs" role="tablist" aria-label="Dashboard pages">
           {visibleTabs.map((tab) => (

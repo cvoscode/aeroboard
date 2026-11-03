@@ -1,4 +1,5 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Settings2, X } from "lucide-react";
 import { workspaceRequest, type RunRecord, type RunEvent, type SavedView, type MetricDefinition, type useWorkspace } from "../hooks/useWorkspace";
 
 type Workspace = ReturnType<typeof useWorkspace>;
@@ -18,6 +19,7 @@ interface Props {
 
 export function WorkspacePanel({workspace, projectId, viewId, selectedRuns, metrics, settings, runBrowser, onRunBrowserChange,
   onProjectChange, onViewChange, onSelectRuns, onEventsChange, onEventSelect, onImportPreferences, onReloadPreferences}: Props) {
+  const settingsDialog = useRef<HTMLDialogElement>(null);
   const [name, setName] = useState("");
   const [projectName, setProjectName] = useState("");
   const search = typeof runBrowser.search === "string" ? runBrowser.search : "";
@@ -73,9 +75,12 @@ export function WorkspacePanel({workspace, projectId, viewId, selectedRuns, metr
     setViewRevision({id: saved.id, revision: saved.revision});
     onViewChange(saved); setName(""); setMessage("View saved.");
   });
+  const selectRuns = (ids: string[]) => {
+    onSelectRuns(ids);
+    settingsDialog.current?.close();
+  };
   if (!workspace.capabilities) return workspace.error ? <div className="status-banner" role="status">Workspace unavailable: {workspace.error}</div> : null;
-  return <section className="workspace-panel" aria-label="Project workspace">
-    <div className="workspace-toolbar">
+  return <nav className="workspace-navigation" aria-label="Project navigation">
       <label>Project<select aria-label="Project" value={projectId} onChange={event => {setViewRevision({id: "",revision: 0});setName("");onProjectChange(event.target.value);}}>
         {workspace.projects.map(project => <option key={project.id} value={project.id}>{project.data.name}</option>)}
       </select></label>
@@ -86,6 +91,19 @@ export function WorkspacePanel({workspace, projectId, viewId, selectedRuns, metr
         <option value="">Configured defaults</option>
         {workspace.views.map(view => <option key={view.id} value={view.id}>{view.data.name}{project?.data.default_view === view.id ? " (project default)" : ""}</option>)}
       </select></label>
+      <button type="button" className="workspace-settings-toggle" aria-label="Project and view settings"
+        title="Project and view settings" aria-haspopup="dialog" onClick={() => settingsDialog.current?.showModal()}>
+        <Settings2 size={16} />
+      </button>
+    <dialog ref={settingsDialog} className="workspace-settings-dialog" aria-labelledby="workspace-settings-title"
+      onClick={event => {if (event.target === event.currentTarget) event.currentTarget.close();}}>
+    <section className="workspace-panel" aria-label="Project workspace">
+      <div className="workspace-settings-heading">
+        <div><h2 id="workspace-settings-title">Project & views</h2><p>{project?.data.name ?? projectId}</p></div>
+        <button type="button" aria-label="Close project settings" onClick={() => settingsDialog.current?.close()}><X size={18} /></button>
+      </div>
+      <h3 className="workspace-settings-section-title">Saved view</h3>
+    <div className="workspace-toolbar">
       <input aria-label="View name" placeholder="Name for saved view" value={name} onChange={event => setName(event.target.value)} />
       <button type="button" disabled={busy} onClick={() => void save(false)}>Save view</button>
       <button type="button" disabled={busy} onClick={() => void save(true)}>Save as new</button>
@@ -111,7 +129,7 @@ export function WorkspacePanel({workspace, projectId, viewId, selectedRuns, metr
     {!workspace.capabilities.persistent ? <p className="workspace-hint">Live-only workspace: metadata and views disappear when the server restarts.</p> : null}
     {workspace.error || message ? <p role="status" className="workspace-message">{message || workspace.error}</p> : null}
     <details className="workspace-details">
-      <summary>Runs and project settings · {records.length} runs</summary>
+      <summary>Runs and project settings · {records.length} {records.length === 1 ? "run" : "runs"}</summary>
       <div className="workspace-toolbar">
         <input aria-label="New project name" placeholder="New project ID" value={projectName} onChange={event => setProjectName(event.target.value)} />
         <button type="button" disabled={busy || !projectName.trim()} onClick={() => void act(async () => {
@@ -125,7 +143,7 @@ export function WorkspacePanel({workspace, projectId, viewId, selectedRuns, metr
           <option value="">All statuses</option>{["running", "stale", "completed", "failed", "cancelled", "unknown"].map(status => <option key={status}>{status}</option>)}
         </select>
         <label className="workspace-checkbox"><input type="checkbox" checked={includeArchived} onChange={event => onRunBrowserChange({...runBrowser, includeArchived: event.target.checked})} />Include archived</label>
-        <button type="button" disabled={checked.length === 0} onClick={() => onSelectRuns(checked)}>Compare selected ({checked.length})</button>
+        <button type="button" disabled={checked.length === 0} onClick={() => selectRuns(checked)}>Compare selected ({checked.length})</button>
       </div>
       <form className="workspace-toolbar" onSubmit={event => {
         event.preventDefault(); let value: unknown = filterValue;
@@ -142,7 +160,7 @@ export function WorkspacePanel({workspace, projectId, viewId, selectedRuns, metr
       <div className="workspace-run-list"><table><thead><tr><th>Select</th><th>Run</th><th>Status</th><th>Started</th><th>Tags</th><th /></tr></thead><tbody>
         {records.map(run => <tr key={run.id}>
           <td><input type="checkbox" aria-label={`Select ${run.data.display_name}`} checked={checked.includes(run.data.run_id)} onChange={event => setChecked(previous => event.target.checked ? [...previous, run.data.run_id] : previous.filter(id => id !== run.data.run_id))} /></td>
-          <td><button type="button" onClick={() => onSelectRuns([run.data.run_id])}>{run.data.display_name}</button><small>{run.data.run_id}</small></td>
+          <td><button type="button" onClick={() => selectRuns([run.data.run_id])}>{run.data.display_name}</button><small>{run.data.run_id}</small></td>
           <td><span className={`run-status run-status-${run.data.display_status}`}>{run.data.display_status}</span></td>
           <td>{run.data.started_at_ms ? new Date(run.data.started_at_ms).toLocaleString() : "Unknown"}</td><td>{run.data.tags.join(", ")}</td>
           <td><button type="button" disabled={busy} onClick={() => void act(async () => {await workspace.mutate(`/run-records/${run.id}`, "PATCH", {revision: run.data.metadata_revision, archived: !run.data.archived});})}>{run.data.archived ? "Unarchive" : "Archive"}</button>
@@ -152,8 +170,10 @@ export function WorkspacePanel({workspace, projectId, viewId, selectedRuns, metr
       </tbody></table></div>
     </details>
     {selected ? <RunDetails key={selected.id} run={selected} workspace={workspace} metrics={metrics}
-      definitions={workspace.definitions} onEventsChange={onEventsChange} onEventSelect={onEventSelect} /> : null}
-  </section>;
+      definitions={workspace.definitions} onEventsChange={onEventsChange} onEventSelect={event => {onEventSelect(event);settingsDialog.current?.close();}} /> : null}
+    </section>
+    </dialog>
+  </nav>;
 }
 
 function RunDetails({run, workspace, metrics, definitions, onEventsChange, onEventSelect}: {

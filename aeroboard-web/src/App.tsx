@@ -673,20 +673,7 @@ function App() {
           onToggleSidebar={() => setSidebarOpen((prev) => !prev)}
           deleteError={deleteError}
           onDismissDeleteError={() => setDeleteError(null)}
-        />
-
-        {dashboardConfigError && !configErrorDismissed ? (
-          <div className="status-banner status-banner--error config-error-banner" role="status">
-            <p>Dashboard defaults not applied: {dashboardConfigError}</p>
-            <button type="button" onClick={() => setConfigErrorDismissed(true)}>
-              Dismiss
-            </button>
-          </div>
-        ) : null}
-
-        <section className="dashboard-content">
-          {workspace.capabilities && workspace.projects.length > 0 && !workspace.projects.some(project => project.id === projectId) ? <p role="status">Project unavailable. <a href="?project=default">Open the Default project</a>.</p> : null}
-          {workspace.capabilities && viewChoice !== "__default__" && viewChoice !== "__none__" && !activeView ? <p role="status">Saved view unavailable. Configured defaults are active.</p> : null}
+        >
           <WorkspacePanel workspace={workspace} projectId={projectId} viewId={activeView?.id ?? ""}
             selectedRuns={effectiveSelectedRuns} metrics={availableMetricSummaries} settings={viewSnapshot}
             onProjectChange={id => {setProjectId(id);setViewChoice("__default__");setSelectedRuns([]);
@@ -704,6 +691,20 @@ function App() {
                 setOptimalValues(Object.fromEntries(Object.entries(targets).filter((entry): entry is [string, number | null] => entry[1] === null || typeof entry[1] === "number" && Number.isFinite(entry[1]))));
               } catch {workspace.setError("Previous browser preferences could not be imported.");}
             }} />
+        </DashboardHeader>
+
+        {dashboardConfigError && !configErrorDismissed ? (
+          <div className="status-banner status-banner--error config-error-banner" role="status">
+            <p>Dashboard defaults not applied: {dashboardConfigError}</p>
+            <button type="button" onClick={() => setConfigErrorDismissed(true)}>
+              Dismiss
+            </button>
+          </div>
+        ) : null}
+
+        <section className="dashboard-content">
+          {workspace.capabilities && workspace.projects.length > 0 && !workspace.projects.some(project => project.id === projectId) ? <p role="status">Project unavailable. <a href="?project=default">Open the Default project</a>.</p> : null}
+          {workspace.capabilities && viewChoice !== "__default__" && viewChoice !== "__none__" && !activeView ? <p role="status">Saved view unavailable. Configured defaults are active.</p> : null}
           {effectiveActiveTab === "scalars" ? <div className="workspace-toolbar chart-filter-toolbar">
             <input type="search" aria-label="Search metrics" placeholder="Find a metric or namespace…" value={metricSearch} onChange={event => updateControl("metricSearch",event.target.value,"")} />
             {hiddenCharts.length ? <button type="button" onClick={() => updateControl("hiddenCharts",[],[])}>Show hidden charts ({hiddenCharts.length})</button> : null}

@@ -13,9 +13,13 @@ page.on("pageerror", error => errors.push(String(error)));
 try {
   await page.goto(`${base}/?project=examples`);
   await page.getByLabel("Project", {exact: true}).waitFor();
+  assert.equal(await page.locator(".main-header").getByLabel("View", {exact: true}).count(), 1);
+  assert.equal(await page.locator(".dashboard-content .workspace-panel").count(), 0);
+  assert.equal(await page.getByRole("dialog").count(), 0);
   await page.waitForFunction(() => document.querySelectorAll(".metric-scorecard").length > 0);
   await page.getByRole("searchbox", {name: "Search metrics"}).fill("loss");
   await page.getByTitle("Toggle logarithmic y-axis").first().click();
+  await page.getByRole("button", {name: "Project and view settings", exact: true}).click();
   await page.getByLabel("View name").fill(`Browser check ${Date.now()}`);
   const saved = page.waitForResponse(response => response.request().method() === "POST" && response.url().includes("/views"));
   await page.getByRole("button", {name: "Save view", exact: true}).click();
@@ -39,17 +43,21 @@ try {
   // A live metadata refresh must not silently upgrade an editor's expected
   // revision and overwrite another browser's save.
   const refreshed = page.waitForResponse(response => response.request().method() === "GET" && response.url().includes("/projects/examples/views"));
+  await shared.getByRole("button", {name: "Project and view settings", exact: true}).click();
   await shared.getByRole("button", {name: "Save view", exact: true}).click();
   await refreshed;
   await page.getByRole("button", {name: "Save view", exact: true}).click();
   await page.getByRole("status").filter({hasText: "409"}).waitFor();
   await page.getByRole("button", {name: "Reload view", exact: true}).click();
   await page.getByRole("status").filter({hasText: "Latest saved view loaded"}).waitFor();
+  await shared.getByRole("button", {name: "Close project settings", exact: true}).click();
   await shared.screenshot({path: `${output}/desktop.png`, fullPage: true});
+  await shared.getByRole("button", {name: "Project and view settings", exact: true}).click();
   await shared.locator("summary").filter({hasText: "Runs and project settings"}).click();
   const boxes = shared.locator(".workspace-run-list input[type=checkbox]");
   await boxes.nth(0).check(); await boxes.nth(1).check();
   await shared.getByRole("button", {name: "Compare selected (2)"}).click();
+  assert.equal(await shared.getByRole("dialog").count(), 0);
   await shared.getByRole("tab", {name: "Hyperparameter Analysis"}).click();
   await shared.getByRole("button", {name: "val/loss", exact: true}).click();
   await shared.getByLabel("Metric reducer").selectOption("best");
@@ -62,9 +70,17 @@ try {
   await shared.setViewportSize({width: 390, height: 844});
   await shared.waitForFunction(() => document.querySelector(".sidebar").getBoundingClientRect().right <= 0);
   await shared.screenshot({path: `${output}/mobile.png`, fullPage: true});
+  await shared.getByRole("button", {name: "Project and view settings", exact: true}).click();
+  const dialog = shared.getByRole("dialog", {name: "Project & views", exact: true});
+  const bounds = await dialog.boundingBox();
+  assert.ok(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 390);
+  assert.equal(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth), true);
+  await shared.keyboard.press("Escape");
+  assert.equal(await shared.getByRole("dialog").count(), 0);
+  assert.equal(await shared.getByRole("button", {name: "Project and view settings", exact: true}).evaluate(element => element === document.activeElement), true);
   assert.deepEqual(errors, []);
   await fresh.close();
-  console.log(JSON.stringify({savedView: view.id, checks: ["fresh-browser sharing", "save conflicts and reload", "log scale", "PNG", "CSV", "comparison", "media-to-chart navigation", "mobile render"], output}));
+  console.log(JSON.stringify({savedView: view.id, checks: ["compact project navigation", "settings keyboard dismissal", "fresh-browser sharing", "save conflicts and reload", "log scale", "PNG", "CSV", "comparison", "media-to-chart navigation", "mobile render"], output}));
 } finally {
   await context.close(); await browser.close();
 }
