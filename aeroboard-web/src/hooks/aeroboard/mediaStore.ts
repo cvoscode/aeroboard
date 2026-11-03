@@ -16,7 +16,7 @@ export function upsertMediaClip(store: MediaStore, clip: MediaClip) {
     return;
   }
 
-  const existingIndex = clips.findIndex((candidate) => candidate.ts_ms === clip.ts_ms);
+  const existingIndex = clips.findIndex((candidate) => clip.asset_id ? candidate.asset_id === clip.asset_id : !candidate.asset_id && candidate.ts_ms === clip.ts_ms);
   if (existingIndex >= 0) {
     const existing = clips[existingIndex];
     if (existing.objectUrl && clip.objectUrl && existing.objectUrl !== clip.objectUrl) {

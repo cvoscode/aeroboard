@@ -30,11 +30,15 @@ import math
 import wave
 import warnings
 import weakref
+import uuid
+from pathlib import Path
 import pyarrow as pa
 import pyarrow.flight as fl
 from typing import Optional, Dict, Union, List, Any
 from .schema import scalar_schema, image_schema, audio_schema, video_schema, hyperparameter_schema
 from ._sender import BatchSender, DEFAULT_MAX_QUEUE_BYTES
+from ._tracking import RunTracker
+from ._protocol import batch_checksum, media_metadata, ENVELOPE_KEY
 
 MAX_IMAGE_BYTES = 256 * 1024  # 256 KB
 # Audio/video are passed through as already-encoded bytes; these limits keep a
@@ -190,6 +194,14 @@ class AeroboardClient:
         background: bool = True,
         flush_timeout: float = 10.0,
         max_queue_bytes: int = DEFAULT_MAX_QUEUE_BYTES,
+        project: Optional[str] = None,
+        resume: bool = False,
+        tags: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        capture_provenance: bool = False,
+        spool_dir: Optional[Union[str, Path]] = None,
+        max_spool_bytes: int = 1024**3,
+        segment: Optional[str] = None,
     ):
         """
         Initialize the Aeroboard client.
@@ -218,6 +230,15 @@ class AeroboardClient:
         self._lock = threading.RLock()  # guards the buffers; log() may be called from several threads
         self._closed = False
         self.flush_timeout = flush_timeout
+        self._batch_sequence = 0
+        self._tracking = RunTracker(self.api_base_url, project=project, resume=resume, tags=tags,
+            metadata=metadata, capture_provenance=capture_provenance, verify=ssl_verify, on_error=self._report_error)
+        if segment is not None and (not isinstance(segment,str) or not segment.strip() or len(segment)>128):
+            raise ValueError("segment must be a nonempty string up to 128 characters")
+        self._tracking.segment = segment
+        if resume:
+            self._tracking.run_uid = str(uuid.UUID(self.base_run_id))
+        self._transport = None
 
         # Initialize Flight client (connects lazily on the first upload)
         try:
@@ -228,7 +249,20 @@ class AeroboardClient:
             self.client = None
 
         self._sender: Optional[BatchSender] = None
-        if background and self.client is not None:
+        if spool_dir is not None:
+            from ._outbox import DiskOutbox, OutboxSender
+            from ._delivery import OutboxTransport
+            config = {"version": 1, "name": self.base_run_id, "url": self.url,
+                "api_base_url": self.api_base_url, "ssl_verify": ssl_verify,
+                "project": self._tracking.project, "resume": resume,
+                "run_uid": self.run_uid, "session_id": self._tracking.session_id,
+                "started_at_ms": self._tracking.started_at_ms,
+                "tags": self._tracking.tags, "metadata": self._tracking.metadata, "segment": segment}
+            outbox = DiskOutbox(Path(spool_dir)/self._tracking.session_id, config, max_spool_bytes)
+            self._transport = OutboxTransport(outbox, tracker=self._tracking, flight=self.client)
+            self._sender = OutboxSender(outbox, self._transport, on_error=self._report_error, max_queue_bytes=max_queue_bytes)
+            self._tracking.durable_enqueue = self._sender.submit_control
+        elif background and self.client is not None:
             self._sender = BatchSender(self._do_put, on_error=self._report_error, max_queue_bytes=max_queue_bytes)
         _OPEN_CLIENTS.add(self)
 
@@ -240,9 +274,46 @@ class AeroboardClient:
         Returns:
             The canonical run ID (with version suffix if necessary).
         """
+        if self._closed:
+            raise RuntimeError("Aeroboard client is closed")
         if self._resolved_run_id is None:
-            self._resolved_run_id = self._resolve_run_id(self.base_run_id)
-        return self._resolved_run_id
+            tracked = self._tracking.activate(self.base_run_id)
+            self._resolved_run_id = tracked or self._resolve_run_id(self.base_run_id)
+        return self._tracking.run_id or self._resolved_run_id
+
+    @property
+    def run_uid(self) -> str:
+        """Stable identity used for resume and metadata operations."""
+        return self._tracking.run_uid
+
+    def define_metric(self, name: str, *, goal=None, target=None, unit=None) -> None:
+        """Define a ranking objective independently of chart display preferences."""
+        _ = self.run_id
+        self._tracking.define(name, goal=goal, target=target, unit=unit)
+
+    def log_event(self, label: str, *, kind="note", step=None, details=None, media_ids=None, event_id=None) -> str:
+        """Record an annotation or checkpoint reference at a training step."""
+        _ = self.run_id
+        return self._tracking.event(label, kind=kind, step=step, details=details, media_ids=media_ids, event_id=event_id)
+
+    def finish(self, status: str = "completed", *, error: Optional[str] = None) -> None:
+        """Record a terminal execution outcome and flush pending telemetry."""
+        _ = self.run_id
+        self.flush()
+        if self._tracking.enabled:
+            self._tracking.finish(status, error=error, final_sequence=self._batch_sequence,
+                dropped_rows=self._sender.dropped_rows if self._sender else 0)
+            if self._tracking.durable_enqueue is None:
+                self._tracking.flush(self.flush_timeout)
+        self.close()
+
+    def __enter__(self):
+        _ = self.run_id
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.finish("cancelled" if exc_type and issubclass(exc_type, KeyboardInterrupt) else "failed" if exc_type else "completed", error=str(exc) if exc else None)
+        return False
 
     def _ensure_http_client(self) -> None:
         """Lazily create the HTTP session used by the query_* helpers."""
@@ -470,7 +541,9 @@ class AeroboardClient:
         *,
         format: Optional[str] = None,
         timestamp_ms: Optional[int] = None,
-    ) -> None:
+        step: Optional[float] = None,
+        segment: Optional[str] = None,
+    ) -> Optional[str]:
         """
         Log an image for the current run.
 
@@ -495,10 +568,13 @@ class AeroboardClient:
             raise FlightConnectionError("No Flight connection available.")
 
         encoded, inferred_format = _coerce_image_bytes(image, format=format)
+        _validate_media_position(step,segment)
         run_id = self.run_id
+        asset_id = str(uuid.uuid4())
         with self._lock:
             self._image_buffer.append({
-                "timestamp": timestamp_ms or int(time.time() * 1000),
+                "timestamp": int(time.time() * 1000) if timestamp_ms is None else timestamp_ms,
+                "asset_id": asset_id, "step": step, "segment": segment,
                 "run_id": run_id,
                 "name": name,
                 "image_data": encoded,
@@ -508,6 +584,7 @@ class AeroboardClient:
             # Images have smaller batch size (max 4 per batch due to size)
             if len(self._image_buffer) >= max(1, math.ceil(self.batch_size / 4)):
                 self._flush_buffers()
+        return asset_id if "assets" in self._tracking.capabilities.get("features",[]) else None
 
     def log_audio(
         self,
@@ -517,7 +594,9 @@ class AeroboardClient:
         sample_rate: Optional[int] = None,
         format: Optional[str] = None,
         timestamp_ms: Optional[int] = None,
-    ) -> None:
+        step: Optional[float] = None,
+        segment: Optional[str] = None,
+    ) -> Optional[str]:
         """
         Log an audio clip for the current run.
 
@@ -540,7 +619,7 @@ class AeroboardClient:
             >>> client.log_audio("eval/tts", "outputs/sample.mp3")
         """
         payload, media_format = _coerce_audio_bytes(audio, sample_rate=sample_rate, format=format)
-        self._append_media("audio", name, payload, media_format, timestamp_ms)
+        return self._append_media("audio", name, payload, media_format, timestamp_ms, step=step, segment=segment)
 
     def log_video(
         self,
@@ -549,7 +628,9 @@ class AeroboardClient:
         *,
         format: Optional[str] = None,
         timestamp_ms: Optional[int] = None,
-    ) -> None:
+        step: Optional[float] = None,
+        segment: Optional[str] = None,
+    ) -> Optional[str]:
         """
         Log an encoded video clip for the current run.
 
@@ -568,7 +649,7 @@ class AeroboardClient:
             >>> client.log_video("eval/rollout", "videos/episode_10.mp4")
         """
         payload, media_format = _coerce_encoded_media(video, kind="video", format=format)
-        self._append_media("video", name, payload, media_format, timestamp_ms)
+        return self._append_media("video", name, payload, media_format, timestamp_ms, step=step, segment=segment)
 
     def _append_media(
         self,
@@ -577,11 +658,13 @@ class AeroboardClient:
         payload: bytes,
         media_format: str,
         timestamp_ms: Optional[int],
-    ) -> None:
+        *, step: Optional[float] = None, segment: Optional[str] = None,
+    ) -> Optional[str]:
         if self.client is None:
             raise FlightConnectionError("No Flight connection available.")
         if not payload:
             raise ValueError(f"Cannot log an empty {kind} payload.")
+        _validate_media_position(step,segment)
         if len(payload) > MAX_MEDIA_BYTES:
             raise ValueError(
                 f"{kind} payload for '{name}' is {len(payload) / 1e6:.1f} MB; the limit is "
@@ -589,9 +672,11 @@ class AeroboardClient:
             )
 
         run_id = self.run_id
+        asset_id = str(uuid.uuid4())
         with self._lock:
             self._media_buffers[kind].append({
-                "timestamp": timestamp_ms or int(time.time() * 1000),
+                "timestamp": int(time.time() * 1000) if timestamp_ms is None else timestamp_ms,
+                "asset_id": asset_id, "step": step, "segment": segment,
                 "run_id": run_id,
                 "name": name,
                 "data": payload,
@@ -605,6 +690,7 @@ class AeroboardClient:
                 or pending >= max(1, math.ceil(self.batch_size / 4))
             ):
                 self._flush_buffers()
+        return asset_id if "assets" in self._tracking.capabilities.get("features",[]) else None
 
     def attach_lightning(
         self,
@@ -671,7 +757,7 @@ class AeroboardClient:
             batch_size=batch_size or self.batch_size,
         )
 
-    def flush(self) -> None:
+    def flush(self, *, local_only: bool = False) -> bool:
         """
         Send all buffered data and wait (up to ``flush_timeout``) until the server
         has acknowledged it.
@@ -680,12 +766,31 @@ class AeroboardClient:
         stays queued and is retried in the background.
         """
         if self.client is None:
-            return
+            return False
 
         with self._lock:
             self._flush_buffers()
         if self._sender is not None:
-            self._sender.wait_idle(self.flush_timeout)
+            if local_only:
+                if self._tracking.durable_enqueue is None:
+                    raise ValueError("local_only requires spool_dir")
+                return self._sender.wait_local(self.flush_timeout)
+            delivered = self._sender.wait_idle(self.flush_timeout)
+        else:
+            if local_only:
+                raise ValueError("local_only requires spool_dir")
+            delivered = not self._had_flush_error
+        if self._tracking.enabled and self._tracking.durable_enqueue is None:
+            delivered = self._tracking.flush(self.flush_timeout) and delivered
+        return delivered
+
+    def delivery_status(self) -> dict:
+        """Inspect queued, rejected, dropped, and locally durable telemetry."""
+        if self._tracking.durable_enqueue is not None:
+            return self._sender.status()
+        return {"pending_batches": self._sender.pending_batches if self._sender else 0,
+            "dropped_rows": self._sender.dropped_rows if self._sender else 0,
+            "persistent": False, "had_error": self._had_flush_error}
 
     def _flush_buffers(self) -> None:
         """Turn every non-empty buffer into a batch and hand it to the sender.
@@ -707,6 +812,13 @@ class AeroboardClient:
         self._had_flush_error = True
 
     def _send(self, batch: pa.RecordBatch, schema: pa.Schema, descriptor_path: bytes) -> None:
+        if self._tracking.enabled and "batch_envelopes" in self._tracking.capabilities.get("features", []):
+            self._batch_sequence += 1
+            envelope = {"version":1,"batch_id":str(uuid.uuid4()),"run_uid":self.run_uid,
+                "session_id":self._tracking.session_id,"server_id":self._tracking.server_id,
+                "sequence":self._batch_sequence,"checksum":batch_checksum(batch),"captured_at_ms":int(time.time()*1000),"segment":self._tracking.segment}
+            batch = batch.replace_schema_metadata({**(batch.schema.metadata or {}),ENVELOPE_KEY:json.dumps(envelope).encode()})
+            schema = batch.schema
         if self._sender is not None:
             self._sender.submit(batch, schema, descriptor_path)
         else:
@@ -785,7 +897,9 @@ class AeroboardClient:
             schema=image_schema,
         )
 
-        self._send(batch, image_schema, b"images")
+        if self._tracking.enabled and "assets" in self._tracking.capabilities.get("features",[]):
+            batch = media_metadata(batch,self._image_buffer)
+        self._send(batch, batch.schema, b"images")
         self._image_buffer.clear()
 
     def _flush_media_buffer(self, kind: str) -> None:
@@ -806,7 +920,9 @@ class AeroboardClient:
             schema=schema,
         )
 
-        self._send(batch, schema, kind.encode())
+        if self._tracking.enabled and "assets" in self._tracking.capabilities.get("features",[]):
+            batch = media_metadata(batch,buffer)
+        self._send(batch, batch.schema, kind.encode())
         self._media_buffer_bytes -= sum(len(x["data"]) for x in buffer)
         buffer.clear()
 
@@ -1030,6 +1146,9 @@ class AeroboardClient:
                 self._flush_buffers()
         if self._sender is not None:
             self._sender.close(self.flush_timeout if timeout is None else timeout)
+        if self._tracking.enabled and self._tracking.durable_enqueue is None:
+            self._tracking.flush(self.flush_timeout if timeout is None else timeout)
+        self._tracking.close()
         if self.client:
             try:
                 self.client.close()
@@ -1141,6 +1260,14 @@ class AeroboardLightningCallback:
                 """Flush remaining data at training end."""
                 self._client().flush()
 
+            @_rank_zero_only
+            def on_fit_end(self, trainer, pl_module):
+                self._client().finish("completed")
+
+            @_rank_zero_only
+            def on_exception(self, trainer, pl_module, exception):
+                self._client().finish("cancelled" if isinstance(exception,KeyboardInterrupt) else "failed",error=str(exception))
+
         self.callback = _Callback(self)
 
     def __getattr__(self, item: str) -> Any:
@@ -1224,8 +1351,7 @@ class AeroboardLightningLogger(_LightningLoggerBase):
 
     @_rank_zero_only
     def finalize(self, status: str) -> None:
-        del status
-        self.client.flush()
+        self.client.finish("completed" if status in ("success", "finished", "completed") else "cancelled" if status in ("interrupted","cancelled") else "failed")
 
 
 class AeroboardRayTuneLoggerCallback(_RayTuneLoggerCallbackBase):
@@ -1336,8 +1462,7 @@ class AeroboardRayTuneLoggerCallback(_RayTuneLoggerCallbackBase):
         if client is None:
             return
         client.log_hyperparameters({"ray/failed": failed})
-        client.flush()
-        client.close()
+        client.finish("failed" if failed else "completed")
 
     def on_experiment_end(self, trials: List[Any], **info: Any) -> None:
         del trials, info
@@ -1345,6 +1470,13 @@ class AeroboardRayTuneLoggerCallback(_RayTuneLoggerCallbackBase):
             client.flush()
             client.close()
         self._clients.clear()
+
+
+def _validate_media_position(step, segment):
+    if step is not None and (isinstance(step,bool) or not isinstance(step,(int,float)) or not math.isfinite(step)):
+        raise ValueError("media step must be finite")
+    if segment is not None and (not isinstance(segment,str) or not segment.strip() or len(segment)>128):
+        raise ValueError("media segment must be a nonempty string up to 128 characters")
 
 
 def _normalize_hparam_value(value: Any) -> Optional[tuple[str, str]]:

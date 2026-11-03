@@ -6,8 +6,8 @@ use arrow::record_batch::RecordBatch;
 use axum::{
     body::Bytes,
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
 };
@@ -21,19 +21,26 @@ use crate::{
     telemetry::{TelemetryBatch, TelemetryKind},
 };
 
-pub async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     // When clips are persisted, browsers fetch them on demand from
     // /api/history/media/content, so live pushes only carry metadata.
     let strip_media_payloads = state.config.storage_mode != StorageMode::LiveOnly;
-    ws.on_upgrade(move |socket| handle_socket(socket, state.t_junction.clone(), strip_media_payloads))
+    ws.on_upgrade(move |socket| {
+        handle_socket(
+            socket,
+            state.t_junction.clone(),
+            state.catalog.clone(),
+            strip_media_payloads,
+        )
+    })
 }
 
 /// Replace the binary payload column of audio/video batches with empty values.
 /// The schema is unchanged; an empty payload tells the dashboard to fetch lazily.
-pub(crate) fn live_batch(telemetry: &TelemetryBatch, strip_media_payloads: bool) -> Arc<RecordBatch> {
+pub(crate) fn live_batch(
+    telemetry: &TelemetryBatch,
+    strip_media_payloads: bool,
+) -> Arc<RecordBatch> {
     let is_av = matches!(telemetry.kind, TelemetryKind::Audio | TelemetryKind::Video);
     let batch = &telemetry.batch;
     let data_index = telemetry
@@ -44,9 +51,10 @@ pub(crate) fn live_batch(telemetry: &TelemetryBatch, strip_media_payloads: bool)
         return batch.clone();
     };
 
-    let empty: ArrayRef = Arc::new(BinaryArray::from_iter_values(
-        std::iter::repeat_n(&[] as &[u8], batch.num_rows()),
-    ));
+    let empty: ArrayRef = Arc::new(BinaryArray::from_iter_values(std::iter::repeat_n(
+        &[] as &[u8],
+        batch.num_rows(),
+    )));
     let mut columns = batch.columns().to_vec();
     columns[data_index] = empty;
     RecordBatch::try_new(batch.schema(), columns)
@@ -64,8 +72,13 @@ fn encode_ipc(batch: &RecordBatch) -> Result<Bytes, arrow::error::ArrowError> {
 }
 
 /// Arrow IPC bytes for a live push, encoded once and shared by every subscriber.
-pub(crate) fn live_payload(telemetry: &TelemetryBatch, strip_media_payloads: bool) -> Result<Bytes, arrow::error::ArrowError> {
-    telemetry.cached_live_ipc(strip_media_payloads, || encode_ipc(&live_batch(telemetry, strip_media_payloads)))
+pub(crate) fn live_payload(
+    telemetry: &TelemetryBatch,
+    strip_media_payloads: bool,
+) -> Result<Bytes, arrow::error::ArrowError> {
+    telemetry.cached_live_ipc(strip_media_payloads, || {
+        encode_ipc(&live_batch(telemetry, strip_media_payloads))
+    })
 }
 
 /// JSON control message telling the dashboard it missed `skipped` batches and
@@ -74,8 +87,14 @@ pub(crate) fn lagged_message(skipped: u64) -> String {
     serde_json::json!({ "type": "lagged", "skipped": skipped }).to_string()
 }
 
-async fn handle_socket(socket: WebSocket, t_junction: Arc<TJunction>, strip_media_payloads: bool) {
+async fn handle_socket(
+    socket: WebSocket,
+    t_junction: Arc<TJunction>,
+    catalog: crate::catalog::Catalog,
+    strip_media_payloads: bool,
+) {
     let mut rx = t_junction.subscribe();
+    let mut metadata = catalog.changes.subscribe();
     drop(t_junction);
     let (mut sender, mut receiver) = socket.split();
 
@@ -90,7 +109,15 @@ async fn handle_socket(socket: WebSocket, t_junction: Arc<TJunction>, strip_medi
 
     let mut send_task = tokio::spawn(async move {
         loop {
-            let message = match rx.recv().await {
+            let telemetry = tokio::select! {
+                update = metadata.recv() => {
+                    let message = update.unwrap_or_else(|_|serde_json::json!({"type":"catalog_changed"}).to_string());
+                    if sender.send(Message::Text(message.into())).await.is_err() { break; }
+                    continue;
+                }
+                telemetry = rx.recv() => telemetry,
+            };
+            let message = match telemetry {
                 Ok(telemetry) => match live_payload(&telemetry, strip_media_payloads) {
                     Ok(bytes) => Message::Binary(bytes),
                     Err(error) => {
@@ -99,7 +126,10 @@ async fn handle_socket(socket: WebSocket, t_junction: Arc<TJunction>, strip_medi
                     }
                 },
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::warn!("WebSocket subscriber lagged and skipped {} batches", skipped);
+                    tracing::warn!(
+                        "WebSocket subscriber lagged and skipped {} batches",
+                        skipped
+                    );
                     Message::Text(lagged_message(skipped).into())
                 }
                 Err(broadcast::error::RecvError::Closed) => break,

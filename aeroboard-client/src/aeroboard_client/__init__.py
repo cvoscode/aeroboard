@@ -37,6 +37,15 @@ def init(
     api_base_url: str | None = None,
     batch_size: int = 100,
     dashboard: dict | None = None,
+    *,
+    project: str | None = None,
+    resume: bool = False,
+    tags: list[str] | None = None,
+    metadata: dict | None = None,
+    capture_provenance: bool = False,
+    spool_dir: str | None = None,
+    max_spool_bytes: int = 1024**3,
+    segment: str | None = None,
 ) -> AeroboardClient:
     """Create the default client.
 
@@ -53,6 +62,9 @@ def init(
         url=url,
         api_base_url=api_base_url,
         batch_size=batch_size,
+        project=project, resume=resume, tags=tags, metadata=metadata, capture_provenance=capture_provenance,
+        spool_dir=spool_dir, max_spool_bytes=max_spool_bytes,
+        segment=segment,
     )
     if dashboard_config is not None:
         _default_client.configure_dashboard(**dashboard_config)
@@ -79,9 +91,10 @@ def log_hyperparameters(hyperparameters: dict, step: int | float | None = None) 
     client.log_hyperparameters(hyperparameters, step=step)
 
 
-def log_image(name: str, image, *, format: str | None = None, timestamp_ms: int | None = None) -> None:
+def log_image(name: str, image, *, format: str | None = None, timestamp_ms: int | None = None,
+              step: float | None = None, segment: str | None = None) -> str | None:
     client = _default_client or init()
-    client.log_image(name, image, format=format, timestamp_ms=timestamp_ms)
+    return client.log_image(name, image, format=format, timestamp_ms=timestamp_ms, step=step, segment=segment)
 
 
 def log_audio(
@@ -91,14 +104,17 @@ def log_audio(
     sample_rate: int | None = None,
     format: str | None = None,
     timestamp_ms: int | None = None,
-) -> None:
+    step: float | None = None,
+    segment: str | None = None,
+) -> str | None:
     client = _default_client or init()
-    client.log_audio(name, audio, sample_rate=sample_rate, format=format, timestamp_ms=timestamp_ms)
+    return client.log_audio(name, audio, sample_rate=sample_rate, format=format, timestamp_ms=timestamp_ms, step=step, segment=segment)
 
 
-def log_video(name: str, video, *, format: str | None = None, timestamp_ms: int | None = None) -> None:
+def log_video(name: str, video, *, format: str | None = None, timestamp_ms: int | None = None,
+              step: float | None = None, segment: str | None = None) -> str | None:
     client = _default_client or init()
-    client.log_video(name, video, format=format, timestamp_ms=timestamp_ms)
+    return client.log_video(name, video, format=format, timestamp_ms=timestamp_ms, step=step, segment=segment)
 
 
 def configure_dashboard(
@@ -111,9 +127,23 @@ def configure_dashboard(
     client.configure_dashboard(starred=starred, targets=targets, order=order)
 
 
-def flush() -> None:
+def flush(*, local_only: bool = False) -> bool:
     if _default_client is not None:
-        _default_client.flush()
+        return _default_client.flush(local_only=local_only)
+    return True
+
+
+def define_metric(name: str, *, goal=None, target=None, unit=None) -> None:
+    (_default_client or init()).define_metric(name, goal=goal, target=target, unit=unit)
+
+
+def log_event(label: str, **kwargs) -> str:
+    return (_default_client or init()).log_event(label, **kwargs)
+
+
+def finish(status: str = "completed", *, error: str | None = None) -> None:
+    if _default_client is not None:
+        _default_client.finish(status, error=error)
 
 __all__ = [
     "__version__",
@@ -133,4 +163,7 @@ __all__ = [
     "log_video",
     "configure_dashboard",
     "flush",
+    "define_metric",
+    "log_event",
+    "finish",
 ]

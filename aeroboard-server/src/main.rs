@@ -12,7 +12,9 @@ use tokio::sync::watch;
 use tonic::transport::Server;
 use tower_http::cors::{Any, CorsLayer};
 
+mod analytics;
 mod app_state;
+mod catalog;
 mod config;
 mod dashboard_config;
 mod history;
@@ -26,6 +28,8 @@ mod summaries;
 mod t_junction;
 mod telemetry;
 mod tests;
+mod workspace;
+mod workspace_tests;
 
 use crate::app_state::AppState;
 use crate::config::{AppConfig, CorsPolicy};
@@ -52,14 +56,25 @@ async fn api_not_found_fallback() -> Response {
 }
 
 fn cors_layer(policy: &CorsPolicy) -> Option<CorsLayer> {
-    let methods = [Method::GET, Method::POST, Method::DELETE, Method::OPTIONS];
+    let methods = [
+        Method::GET,
+        Method::POST,
+        Method::PATCH,
+        Method::DELETE,
+        Method::OPTIONS,
+    ];
     match policy {
         CorsPolicy::SameOrigin => None,
         CorsPolicy::Any => {
             tracing::warn!(
                 "CORS: allowing every origin; any website you visit can read and delete your runs"
             );
-            Some(CorsLayer::new().allow_origin(Any).allow_methods(methods).allow_headers(Any))
+            Some(
+                CorsLayer::new()
+                    .allow_origin(Any)
+                    .allow_methods(methods)
+                    .allow_headers(Any),
+            )
         }
         CorsPolicy::Origins(origins) => {
             let parsed: Vec<HeaderValue> = origins
@@ -73,7 +88,12 @@ fn cors_layer(policy: &CorsPolicy) -> Option<CorsLayer> {
                 })
                 .collect();
             tracing::info!("CORS: allowing origins {}", origins.join(", "));
-            Some(CorsLayer::new().allow_origin(parsed).allow_methods(methods).allow_headers(Any))
+            Some(
+                CorsLayer::new()
+                    .allow_origin(parsed)
+                    .allow_methods(methods)
+                    .allow_headers(Any),
+            )
         }
     }
 }
@@ -95,6 +115,8 @@ pub fn build_app(app_state: AppState) -> Router {
         .route("/runs/summary", get(history::run_summaries_handler))
         .route("/runs/resolve", post(history::resolve_run_id_handler))
         .route("/config", get(dashboard_config::config_handler))
+        .merge(workspace::routes())
+        .merge(analytics::routes())
         .fallback(api_not_found_fallback);
 
     let router = Router::new()
@@ -147,7 +169,7 @@ async fn main() -> Result<(), crate::storage::BoxError> {
     }
 
     let storage = build_storage(&config)?;
-    let (app_state, persist_rx) = AppState::new(config.clone(), storage);
+    let (app_state, persist_rx) = AppState::new(config.clone(), storage)?;
     let t_junction = app_state.t_junction.clone();
 
     // Path A: persistence. Awaited during shutdown so queued batches are written.
@@ -170,14 +192,19 @@ async fn main() -> Result<(), crate::storage::BoxError> {
     let http_shutdown = wait_for_shutdown(shutdown_rx.clone());
     let mut http_server = tokio::spawn(async move {
         tracing::info!("HTTP+WebSocket Server listening on {}", http_addr);
-        serve(http_listener, app).with_graceful_shutdown(http_shutdown).await
+        serve(http_listener, app)
+            .with_graceful_shutdown(http_shutdown)
+            .await
     });
 
     // gRPC Flight server (ingestion). tonic defaults to 4 MiB per message, which is
     // too small for audio/video clips.
     let flight_addr = SocketAddr::new(config.host, config.flight_port);
-    let flight_service = FlightServiceServer::new(AeroboardFlightServer { t_junction: t_junction.clone() })
-        .max_decoding_message_size(config.max_message_bytes);
+    let flight_service = FlightServiceServer::new(AeroboardFlightServer {
+        t_junction: t_junction.clone(),
+        catalog: Some(app_state.catalog.clone()),
+    })
+    .max_decoding_message_size(config.max_message_bytes);
     let grpc_shutdown = wait_for_shutdown(shutdown_rx.clone());
     let mut grpc_server = tokio::spawn(async move {
         tracing::info!("gRPC Flight Server listening on {}", flight_addr);
@@ -212,7 +239,10 @@ async fn main() -> Result<(), crate::storage::BoxError> {
 
     // Everything accepted so far is in the persistence queue; write it out.
     t_junction.close_persistence();
-    if tokio::time::timeout(PERSISTENCE_DRAIN_TIMEOUT, persistence_loop).await.is_err() {
+    if tokio::time::timeout(PERSISTENCE_DRAIN_TIMEOUT, persistence_loop)
+        .await
+        .is_err()
+    {
         tracing::error!(
             "Timed out after {:?} writing queued telemetry; some batches were not persisted",
             PERSISTENCE_DRAIN_TIMEOUT

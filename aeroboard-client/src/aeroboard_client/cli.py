@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import json
+import time
+from pathlib import Path
 import subprocess
 import sys
 
@@ -27,6 +30,56 @@ def main():
     real-time ML dashboard system.
     """
     pass
+
+
+@main.command()
+@click.option("--spool-dir", required=True, type=click.Path(exists=True, path_type=Path))
+@click.option("--status", "inspect_only", is_flag=True, help="Inspect queues without contacting the server.")
+@click.option("--timeout", default=30.0, type=click.FloatRange(min=0), show_default=True)
+def sync(spool_dir, inspect_only, timeout):
+    """Recover locally committed telemetry from stopped SDK sessions."""
+    from ._outbox import DiskOutbox, OutboxError
+    from ._delivery import OutboxTransport
+    databases = sorted(spool_dir.rglob("outbox.sqlite"))
+    if not databases:
+        raise click.ClickException("No outboxes found")
+    failed = False
+    errors = False
+    for database in databases:
+        outbox = None
+        transport = None
+        try:
+            outbox = DiskOutbox(database.parent)
+            if not inspect_only:
+                transport = OutboxTransport(outbox)
+                deadline = time.monotonic()+timeout
+                while True:
+                    item = outbox.next()
+                    if item is None: break
+                    if time.monotonic()>=deadline:
+                        raise OutboxError("delivery timeout; pending data was retained")
+                    ordinal,kind,path,body,_rows = item
+                    try:
+                        transport(kind,path,body)
+                    except Exception as exc:
+                        import pyarrow as pa
+                        status = getattr(exc,"status",500)
+                        if isinstance(exc,(OutboxError,pa.ArrowInvalid,pa.ArrowTypeError)) or 400<=status<500 and status!=429:
+                            outbox.reject(ordinal,exc)
+                        raise
+                    outbox.acknowledge(ordinal)
+            result = outbox.status()
+            click.echo(json.dumps(result))
+            failed = failed or bool(result["pending_batches"] or result["rejected_batches"])
+        except Exception as exc:
+            failed = True
+            errors = True
+            click.echo(f"{database.parent}: {exc}", err=True)
+        finally:
+            if transport: transport.close()
+            if outbox: outbox.close()
+    if errors or failed and not inspect_only:
+        raise click.ClickException("Some outboxes still need attention; committed entries were retained")
 
 
 def _prepare_runtime_assets(build_from_source: bool, force_download: bool) -> tuple[str, str]:

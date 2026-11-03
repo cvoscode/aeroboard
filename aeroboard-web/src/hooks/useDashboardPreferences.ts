@@ -43,30 +43,31 @@ function asWidthMode(raw: unknown): WidthMode {
   return raw === "compact" || raw === "wide" || raw === "full" ? raw : "wide";
 }
 
-export function useDashboardPreferences() {
-  const [widthMode, setWidthMode] = usePersistentState<WidthMode>(WIDTH_STORAGE_KEY, "wide", asWidthMode);
+export function useDashboardPreferences(scope = "legacy") {
+  const scoped = (key: string) => scope === "legacy" ? key : `${key}:${scope}`;
+  const [widthMode, setWidthMode] = usePersistentState<WidthMode>(scoped(WIDTH_STORAGE_KEY), "wide", asWidthMode);
   const [favoriteCharts, setFavoriteCharts] = usePersistentState<Record<string, boolean>>(
-    FAVORITES_STORAGE_KEY,
+    scoped(FAVORITES_STORAGE_KEY),
     {},
     asRecord,
   );
   const [collapsedCharts, setCollapsedCharts] = usePersistentState<Record<string, boolean>>(
-    COLLAPSED_STORAGE_KEY,
+    scoped(COLLAPSED_STORAGE_KEY),
     {},
     asRecord,
   );
   const [orderedMetrics, setOrderedMetrics] = usePersistentState<string[]>(
-    ORDER_STORAGE_KEY,
+    scoped(ORDER_STORAGE_KEY),
     [],
     asStringArray,
   );
   const [collapsedExperiments, setCollapsedExperiments] = usePersistentState<Record<string, boolean>>(
-    EXPERIMENTS_STORAGE_KEY,
+    scoped(EXPERIMENTS_STORAGE_KEY),
     {},
     asRecord,
   );
   const [runColors, setRunColors] = usePersistentState<Record<string, string>>(
-    RUN_COLORS_STORAGE_KEY,
+    scoped(RUN_COLORS_STORAGE_KEY),
     {},
     asStringRecord,
   );
@@ -74,7 +75,7 @@ export function useDashboardPreferences() {
   // User overrides for per-chart target ("optimal value") lines, keyed by chart group key.
   // Absent key = use the configured default; null = user removed the line.
   const [optimalValues, setOptimalValues] = usePersistentState<Record<string, number | null>>(
-    OPTIMAL_VALUES_STORAGE_KEY,
+    scoped(OPTIMAL_VALUES_STORAGE_KEY),
     {},
     asOptionalNumberRecord,
   );

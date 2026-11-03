@@ -80,9 +80,11 @@ export function resolveDashboardDefaults(
   serverDefaults: PartialDashboardDefaults | null,
   runConfigs: (PartialDashboardDefaults | null)[],
   groupKeys: string[],
+  view?: PartialDashboardDefaults,
 ): DashboardDefaults {
   const present = runConfigs.filter((config): config is PartialDashboardDefaults => config !== null);
   const resolveNames = (field: "starred" | "order") => {
+    if (view?.[field]) return view[field];
     const lists = present.map((config) => config[field]).filter((list): list is string[] => list !== undefined);
     return lists.length > 0
       ? Array.from(new Set(lists.flat()))
@@ -92,7 +94,7 @@ export function resolveDashboardDefaults(
   // Keep layers separate until after alias matching: a server's exact "loss"
   // must not beat a run's "val/loss" on the grouped loss chart (or vice versa).
   const targets: Record<string, number> = {};
-  const layers = [...present, serverDefaults];
+  const layers = [view, ...present, serverDefaults];
   for (const key of groupKeys) {
     for (const layer of layers) {
       const value = targetForChart(layer?.targets, key);

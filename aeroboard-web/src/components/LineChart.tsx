@@ -5,8 +5,12 @@ import type { TimeSeriesData } from '../hooks/useAeroboard';
 import { formatReferenceValue } from '../lib/format';
 
 export type XAxisType = 'wall' | 'rel' | 'step';
+export interface ChartMarker { id: string; x: number; label: string }
 
 interface LineChartProps {
+    logarithmic?: boolean;
+    markers?: ChartMarker[];
+    onMarkerSelect?: (id: string) => void;
     title: string;
     seriesData: { name: string; fullData: TimeSeriesData; color?: string }[];
     themeKey: 'light' | 'dark';
@@ -84,6 +88,7 @@ function seriesId(data: TimeSeriesData): number {
 }
 
 export function LineChart({
+    logarithmic = false, markers = [], onMarkerSelect,
     title, seriesData, themeKey, xAxisType,
     smoothing = 0, removeOutliers = false,
     xRange = null,
@@ -95,7 +100,10 @@ export function LineChart({
     const suppressSyncRef = useRef(false);  // prevent feedback loop
     const [localXRange, setLocalXRange] = useState<[number, number] | null>(null);
     const referenceValueRef = useRef<number | null>(referenceValue);
-    referenceValueRef.current = referenceValue;
+    referenceValueRef.current = logarithmic && referenceValue !== null && referenceValue <= 0 ? null : referenceValue;
+    const markersRef = useRef(markers); markersRef.current = markers;
+    const markerActionRef = useRef(onMarkerSelect); markerActionRef.current = onMarkerSelect;
+    const markerSignature = markers.map(marker => `${marker.id}:${marker.x}:${marker.label}`).join("|");
 
     const colorKey = seriesData.map(s => s.color ?? '').join(',');
     const hasSmoothingKey = smoothing > 0;
@@ -105,7 +113,7 @@ export function LineChart({
     // the cheap change marker. Parents rebuild `seriesData` on every render, so keying
     // on this avoids reprocessing (and redrawing) when nothing actually changed.
     const dataSignature = seriesData.map(s => `${s.name}#${seriesId(s.fullData)}:${s.fullData.count}`).join('|');
-    const axisRevisionKey = `${themeKey}:${xAxisType}:${removeOutliers ? 'trim' : 'full'}`;
+    const axisRevisionKey = `${themeKey}:${xAxisType}:${removeOutliers ? 'trim' : 'full'}:${logarithmic ? 'log' : 'linear'}`;
     // CSS variables only change with the theme; reading them per render forces a style recalc.
     const chartTheme = useMemo(readChartTheme, [themeKey]);
 
@@ -113,14 +121,14 @@ export function LineChart({
     seriesDataRef.current = seriesData;
 
     const processedData = useMemo(
-        () => buildProcessedData(seriesDataRef.current, xAxisType, smoothing, xRange),
+        () => buildProcessedData(seriesDataRef.current, xAxisType, smoothing, xRange, logarithmic),
         // eslint-disable-next-line react-hooks/exhaustive-deps
-        [dataSignature, xAxisType, smoothing, xRange]
+        [dataSignature, xAxisType, smoothing, xRange, logarithmic]
     );
 
     const focusedRange = useMemo(
-        () => getFocusedRanges(processedData, removeOutliers, referenceValue),
-        [processedData, removeOutliers, referenceValue]
+        () => getFocusedRanges(processedData, removeOutliers, logarithmic && referenceValue !== null && referenceValue <= 0 ? null : referenceValue, logarithmic),
+        [processedData, removeOutliers, referenceValue, logarithmic]
     );
     const focusedRangeRef = useRef(focusedRange);
     focusedRangeRef.current = focusedRange;
@@ -189,8 +197,9 @@ export function LineChart({
             padding: [10, 10, 0, 10],
             scales: {
                 y: {
+                    distr: logarithmic ? 3 : 1,
                     auto: true,
-                    range: (_u, min, max) => focusedRangeRef.current.focusedYRange ?? [min, max]
+                    range: (_u, min, max) => focusedRangeRef.current.focusedYRange ?? (logarithmic ? [0.1,1] : [min,max])
                 }
             },
             axes: [
@@ -226,10 +235,24 @@ export function LineChart({
             },
             legend: { show: false },
             hooks: {
-                draw: [u => drawReferenceLine(u, referenceValueRef.current, chartTheme.reference)],
+                draw: [u => {
+                    drawReferenceLine(u, referenceValueRef.current, chartTheme.reference);
+                    const ctx = u.ctx;ctx.save();ctx.strokeStyle=chartTheme.reference;ctx.setLineDash([3*uPlot.pxRatio,3*uPlot.pxRatio]);
+                    for(const marker of markersRef.current) {
+                        const x=u.valToPos(marker.x,'x',true);
+                        if(x<u.bbox.left || x>u.bbox.left+u.bbox.width) continue;
+                        ctx.beginPath();ctx.moveTo(x,u.bbox.top);ctx.lineTo(x,u.bbox.top+u.bbox.height);ctx.stroke();
+                    }
+                    ctx.restore();
+                }],
                 ready: [
                     u => {
                         u.over.addEventListener('dblclick', () => setLocalXRange(null));
+                        u.over.addEventListener('click', event => {
+                            const position=event.clientX-u.over.getBoundingClientRect().left;
+                            const marker=markersRef.current.find(marker => Math.abs(u.valToPos(marker.x,'x')-position)<8);
+                            if(marker) markerActionRef.current?.(marker.id);
+                        });
                     }
                 ],
                 setScale: [
@@ -283,7 +306,7 @@ export function LineChart({
                 plot.setScale('y', { min: focusedRange.focusedYRange[0], max: focusedRange.focusedYRange[1] });
             }
         });
-    }, [processedData, focusedRange, removeOutliers, xRange, localXRange, seriesData.length, title, colorKey, chartTheme, height, hasSmoothingKey, axisRevisionKey]);
+    }, [processedData, focusedRange, removeOutliers, xRange, localXRange, seriesData.length, title, colorKey, chartTheme, height, hasSmoothingKey, axisRevisionKey, markerSignature]);
 
     return <div key={axisRevisionKey} ref={containerRef} className="uplot-wrapper" />;
 }
@@ -306,7 +329,8 @@ function buildProcessedData(
     seriesData: { fullData: TimeSeriesData }[],
     xAxis: XAxisType,
     smoothing: number,
-    xRange: [number, number] | null
+    xRange: [number, number] | null,
+    logarithmic = false
 ): ProcessedChartData {
     if (seriesData.length === 0) return { processed: [], alignedData: [[]] };
 
@@ -323,6 +347,9 @@ function buildProcessedData(
             const x = xArr[i];
             const v = values[i];
             if (xAxis === 'step' && x < 0) continue;
+            if (!Number.isFinite(v) || logarithmic && v <= 0) {
+                resX.push(x); rawV.push(NaN);if(smoothing>0)smoothV.push(NaN);continue;
+            }
             resX.push(x);
             rawV.push(v);
             if (smoothing > 0) {
@@ -350,9 +377,9 @@ function buildProcessedData(
         const xToIdx = new Map<number, number>();
         for (let i = 0; i < p.x.length; i++) xToIdx.set(p.x[i], i);
 
-        const alignedRaw = filteredX.map(x => { const i = xToIdx.get(x); return i !== undefined ? p.raw[i] : null; });
+        const alignedRaw = filteredX.map(x => { const i = xToIdx.get(x); return i !== undefined && Number.isFinite(p.raw[i]) ? p.raw[i] : null; });
         const alignedSmooth = smoothing > 0
-            ? filteredX.map(x => { const i = xToIdx.get(x); return i !== undefined ? p.smooth[i] : null; })
+            ? filteredX.map(x => { const i = xToIdx.get(x); return i !== undefined && Number.isFinite(p.smooth[i]) ? p.smooth[i] : null; })
             : null;
 
         if (alignedSmooth) result.push(alignedRaw as number[]);
@@ -364,12 +391,14 @@ function buildProcessedData(
 function getFocusedRanges(
     processedData: ProcessedChartData,
     removeOutliers: boolean,
-    referenceValue: number | null = null
+    referenceValue: number | null = null,
+    logarithmic = false
 ): { defaultXRange: [number, number] | null; focusedXRange: [number, number] | null; focusedYRange: [number, number] | null } {
     const visiblePoints: { x: number; y: number }[] = [];
 
     for (const series of processedData.processed) {
         for (let i = 0; i < series.x.length; i++) {
+            if (!Number.isFinite(series.smooth[i] ?? series.raw[i])) continue;
             visiblePoints.push({
                 x: series.x[i],
                 y: series.smooth[i] ?? series.raw[i],
@@ -419,7 +448,8 @@ function getFocusedRanges(
     }
 
     const yPad = minY === maxY ? (Math.abs(minY || 1) * 0.05 || 1) : (maxY - minY) * (removeOutliers ? 0.03 : 0.08);
-    const focusedYRange: [number, number] = [minY - yPad, maxY + yPad];
+    const logPad = minY === maxY ? 1.1 : Math.pow(maxY/minY,0.08);
+    const focusedYRange: [number, number] = logarithmic ? [minY/logPad,maxY*logPad] : [minY - yPad, maxY + yPad];
 
     return {
         defaultXRange,

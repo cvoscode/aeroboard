@@ -246,6 +246,52 @@ When persistence is enabled, audio and video payloads are stripped from live mes
 
 If a client falls too far behind, the server drops batches for it and sends a text message `{"type": "lagged", "skipped": <n>}`. Clients should re-fetch history for the runs they show; the dashboard does this automatically, and also after reconnecting.
 
+## Workspace API
+
+Workspace endpoints return JSON entities shaped as `{id, parent, revision, data}`. Lists of runs and events return `{rows, total, next_offset}`; other metadata list endpoints return arrays. Mutations use JSON. Validation errors return 400, missing records 404, stale revisions/conflicting identities 409, and deleted runs 410, with an `error` message.
+
+| Endpoint | Behavior |
+| --- | --- |
+| `GET /api/capabilities` | Protocol/catalog version, features, persistent `server_id`, storage mode, `durable_replay`, message-size limit, stale interval |
+| `GET /api/run-records` | Metadata listing; project, status, tag, search, archived, filters, offset, limit |
+| `GET/PATCH/DELETE /api/run-records/{uid}` | Inspect metadata, edit display name/notes/tags/archive, or tombstone and remove one run |
+| `POST /api/runs` | Idempotent registration with `run_uid`, requested `name`, `project_id`, tags, provenance |
+| `POST /api/runs/{uid}/sessions` | Register a UUID `session_id`, optional resume flag and segment |
+| `POST /api/runs/{uid}/sessions/{sid}/heartbeat` | Increasing control `sequence`; server receipt time supplies freshness |
+| `POST /api/runs/{uid}/sessions/{sid}/finish` | Terminal status, control sequence, error, final telemetry sequence, dropped-row count, optional captured time |
+| `GET/POST /api/projects` | List/create projects |
+| `GET/PATCH/DELETE /api/projects/{id}` | Read/edit/remove an empty non-default project |
+| `GET/POST /api/projects/{id}/views` | List/create project views |
+| `GET/PATCH/DELETE /api/views/{id}` | Read/save/delete a versioned view |
+| `GET/POST /api/metric-definitions` | List/upsert definitions; optional list `parent` selects project or run |
+| `GET/POST /api/events` | Paginated newest-first listing or idempotent event creation |
+| `PATCH/DELETE /api/events/{id}` | Edit annotation label/details or delete with revision checking |
+| `GET /api/assets/{id}` | Stable media descriptor |
+| `GET /api/assets/{id}/content` | Lazy media bytes with Range support |
+| `GET /api/scorecards` | Finite objective summaries; required comma-separated run names/UIDs, optional metric, step, segment |
+| `POST /api/comparison/aggregate` | Exact-position mean, sample standard deviation, contributor counts, population information |
+| `GET /api/export/scalars.csv` | Stream raw selected run data as a CSV attachment |
+
+Most mutable entities require `revision` in PATCH/upsert bodies; DELETE takes `?revision=N`. Run metadata PATCH/DELETE specifically uses `data.metadata_revision`, which is unaffected by heartbeat traffic. View bodies contain a name and `settings` object, up to 256 KiB. Project `default_view` must reference a view in the same project.
+
+Run filters are a JSON array in the `filters` query parameter, combined with AND:
+
+```json
+[
+  {"field": "params.learning_rate", "op": "lte", "value": 0.001},
+  {"field": "metrics.val/loss.best", "op": "lt", "value": 0.1},
+  {"field": "provenance.dataset", "op": "eq", "value": "digits-v2"}
+]
+```
+
+At most 20 filters are accepted. Operators are `eq`, `ne`, `lt`, `lte`, `gt`, `gte`, `contains`, `exists`, and `missing`. Metric reducers are `last`, `min`, `max`, and goal-aware `best`. Numeric equality treats `0` and `0.0` equally. Missing values do not satisfy ordinary comparisons.
+
+Scorecard and aggregation requests accept at most 50 runs. Analysis rejects selections above two million observations. Aggregation accepts `run_ids`, full `metric`, optional `group_by` (up to eight fields), `alignment` (`step`, `wall`, `rel`), `include_unfinished` (default false), `max_points` (clamped to 2–5000), and optional `segment`. Default groups preserve configuration except seed; dataset, full definition, and segment compatibility are always retained. At-step queries spanning multiple segments report missing until a segment is selected; `__global__` selects unnamed steps.
+
+Event bodies include `id`, `run_uid`, optional `session_id`, `timestamp_ms`, optional `step`, kind, label, details object, and media ID array. IDs remain idempotent across annotation edits. SDK historical registration uses its original `captured_at_ms` and a historical flag; historical recovery never refreshes heartbeat freshness.
+
+The live socket also sends `catalog_changed` control messages. Consumers should refresh workspace data after these, reconnects, and lag notifications, and discard repeated versioned Arrow batch IDs.
+
 ## Access control
 
 The server has no authentication. By default it listens on `127.0.0.1` only and sends no CORS headers, so only the dashboard it serves (or the Vite dev proxy) can call the API. See `AEROBOARD_HOST` and `AEROBOARD_CORS_ORIGINS` in the [configuration reference](configuration.md).

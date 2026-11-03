@@ -113,3 +113,16 @@ If `RUN_ID` is omitted, the command first asks the server for `/api/runs` and us
 Starts an auxiliary run-logging workflow. This command exists in the CLI surface but should be treated as a utility command rather than the primary instrumentation path.
 
 For normal logging from training code, prefer the Python SDK directly.
+
+## `aeroboard sync`
+
+Inspect or recover disk outboxes left by stopped SDK sessions:
+
+```bash
+aeroboard sync --spool-dir aeroboard-spool --status
+aeroboard sync --spool-dir aeroboard-spool --timeout 60
+```
+
+`--spool-dir` is required and may identify a session directory or its parent. `--status` prints JSON queue counters and rejection diagnostics without network contact. `--timeout` defaults to 30 seconds per outbox. Recovery connects to the endpoints stored in each outbox, verifies server-store identity, sends dependencies in order, and removes an entry only after acknowledgement.
+
+A competing owner, corrupt payload, changed store identity, permanent rejection, or remaining pending data produces an unsuccessful recovery result. Inspection can report pending data successfully. Locally committed entries remain available for inspection after a failure. See [offline capture](../user-guide/workspaces.md#capture-offline-and-recover).

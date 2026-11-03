@@ -18,6 +18,7 @@ Aeroboard currently relies primarily on environment variables passed into the Ru
 | `AEROBOARD_MAX_MESSAGE_MB` | `64` | Largest accepted Flight message |
 | `AEROBOARD_PERSIST_QUEUE` | `256` | Batches buffered between ingestion and storage. When full, uploads wait (backpressure) instead of data being dropped |
 | `AEROBOARD_LIVE_QUEUE` | `256` | Batches buffered per dashboard connection before it is told it lagged and re-fetches history |
+| `AEROBOARD_STALE_AFTER_MS` | `60000` | Running-session freshness threshold, 1000–86400000 ms; heartbeat interval is 15 seconds |
 
 ## Client parameters
 
@@ -33,6 +34,13 @@ The Python client exposes these runtime knobs in code rather than through proces
 | `flush_timeout` | `10.0` | Seconds `flush()`/`close()` wait for delivery |
 | `max_queue_bytes` | 256 MB | Memory budget for unsent batches while the server is unreachable; the oldest are dropped beyond it |
 | `dashboard` (`aeroboard.init` only) | unset | Per-run initial view: `starred`, `order`, and `targets` |
+| `project` | `default` | Project ID; created on a capable server when missing |
+| `resume` | `False` | Continue the stable run UID supplied as `run_id` in a new session |
+| `segment` | unset | Explicit step sequence name when restarting step numbering |
+| `tags`, `metadata` | empty | Run tags and explicit provenance fields |
+| `capture_provenance` | `False` | Capture Git revision/dirty flag and installed framework versions |
+| `spool_dir` | unset | Root for per-session durable outboxes; enables offline capture |
+| `max_spool_bytes` | 1 GiB | Unacknowledged payload quota per session, plus SQLite overhead |
 
 ## Initial dashboard view
 

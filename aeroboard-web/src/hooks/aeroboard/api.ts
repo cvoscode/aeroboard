@@ -99,6 +99,7 @@ export async function fetchImageHistory(apiBase: string, runId: string): Promise
 
 /** URL of a persisted image frame's raw bytes (usable directly as `<img src>`). */
 export function imageContentUrl(apiBase: string, frame: ImageFrame, attempt = 0): string {
+  if (frame.asset_id) return buildUrl(apiBase,`/api/assets/${encodeURIComponent(frame.asset_id)}/content`,{attempt: attempt || undefined});
   return buildUrl(apiBase, "/api/history/media/content", {
     kind: "image",
     run_id: frame.run_id,
@@ -117,6 +118,7 @@ export async function fetchMediaHistory(apiBase: string, kind: MediaKind, runId:
 
 /** URL of the raw clip bytes; the server streams it with Range support. */
 export function mediaContentUrl(apiBase: string, clip: MediaClip, attempt = 0): string {
+  if (clip.asset_id) return buildUrl(apiBase,`/api/assets/${encodeURIComponent(clip.asset_id)}/content`,{attempt: attempt || undefined});
   return buildUrl(apiBase, "/api/history/media/content", {
     kind: clip.kind,
     run_id: clip.run_id,

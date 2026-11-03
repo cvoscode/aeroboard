@@ -1,14 +1,20 @@
-import { useState, type CSSProperties, type FormEvent } from "react";
+import { useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { ChevronDown, ChevronRight, Crosshair, GripVertical, Star } from "lucide-react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
-import { LineChart, type XAxisType } from "./LineChart";
+import { LineChart, type ChartMarker, type XAxisType } from "./LineChart";
+import { exportChart } from "../lib/export";
 import { formatReferenceValue } from "../lib/format";
 import type { TimeSeriesData } from "../hooks/useAeroboard";
 import type { WidthMode } from "../hooks/useDashboardPreferences";
 
 interface SortableMetricChartProps {
+  logarithmic: boolean;
+  onToggleLog: () => void;
+  onHide: () => void;
+  markers: ChartMarker[];
+  onMarkerSelect: (id: string) => void;
   id: string;
   groupKey: string;
   seriesData: { name: string; fullData: TimeSeriesData; color?: string }[];
@@ -28,6 +34,7 @@ interface SortableMetricChartProps {
 }
 
 export function SortableMetricChart({
+  logarithmic, onToggleLog, onHide, markers, onMarkerSelect,
   id,
   groupKey,
   seriesData,
@@ -46,6 +53,7 @@ export function SortableMetricChart({
   onOptimalValueChange,
 }: SortableMetricChartProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+  const cardRef = useRef<HTMLDivElement | null>(null);
   const [editingOptimal, setEditingOptimal] = useState(false);
   const [optimalDraft, setOptimalDraft] = useState("");
 
@@ -80,7 +88,7 @@ export function SortableMetricChart({
 
   return (
     <div
-      ref={setNodeRef}
+      ref={node => {setNodeRef(node);cardRef.current = node;}}
       style={style}
       className={`chart-card width-${widthMode} ${collapsed ? "collapsed" : ""} ${favorite ? "favorite" : ""}`}
     >
@@ -116,6 +124,9 @@ export function SortableMetricChart({
         </div>
 
         <div className="chart-actions">
+          <button type="button" className="chip-btn" aria-pressed={logarithmic} onClick={onToggleLog} title="Toggle logarithmic y-axis">{logarithmic ? "Log" : "Linear"}</button>
+          <button type="button" className="chip-btn" disabled={collapsed} onClick={() => exportChart(cardRef.current,`${groupKey} · ${xAxisType} · smoothing ${smoothing} · ${removeOutliers ? "trimmed" : "all values"}`)}>PNG</button>
+          <button type="button" className="chip-btn" onClick={onHide} title="Hide this chart">Hide</button>
           <button
             className={`favorite-toggle optimal-toggle ${optimalValue !== null ? "is-active" : ""}`}
             type="button"
@@ -174,6 +185,8 @@ export function SortableMetricChart({
         </form>
       ) : null}
 
+      {logarithmic ? <p className="workspace-hint">Log scale shows positive finite samples only.{optimalValue !== null && optimalValue <= 0 ? " The nonpositive target line is hidden." : ""}</p> : null}
+      {markers.length ? <div className="chart-event-markers">{markers.slice(-12).map(marker => <button key={marker.id} type="button" onClick={() => onMarkerSelect(marker.id)} title={marker.label}>◆ {marker.label}</button>)}</div> : null}
       {!collapsed && (
         <div className="plot-container">
           <LineChart
@@ -186,6 +199,7 @@ export function SortableMetricChart({
             removeOutliers={removeOutliers}
             xRange={xRange}
             referenceValue={optimalValue}
+            logarithmic={logarithmic} markers={markers} onMarkerSelect={onMarkerSelect}
             height={280}
           />
         </div>

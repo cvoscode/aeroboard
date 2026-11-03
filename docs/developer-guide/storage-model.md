@@ -60,6 +60,24 @@ Before the first write the store creates its tables with `run_id` plus the metri
 
 Use it when you specifically want database-backed persistence or need to validate the Greptime-specific code path.
 
+## Catalog and versioned batches
+
+Both persistent backends keep mutable metadata and receipts in `<data_dir>/catalog.sqlite`, using WAL and synchronous FULL transactions. The catalog has a versioned schema and a stable server-store UUID. One server process owns a catalog. Back up the catalog together with telemetry; Greptime deployments also require this local data directory.
+
+`DurableStore` wraps the existing storage engine. Legacy writes and readers retain their layouts. New clients supply a one-batch-per-RPC envelope with UUID batch/run/session identities, sequence, captured time, optional segment, and a canonical cross-language SHA-256 payload checksum. The server validates and maps the stable run UID to its reserved canonical name before storage.
+
+New filesystem batches live in `<data_dir>/batches/<batch-id>.arrow`. The writer creates a temporary file, fsyncs it, atomically renames it, and syncs the parent directory on Unix. Retrying an existing immutable file verifies its bytes.
+
+New Greptime batches use `aeroboard_batches`, keyed by batch ID, run UID, and the envelope's stable captured timestamp, with `append_mode=false`. Each row stores hex-encoded normalized Arrow IPC. This batch representation differs from the legacy per-observation tables: it makes retry effects idempotent across a backend-write/receipt-commit failure window. It favors correctness and shared decoding over native SQL analysis of new observations. Legacy tables remain queryable; query results merge both layouts before pagination and analysis.
+
+A pending receipt is recorded before the backend write. Committing that receipt and its media descriptors makes a batch visible. A retry after a lost receipt commit rewrites or verifies the same logical batch, then completes the receipt. A retry after commit skips duplicate live publication. Browsers also discard repeated batch IDs. The decoded batch cache is bounded to 128 MiB.
+
+Individual deletion first tombstones the run, then removes backend data and clears derived caches. Partial deletion can be retried by the same UID. Tombstones reserve old canonical names and reject delayed replay. Archive is metadata only and permits replay. Clearing all history retains tombstones as well.
+
+The SDK outbox separately stores Arrow IPC and control operations in a locked SQLite database per session, with synchronous FULL commits and payload checksums. It removes acknowledged entries and quarantines corrupt/permanently rejected entries. Server and SDK guarantees are at-least-once delivery with idempotent visible effects; live-only mode advertises no durable replay support.
+
+Objective scorecards use an incremental bounded cache. Cold rebuilds serialize with persistence so a batch at the snapshot boundary cannot increment counters twice. Definition revisions invalidate affected objective summaries. At-step queries and aggregation use bounded raw observations and cached request results. The implementation retains the legacy summary response contract.
+
 ## Live-only
 
 Live-only mode intentionally accepts batches without persisting them.

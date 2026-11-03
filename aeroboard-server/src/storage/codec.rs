@@ -4,7 +4,7 @@ use arrow::{
     array::{Array, AsArray},
     record_batch::RecordBatch,
 };
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde_json::Value;
 
 use crate::{
@@ -12,7 +12,7 @@ use crate::{
     telemetry::TelemetryKind,
 };
 
-use super::{boxed_error, BoxError, MediaKind};
+use super::{BoxError, MediaKind, boxed_error};
 
 /// Encode a validated batch as InfluxDB line protocol for GreptimeDB.
 ///
@@ -46,9 +46,14 @@ pub fn record_batch_to_line_protocol(
     };
 
     if *kind == TelemetryKind::Scalars {
-        let value_col = batch.column(3).as_primitive::<arrow::datatypes::Float64Type>();
-        let step_col = (batch.num_columns() > 4)
-            .then(|| batch.column(4).as_primitive::<arrow::datatypes::Float64Type>());
+        let value_col = batch
+            .column(3)
+            .as_primitive::<arrow::datatypes::Float64Type>();
+        let step_col = (batch.num_columns() > 4).then(|| {
+            batch
+                .column(4)
+                .as_primitive::<arrow::datatypes::Float64Type>()
+        });
 
         for i in 0..num_rows {
             if !row_ok(i) || value_col.is_null(i) || !value_col.value(i).is_finite() {
@@ -62,9 +67,11 @@ pub fn record_batch_to_line_protocol(
                 value_col.value(i)
             );
             if let Some(steps) = step_col
-                && !steps.is_null(i) && steps.value(i).is_finite() {
-                    let _ = write!(lines, ",step={}", steps.value(i));
-                }
+                && !steps.is_null(i)
+                && steps.value(i).is_finite()
+            {
+                let _ = write!(lines, ",step={}", steps.value(i));
+            }
             let _ = writeln!(lines, " {}", timestamp_col.value(i) * 1_000_000);
         }
     } else if let Some(media_kind) = MediaKind::from_telemetry(kind) {
@@ -119,8 +126,11 @@ pub(crate) fn parse_scalar_batch(batch: &RecordBatch) -> Vec<HistoryPoint> {
     let value_col = batch
         .column(3)
         .as_primitive::<arrow::datatypes::Float64Type>();
-    let step_col = (batch.num_columns() > 4)
-        .then(|| batch.column(4).as_primitive::<arrow::datatypes::Float64Type>());
+    let step_col = (batch.num_columns() > 4).then(|| {
+        batch
+            .column(4)
+            .as_primitive::<arrow::datatypes::Float64Type>()
+    });
     let mut rows = Vec::with_capacity(batch.num_rows());
 
     for i in 0..batch.num_rows() {
@@ -133,6 +143,7 @@ pub(crate) fn parse_scalar_batch(batch: &RecordBatch) -> Vec<HistoryPoint> {
         }
 
         rows.push(HistoryPoint {
+            segment: None,
             ts_ms: timestamp_col.value(i),
             run_id: run_id_col.value(i).to_string(),
             name: name_col.value(i).to_string(),
@@ -194,6 +205,8 @@ pub(crate) fn parse_image_batch(batch: &RecordBatch, include_data: bool) -> Vec<
         }
 
         rows.push(ImageHistoryPoint {
+            asset_id: None,
+            step: None,
             ts_ms: timestamp_col.value(i),
             run_id: run_id_col.value(i).to_string(),
             name: name_col.value(i).to_string(),

@@ -2,6 +2,8 @@
 
 Aeroboard is a high-performance, real-time machine learning training evaluation platform. It leverages an "Arrow-Native" architecture to achieve blazing-fast, serialization-free telemetry streaming. It streams your metrics from Python to a Rust backend, out to a React frontend at 60 FPS, all without copying arrays or slowing down your training loops.
 
+Projects, run lifecycle and resume, metric objectives, saved views, baseline and multi-seed comparisons, linked events/media, and disk-backed offline recovery are available in the [workspace guide](docs/user-guide/workspaces.md). Try [the runnable example](examples/workspace_example.py) after starting the server.
+
 ## System Components
 
 1. **Client SDK (Python/PyArrow)**

@@ -2,6 +2,8 @@
 
 The dashboard is the browser-facing part of Aeroboard. It combines persisted history with the live telemetry stream so runs appear immediately while still remaining queryable after reload.
 
+See [projects, objectives, and recovery](workspaces.md) for project organization, lifecycle badges, saved views, goal-aware scorecards, baseline and multi-seed comparison, linked annotations/media, exports, and offline delivery.
+
 ## How the dashboard gets data
 
 On startup, the frontend does two things:

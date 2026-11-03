@@ -27,6 +27,8 @@ export interface RunSummary {
 }
 
 export interface ImageFrame {
+  asset_id?: string;
+  step?: number | null;
   ts_ms: number;
   run_id: string;
   name: string;
@@ -55,6 +57,8 @@ export type LoadStatus = "idle" | "loading" | "ready" | "error";
 export type MediaKind = "audio" | "video";
 
 export interface MediaClip {
+  asset_id?: string;
+  step?: number | null;
   kind: MediaKind;
   ts_ms: number;
   run_id: string;

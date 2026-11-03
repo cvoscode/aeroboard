@@ -4,6 +4,8 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.legacy_server
+
 import aeroboard_client
 import aeroboard_client.client as client_module
 from aeroboard_client.client import AeroboardClient, _coerce_audio_bytes, _coerce_encoded_media

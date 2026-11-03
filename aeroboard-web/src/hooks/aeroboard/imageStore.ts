@@ -14,7 +14,7 @@ export function upsertImageFrame(imageStore: ImageStore, frame: ImageFrame) {
     return;
   }
 
-  const existingIndex = frames.findIndex((candidate) => candidate.ts_ms === frame.ts_ms);
+  const existingIndex = frames.findIndex((candidate) => frame.asset_id ? candidate.asset_id === frame.asset_id : !candidate.asset_id && candidate.ts_ms === frame.ts_ms);
   if (existingIndex >= 0) {
     const existing = frames[existingIndex];
     if (existing.objectUrl && frame.objectUrl && existing.objectUrl !== frame.objectUrl) {

@@ -66,3 +66,55 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Run Rust tests
         run: cargo test
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: uv sync --dev
+      - run: cargo build --locked --manifest-path aeroboard-server/Cargo.toml
+      - name: Start supported Greptime backend
+        run: docker run -d --name aeroboard-integration-db -p 127.0.0.1:14000:4000 greptime/greptimedb:v0.12.0 standalone start --http-addr 0.0.0.0:4000
+      - name: Wait for Greptime
+        run: curl --fail --retry 30 --retry-all-errors --retry-delay 1 http://127.0.0.1:14000/health
+      - name: Verify filesystem and Greptime replay
+        env:
+          AEROBOARD_TEST_BINARY: ${{ github.workspace }}/aeroboard-server/target/debug/aeroboard
+          GREPTIME_TEST_URL: http://127.0.0.1:14000
+        run: uv run pytest tests/test_workspace_integration.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Prepare browser checks
+        working-directory: aeroboard-web
+        run: |
+          npm ci
+          npm run build
+          npx playwright install --with-deps chromium
+      - name: Start dashboard fixture
+        env:
+          AEROBOARD_DATA_DIR: ${{ runner.temp }}/aeroboard-browser
+          AEROBOARD_WEB_DIST_DIR: ${{ github.workspace }}/aeroboard-web/dist
+        run: |
+          aeroboard-server/target/debug/aeroboard > "$RUNNER_TEMP/aeroboard-browser.log" 2>&1 &
+          curl --fail --retry 30 --retry-all-errors --retry-delay 1 http://127.0.0.1:3000/api/capabilities
+          uv run examples/workspace_example.py
+      - name: Verify dashboard workflows
+        working-directory: aeroboard-web
+        env:
+          AEROBOARD_BROWSER_OUTPUT: ${{ runner.temp }}/aeroboard-browser-output
+        run: npm run test:browser
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: workspace-browser
+          path: ${{ runner.temp }}/aeroboard-browser-output
+          if-no-files-found: ignore
+      - name: Database diagnostics
+        if: failure()
+        run: docker logs aeroboard-integration-db

@@ -22,9 +22,16 @@ pub fn start_persistence_loop(
     mut rx: mpsc::Receiver<PersistJob>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some(PersistJob { batch: telemetry, done }) = rx.recv().await {
+        while let Some(PersistJob {
+            batch: telemetry,
+            done,
+        }) = rx.recv().await
+        {
+            let _gate = state.analysis.gate.lock().await;
             let outcome = match state.storage.append_batch(telemetry.clone()).await {
                 Ok(()) => {
+                    state.analysis.invalidate();
+                    state.analysis.record(&telemetry).await;
                     state.summaries.record(&telemetry).await;
                     tracing::debug!(
                         "Persisted {:?} batch of {} rows",

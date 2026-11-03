@@ -4,6 +4,7 @@ import type { ImageFrame, ImageSeries } from '../hooks/useAeroboard';
 interface ImageTimelineViewerProps {
   series: ImageSeries | null;
   getImageSource: (frame: ImageFrame, attempt?: number) => string;
+  onPositionSelect?: (frame: ImageFrame) => void;
 }
 
 /** A frame shown right after it was logged may not be on disk yet; retry a few times. */
@@ -13,7 +14,7 @@ function formatTimestamp(tsMs: number): string {
   return new Date(tsMs).toLocaleString();
 }
 
-export function ImageTimelineViewer({ series, getImageSource }: ImageTimelineViewerProps) {
+export function ImageTimelineViewer({ series, getImageSource, onPositionSelect }: ImageTimelineViewerProps) {
   const [index, setIndex] = useState(0);
   const [followLatest, setFollowLatest] = useState(true);
   const [failure, setFailure] = useState<{ key: string; attempt: number } | null>(null);
@@ -28,7 +29,7 @@ export function ImageTimelineViewer({ series, getImageSource }: ImageTimelineVie
   }, [followLatest, index, series]);
 
   const frame = series && series.frames.length > 0 ? series.frames[clampedIndex] : undefined;
-  const frameKey = frame ? `${frame.run_id}:${frame.name}:${frame.ts_ms}` : '';
+  const frameKey = frame ? frame.asset_id ?? `${frame.run_id}:${frame.name}:${frame.ts_ms}` : '';
   const attempt = failure?.key === frameKey ? failure.attempt : 0;
   const failed = attempt > MAX_FRAME_RETRIES;
 
@@ -51,6 +52,7 @@ export function ImageTimelineViewer({ series, getImageSource }: ImageTimelineVie
           <p>{series.run_id} • frame {clampedIndex + 1} / {series.frames.length}</p>
         </div>
         <span className="image-time-pill">{formatTimestamp(frame.ts_ms)}</span>
+        {frame.step != null ? <button type="button" onClick={() => onPositionSelect?.(frame)}>Show step {frame.step} on charts</button> : null}
       </div>
       <div className="image-viewer-stage">
         {failed ? (

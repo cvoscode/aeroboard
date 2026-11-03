@@ -4,6 +4,82 @@ use arrow::record_batch::RecordBatch;
 use axum::body::Bytes;
 use serde::{Deserialize, Serialize};
 
+pub const ENVELOPE_KEY: &str = "aeroboard.envelope";
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BatchEnvelope {
+    pub version: u32,
+    pub batch_id: String,
+    pub run_uid: String,
+    pub session_id: String,
+    pub server_id: String,
+    pub sequence: i64,
+    pub checksum: String,
+    pub captured_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment: Option<String>,
+}
+
+/// Cross-language checksum: names, type tags and little-endian canonical values.
+pub fn batch_checksum(batch: &RecordBatch) -> Result<String, String> {
+    use arrow::{
+        array::{Array, AsArray},
+        datatypes::{DataType, Float64Type, TimestampMillisecondType},
+    };
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    hash.update((batch.num_rows() as u64).to_le_bytes());
+    for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
+        hash.update((field.name().len() as u32).to_le_bytes());
+        hash.update(field.name().as_bytes());
+        let tag = match field.data_type() {
+            DataType::Utf8 => b's',
+            DataType::Binary => b'b',
+            DataType::Float64 => b'f',
+            DataType::Timestamp(_, _) => b't',
+            _ => return Err("unsupported checksum type".into()),
+        };
+        hash.update([tag]);
+        for index in 0..batch.num_rows() {
+            if column.is_null(index) {
+                hash.update([0]);
+                continue;
+            }
+            hash.update([1]);
+            match tag {
+                b's' => {
+                    let value = column.as_string::<i32>().value(index).as_bytes();
+                    hash.update((value.len() as u64).to_le_bytes());
+                    hash.update(value);
+                }
+                b'b' => {
+                    let value = column.as_binary::<i32>().value(index);
+                    hash.update((value.len() as u64).to_le_bytes());
+                    hash.update(value);
+                }
+                b'f' => {
+                    let value = column.as_primitive::<Float64Type>().value(index);
+                    hash.update(
+                        if value.is_nan() {
+                            f64::NAN.to_bits()
+                        } else {
+                            value.to_bits()
+                        }
+                        .to_le_bytes(),
+                    );
+                }
+                _ => hash.update(
+                    column
+                        .as_primitive::<TimestampMillisecondType>()
+                        .value(index)
+                        .to_le_bytes(),
+                ),
+            }
+        }
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TelemetryKind {
     Scalars,
@@ -80,6 +156,7 @@ impl TelemetryKind {
 /// A validated batch in the canonical layout for its kind (see `schema::normalize_batch`).
 #[derive(Debug)]
 pub struct TelemetryBatch {
+    pub envelope: Option<BatchEnvelope>,
     pub kind: TelemetryKind,
     pub batch: Arc<RecordBatch>,
     /// Arrow IPC encoding pushed to WebSocket subscribers, computed once per batch
@@ -89,7 +166,17 @@ pub struct TelemetryBatch {
 
 impl TelemetryBatch {
     pub fn new(kind: TelemetryKind, batch: Arc<RecordBatch>) -> Self {
-        Self { kind, batch, live_ipc: [OnceLock::new(), OnceLock::new()] }
+        let envelope = batch
+            .schema()
+            .metadata()
+            .get(ENVELOPE_KEY)
+            .and_then(|raw| serde_json::from_str(raw).ok());
+        Self {
+            kind,
+            batch,
+            envelope,
+            live_ipc: [OnceLock::new(), OnceLock::new()],
+        }
     }
 
     pub(crate) fn cached_live_ipc(

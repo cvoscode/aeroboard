@@ -24,6 +24,7 @@ import type { ExperimentGroup } from "../lib/runGroups";
 import type { WidthMode } from "../hooks/useDashboardPreferences";
 
 interface DashboardSidebarProps {
+  runStatuses: Record<string, string>;
   sidebarOpen: boolean;
   onClose: () => void;
   theme: "light" | "dark";
@@ -72,6 +73,7 @@ interface DashboardSidebarProps {
 }
 
 export function DashboardSidebar({
+  runStatuses,
   sidebarOpen,
   onClose,
   theme,
@@ -209,6 +211,7 @@ export function DashboardSidebar({
                             <div className="run-card-indicator" style={{ backgroundColor: mergedRunColors[run.fullRunId] }} />
                             <div className="run-card-copy">
                               <span className="run-name">{run.fullRunId}</span>
+                              {runStatuses[run.fullRunId] ? <small className={`run-status run-status-${runStatuses[run.fullRunId]}`}>{runStatuses[run.fullRunId]}</small> : null}
                               <small className="run-version-label run-version-pill">{run.versionLabel}</small>
                             </div>
                           </button>

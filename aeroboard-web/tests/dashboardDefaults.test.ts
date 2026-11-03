@@ -7,6 +7,11 @@ import {
   resolveDashboardDefaults,
 } from "../src/lib/dashboardDefaults.ts";
 
+test("saved view lists can explicitly clear inherited stars and zero overrides targets", () => {
+  const defaults=resolveDashboardDefaults({starred:["loss"],order:["loss"],targets:{loss:1}},[{starred:["accuracy"],targets:{loss:0.5}}],["loss"],{starred:[],order:[],targets:{loss:0}});
+  assert.deepEqual(defaults,{starred:[],order:[],targets:{loss:0}});
+});
+
 test("a run's full metric target overrides a server chart-name target", () => {
   const defaults = resolveDashboardDefaults(
     { targets: { loss: 0.05 } },

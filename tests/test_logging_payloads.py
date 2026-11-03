@@ -4,6 +4,8 @@ import importlib.util
 import pyarrow as pa
 import pytest
 
+pytestmark = pytest.mark.legacy_server
+
 import aeroboard_client
 import aeroboard_client.client as aeroboard_client_module
 from aeroboard_client.client import AeroboardClient, AeroboardLightningCallback, AeroboardLightningLogger, AeroboardRayTuneLoggerCallback, _coerce_image_bytes, _normalize_hparam_value

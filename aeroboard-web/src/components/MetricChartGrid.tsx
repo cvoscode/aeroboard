@@ -5,6 +5,7 @@ import type { TimeSeriesData } from "../hooks/useAeroboard";
 import type { XAxisType } from "./LineChart";
 import type { WidthMode } from "../hooks/useDashboardPreferences";
 import { SortableMetricChart } from "./SortableMetricChart";
+import type { RunEvent } from "../hooks/useWorkspace";
 
 const STAGE_COLORS: Record<string, string> = {
   train: "#00d2ff",
@@ -13,6 +14,11 @@ const STAGE_COLORS: Record<string, string> = {
 };
 
 interface MetricChartGridProps {
+  logCharts: Record<string, boolean>;
+  onToggleLog: (key: string) => void;
+  onHideChart: (key: string) => void;
+  events: RunEvent[];
+  onEventSelect: (event: RunEvent) => void;
   visibleMetricKeys: string[];
   groupedMetrics: Record<string, string[]>;
   currentMode: "single" | "compare";
@@ -37,6 +43,7 @@ interface MetricChartGridProps {
 }
 
 export function MetricChartGrid({
+  logCharts, onToggleLog, onHideChart, events, onEventSelect,
   visibleMetricKeys,
   groupedMetrics,
   currentMode,
@@ -133,6 +140,12 @@ export function MetricChartGrid({
                 onToggleCollapse={() => setCollapsedCharts((prev) => ({ ...prev, [groupKey]: !isChartCollapsed(groupKey) }))}
                 optimalValue={optimalValues[groupKey] ?? null}
                 onOptimalValueChange={(value) => setOptimalValue(groupKey, value)}
+                logarithmic={!!logCharts[groupKey]} onToggleLog={() => onToggleLog(groupKey)} onHide={() => onHideChart(groupKey)}
+                markers={events.flatMap(event => {
+                  const position = xAxisType === "step" ? event.data.step : xAxisType === "wall" ? event.data.timestamp_ms / 1000 : seriesData[0] ? event.data.timestamp_ms / 1000 - seriesData[0].fullData.wallTimes[0] : null;
+                  return position === null ? [] : [{id: event.id, x: position, label: event.data.label}];
+                })}
+                onMarkerSelect={id => {const event = events.find(event => event.id === id);if(event) onEventSelect(event);}}
               />
             );
           })}

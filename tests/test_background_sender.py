@@ -5,12 +5,15 @@ import time
 
 import pyarrow as pa
 import pyarrow.flight as fl
+import pytest
 from unittest.mock import patch
 
 from aeroboard_client._sender import BatchSender
 from aeroboard_client.client import AeroboardClient
 
 from test_logging_payloads import DummyFlightClient
+
+pytestmark = pytest.mark.legacy_server
 
 
 def _batch(rows=1):

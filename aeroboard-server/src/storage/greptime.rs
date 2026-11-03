@@ -10,7 +10,7 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde_json::Value;
 
@@ -21,11 +21,12 @@ use crate::{
 };
 
 use super::{
-    boxed_error,
-    codec::{decode_hex, extract_column_indices, extract_rows, parse_i64, record_batch_to_line_protocol},
-    query::finalize_page,
     BoxError, HistoryQueryOptions, ImageFrameQuery, ImageQueryOptions, MediaKind, MediaPayload,
-    MediaSource, QueryPage, StorageEngine,
+    MediaSource, QueryPage, StorageEngine, boxed_error,
+    codec::{
+        decode_hex, extract_column_indices, extract_rows, parse_i64, record_batch_to_line_protocol,
+    },
+    query::finalize_page,
 };
 
 /// Every table Aeroboard writes.
@@ -51,10 +52,17 @@ fn table_ddl(table: &str) -> String {
                 "audio" => MediaKind::Audio,
                 _ => MediaKind::Video,
             };
-            format!(r#""format" STRING NULL, "{}" STRING NULL"#, kind.hex_column())
+            format!(
+                r#""format" STRING NULL, "{}" STRING NULL"#,
+                kind.hex_column()
+            )
         }
     };
-    let key = if table == "hyperparameters" { "key" } else { "name" };
+    let key = if table == "hyperparameters" {
+        "key"
+    } else {
+        "name"
+    };
     format!(
         r#"CREATE TABLE IF NOT EXISTS "{table}" ("ts" TIMESTAMP(9) NOT NULL, "run_id" STRING NULL, "{key}" STRING NULL, {fields}, TIME INDEX ("ts"), PRIMARY KEY ("run_id", "{key}")) WITH (append_mode = 'true')"#
     )
@@ -92,29 +100,40 @@ impl GreptimeStore {
     }
 
     /// Send a request, retrying transport errors, 429 and 5xx with backoff.
-    async fn send_with_retry(&self, build: impl Fn() -> RequestBuilder) -> Result<reqwest::Response, BoxError> {
+    async fn send_with_retry(
+        &self,
+        build: impl Fn() -> RequestBuilder,
+    ) -> Result<reqwest::Response, BoxError> {
         let max_attempts = self.retry.max_attempts.max(1);
         for attempt in 1..=max_attempts {
             let last_attempt = attempt == max_attempts;
             match build().send().await {
                 Ok(response) => {
                     let status = response.status();
-                    let retryable = status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+                    let retryable =
+                        status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
                     if !retryable || last_attempt {
                         return Ok(response);
                     }
-                    tracing::warn!("GreptimeDB returned {status} (attempt {attempt}/{max_attempts}); retrying");
+                    tracing::warn!(
+                        "GreptimeDB returned {status} (attempt {attempt}/{max_attempts}); retrying"
+                    );
                 }
                 Err(error) => {
                     let transient = error.is_connect() || error.is_timeout() || error.is_request();
                     if !transient || last_attempt {
                         return Err(if error.is_connect() {
-                            boxed_error(format!("GreptimeDB is unavailable at {}: {error}", self.base_url))
+                            boxed_error(format!(
+                                "GreptimeDB is unavailable at {}: {error}",
+                                self.base_url
+                            ))
                         } else {
                             Box::new(error)
                         });
                     }
-                    tracing::warn!("GreptimeDB request failed (attempt {attempt}/{max_attempts}): {error}; retrying");
+                    tracing::warn!(
+                        "GreptimeDB request failed (attempt {attempt}/{max_attempts}): {error}; retrying"
+                    );
                 }
             }
             tokio::time::sleep(self.retry.delay_for_attempt(attempt)).await;
@@ -138,7 +157,9 @@ impl GreptimeStore {
         if is_missing_table(status, &body) {
             return Ok(None);
         }
-        Err(boxed_error(format!("GreptimeDB SQL error {status}: {body}")))
+        Err(boxed_error(format!(
+            "GreptimeDB SQL error {status}: {body}"
+        )))
     }
 }
 
@@ -162,12 +183,20 @@ fn build_where_clause(
     let mut clauses = Vec::new();
 
     if !run_ids.is_empty() {
-        let joined = run_ids.iter().map(|run_id| sql_string_literal(run_id)).collect::<Vec<_>>().join(", ");
+        let joined = run_ids
+            .iter()
+            .map(|run_id| sql_string_literal(run_id))
+            .collect::<Vec<_>>()
+            .join(", ");
         clauses.push(format!("run_id IN ({joined})"));
     }
 
     if !metrics.is_empty() {
-        let joined = metrics.iter().map(|metric| sql_string_literal(metric)).collect::<Vec<_>>().join(", ");
+        let joined = metrics
+            .iter()
+            .map(|metric| sql_string_literal(metric))
+            .collect::<Vec<_>>()
+            .join(", ");
         clauses.push(format!("{metric_column} IN ({joined})"));
     }
 
@@ -202,6 +231,17 @@ fn as_f64(value: Option<&Value>) -> Option<f64> {
 
 #[async_trait]
 impl StorageEngine for GreptimeStore {
+    async fn delete_run(&self, run_id: &str) -> Result<(), BoxError> {
+        let _guard = self.tables_ready.lock().await;
+        for table in TABLES {
+            self.sql(&format!(
+                "DELETE FROM {table} WHERE run_id={}",
+                sql_string_literal(run_id)
+            ))
+            .await?;
+        }
+        Ok(())
+    }
     async fn append_batch(&self, batch: Arc<TelemetryBatch>) -> Result<(), BoxError> {
         let body = record_batch_to_line_protocol(&batch.batch, &batch.kind)?;
         if body.is_empty() {
@@ -215,7 +255,9 @@ impl StorageEngine for GreptimeStore {
         }
 
         let url = self.write_url();
-        let response = self.send_with_retry(|| self.client.post(&url).body(body.clone())).await?;
+        let response = self
+            .send_with_retry(|| self.client.post(&url).body(body.clone()))
+            .await?;
         let status = response.status();
         if status.is_success() {
             return Ok(());
@@ -226,11 +268,22 @@ impl StorageEngine for GreptimeStore {
         } else {
             ""
         };
-        Err(boxed_error(format!("GreptimeDB write error {status}: {text}{hint}")))
+        Err(boxed_error(format!(
+            "GreptimeDB write error {status}: {text}{hint}"
+        )))
     }
 
-    async fn query_history(&self, query: &HistoryQueryOptions) -> Result<QueryPage<HistoryPoint>, BoxError> {
-        let where_clause = build_where_clause(&query.run_ids, &query.metrics, query.start_ms, query.end_ms, "name");
+    async fn query_history(
+        &self,
+        query: &HistoryQueryOptions,
+    ) -> Result<QueryPage<HistoryPoint>, BoxError> {
+        let where_clause = build_where_clause(
+            &query.run_ids,
+            &query.metrics,
+            query.start_ms,
+            query.end_ms,
+            "name",
+        );
         let sql = apply_page_limit(
             &format!("SELECT * FROM scalars{where_clause} ORDER BY ts ASC, step ASC"),
             query.cursor,
@@ -242,9 +295,12 @@ impl StorageEngine for GreptimeStore {
 
         let rows_raw = extract_rows(&body)?;
         let col_idx = extract_column_indices(&body)?;
-        let (Some(&ts_idx), Some(&name_idx), Some(&run_id_idx), Some(&value_idx)) =
-            (col_idx.get("ts"), col_idx.get("name"), col_idx.get("run_id"), col_idx.get("value"))
-        else {
+        let (Some(&ts_idx), Some(&name_idx), Some(&run_id_idx), Some(&value_idx)) = (
+            col_idx.get("ts"),
+            col_idx.get("name"),
+            col_idx.get("run_id"),
+            col_idx.get("value"),
+        ) else {
             return Ok(QueryPage::default());
         };
         let step_idx = col_idx.get("step").copied();
@@ -254,8 +310,14 @@ impl StorageEngine for GreptimeStore {
             let Some(arr) = row.as_array() else {
                 continue;
             };
-            let name = arr.get(name_idx).and_then(Value::as_str).unwrap_or_default();
-            let run_id = arr.get(run_id_idx).and_then(Value::as_str).unwrap_or_default();
+            let name = arr
+                .get(name_idx)
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let run_id = arr
+                .get(run_id_idx)
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let Some(value) = as_f64(arr.get(value_idx)) else {
                 continue;
             };
@@ -264,6 +326,7 @@ impl StorageEngine for GreptimeStore {
             }
 
             points.push(HistoryPoint {
+                segment: None,
                 ts_ms: parse_i64(arr.get(ts_idx)) / 1_000_000,
                 run_id: run_id.to_string(),
                 name: name.to_string(),
@@ -275,9 +338,14 @@ impl StorageEngine for GreptimeStore {
         Ok(finalize_page(points, query.cursor, query.limit))
     }
 
-    async fn query_hyperparameters(&self, run_ids: &BTreeSet<String>) -> Result<Vec<(String, HyperparameterEntry)>, BoxError> {
+    async fn query_hyperparameters(
+        &self,
+        run_ids: &BTreeSet<String>,
+    ) -> Result<Vec<(String, HyperparameterEntry)>, BoxError> {
         let where_clause = build_where_clause(run_ids, &BTreeSet::new(), None, None, "key");
-        let sql = format!("SELECT run_id, key, value, value_type FROM hyperparameters{where_clause} ORDER BY ts ASC");
+        let sql = format!(
+            "SELECT run_id, key, value, value_type FROM hyperparameters{where_clause} ORDER BY ts ASC"
+        );
         let Some(body) = self.sql(&sql).await? else {
             return Ok(vec![]);
         };
@@ -297,8 +365,16 @@ impl StorageEngine for GreptimeStore {
                 run_id.to_string(),
                 HyperparameterEntry {
                     key: key.to_string(),
-                    value: arr.get(2).and_then(Value::as_str).unwrap_or_default().to_string(),
-                    value_type: arr.get(3).and_then(Value::as_str).unwrap_or("string").to_string(),
+                    value: arr
+                        .get(2)
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    value_type: arr
+                        .get(3)
+                        .and_then(Value::as_str)
+                        .unwrap_or("string")
+                        .to_string(),
                 },
             ));
         }
@@ -306,8 +382,18 @@ impl StorageEngine for GreptimeStore {
         Ok(entries)
     }
 
-    async fn query_media_history(&self, kind: MediaKind, query: &ImageQueryOptions) -> Result<QueryPage<ImageHistoryPoint>, BoxError> {
-        let where_clause = build_where_clause(&query.run_ids, &query.metrics, query.start_ms, query.end_ms, "name");
+    async fn query_media_history(
+        &self,
+        kind: MediaKind,
+        query: &ImageQueryOptions,
+    ) -> Result<QueryPage<ImageHistoryPoint>, BoxError> {
+        let where_clause = build_where_clause(
+            &query.run_ids,
+            &query.metrics,
+            query.start_ms,
+            query.end_ms,
+            "name",
+        );
         let (table, hex_column) = (kind.dir_name(), kind.hex_column());
         let columns = if query.include_data {
             format!("ts, run_id, name, format, {hex_column}")
@@ -337,10 +423,14 @@ impl StorageEngine for GreptimeStore {
             }
 
             let image_base64 = match arr.get(4).and_then(Value::as_str) {
-                Some(hex) if query.include_data && !hex.is_empty() => Some(BASE64_STANDARD.encode(decode_hex(hex)?)),
+                Some(hex) if query.include_data && !hex.is_empty() => {
+                    Some(BASE64_STANDARD.encode(decode_hex(hex)?))
+                }
                 _ => None,
             };
             decoded.push(ImageHistoryPoint {
+                asset_id: None,
+                step: None,
                 ts_ms: parse_i64(arr.first()) / 1_000_000,
                 run_id: run_id.to_string(),
                 name: name.to_string(),
@@ -352,7 +442,11 @@ impl StorageEngine for GreptimeStore {
         Ok(finalize_page(decoded, query.cursor, query.limit))
     }
 
-    async fn load_media(&self, kind: MediaKind, query: &ImageFrameQuery) -> Result<Option<MediaPayload>, BoxError> {
+    async fn load_media(
+        &self,
+        kind: MediaKind,
+        query: &ImageFrameQuery,
+    ) -> Result<Option<MediaPayload>, BoxError> {
         let sql = format!(
             "SELECT format, {} FROM {} WHERE run_id = {} AND name = {} AND ts = {} LIMIT 1",
             kind.hex_column(),
@@ -385,14 +479,21 @@ impl StorageEngine for GreptimeStore {
     async fn list_runs(&self) -> Result<Vec<String>, BoxError> {
         let mut runs = BTreeSet::new();
         for table in TABLES {
-            let Some(body) = self.sql(&format!("SELECT DISTINCT run_id FROM {table}")).await? else {
+            let Some(body) = self
+                .sql(&format!("SELECT DISTINCT run_id FROM {table}"))
+                .await?
+            else {
                 continue;
             };
             for row in extract_rows(&body)? {
-                if let Some(run_id) = row.as_array().and_then(|arr| arr.first()).and_then(Value::as_str)
-                    && !run_id.is_empty() {
-                        runs.insert(run_id.to_string());
-                    }
+                if let Some(run_id) = row
+                    .as_array()
+                    .and_then(|arr| arr.first())
+                    .and_then(Value::as_str)
+                    && !run_id.is_empty()
+                {
+                    runs.insert(run_id.to_string());
+                }
             }
         }
         Ok(runs.into_iter().collect())
@@ -413,7 +514,10 @@ impl StorageEngine for GreptimeStore {
         if failures.is_empty() {
             Ok(())
         } else {
-            Err(boxed_error(format!("GreptimeDB could not clear history: {}", failures.join(" | "))))
+            Err(boxed_error(format!(
+                "GreptimeDB could not clear history: {}",
+                failures.join(" | ")
+            )))
         }
     }
 }
@@ -424,7 +528,10 @@ mod tests {
 
     #[test]
     fn page_limit_requests_one_extra_row() {
-        assert_eq!(apply_page_limit("SELECT 1", Some(10), Some(5)), "SELECT 1 LIMIT 6 OFFSET 10");
+        assert_eq!(
+            apply_page_limit("SELECT 1", Some(10), Some(5)),
+            "SELECT 1 LIMIT 6 OFFSET 10"
+        );
         assert_eq!(apply_page_limit("SELECT 1", None, None), "SELECT 1");
     }
 
@@ -445,7 +552,10 @@ mod tests {
 
     #[test]
     fn missing_tables_are_recognised() {
-        assert!(is_missing_table(StatusCode::BAD_REQUEST, "Table not found: greptime.public.audio"));
+        assert!(is_missing_table(
+            StatusCode::BAD_REQUEST,
+            "Table not found: greptime.public.audio"
+        ));
         assert!(!is_missing_table(StatusCode::BAD_REQUEST, "syntax error"));
     }
 }

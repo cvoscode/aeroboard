@@ -102,6 +102,79 @@ pub struct QueryPage<T> {
     pub next_cursor: Option<usize>,
 }
 
+/// Keep only the earliest requested prefix while merging legacy rows and
+/// identified batches. A late historical replay must sort before pagination.
+pub(crate) struct HistorySelection {
+    prefix: Option<usize>,
+    ordinal: u64,
+    heap: std::collections::BinaryHeap<IndexedPoint>,
+    all: Vec<HistoryPoint>,
+}
+struct IndexedPoint {
+    ordinal: u64,
+    point: HistoryPoint,
+}
+impl PartialEq for IndexedPoint {
+    fn eq(&self, other: &Self) -> bool {
+        (self.point.ts_ms, self.ordinal) == (other.point.ts_ms, other.ordinal)
+    }
+}
+impl Eq for IndexedPoint {}
+impl PartialOrd for IndexedPoint {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for IndexedPoint {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.point.ts_ms, self.ordinal).cmp(&(other.point.ts_ms, other.ordinal))
+    }
+}
+impl HistorySelection {
+    pub fn new(query: &HistoryQueryOptions) -> Self {
+        Self {
+            prefix: query.limit.map(|l| {
+                l.saturating_add(query.cursor.unwrap_or(0))
+                    .saturating_add(1)
+            }),
+            ordinal: 0,
+            heap: Default::default(),
+            all: vec![],
+        }
+    }
+    pub fn prefix(&self) -> Option<usize> {
+        self.prefix
+    }
+    pub fn push(&mut self, point: HistoryPoint) {
+        let row = IndexedPoint {
+            ordinal: self.ordinal,
+            point,
+        };
+        self.ordinal += 1;
+        if let Some(prefix) = self.prefix {
+            if self.heap.len() < prefix {
+                self.heap.push(row);
+            } else if self.heap.peek().is_some_and(|largest| row < *largest) {
+                self.heap.pop();
+                self.heap.push(row);
+            }
+        } else {
+            self.all.push(row.point);
+        }
+    }
+    pub fn finish(self) -> Vec<HistoryPoint> {
+        if self.prefix.is_some() {
+            self.heap
+                .into_sorted_vec()
+                .into_iter()
+                .map(|r| r.point)
+                .collect()
+        } else {
+            self.all
+        }
+    }
+}
+
 impl<T> Default for QueryPage<T> {
     fn default() -> Self {
         Self {
@@ -118,11 +191,21 @@ fn paginate_vec<T>(rows: Vec<T>, cursor: Option<usize>, limit: Option<usize>) ->
     let mut iter = rows.into_iter().skip(start);
     let page_rows: Vec<T> = iter.by_ref().take(page_limit).collect();
     let consumed = start + page_rows.len();
-    let next_cursor = if consumed < total { Some(consumed) } else { None };
-    QueryPage { rows: page_rows, next_cursor }
+    let next_cursor = if consumed < total {
+        Some(consumed)
+    } else {
+        None
+    };
+    QueryPage {
+        rows: page_rows,
+        next_cursor,
+    }
 }
 
-pub(crate) fn apply_history_query(rows: Vec<HistoryPoint>, query: &HistoryQueryOptions) -> QueryPage<HistoryPoint> {
+pub(crate) fn apply_history_query(
+    rows: Vec<HistoryPoint>,
+    query: &HistoryQueryOptions,
+) -> QueryPage<HistoryPoint> {
     let mut filtered: Vec<HistoryPoint> = rows
         .into_iter()
         .filter(|row| {
@@ -136,7 +219,10 @@ pub(crate) fn apply_history_query(rows: Vec<HistoryPoint>, query: &HistoryQueryO
     paginate_vec(filtered, query.cursor, query.limit)
 }
 
-pub(crate) fn apply_image_query(rows: Vec<ImageHistoryPoint>, query: &ImageQueryOptions) -> QueryPage<ImageHistoryPoint> {
+pub(crate) fn apply_image_query(
+    rows: Vec<ImageHistoryPoint>,
+    query: &ImageQueryOptions,
+) -> QueryPage<ImageHistoryPoint> {
     let mut filtered: Vec<ImageHistoryPoint> = rows
         .into_iter()
         .filter(|row| {
@@ -150,7 +236,11 @@ pub(crate) fn apply_image_query(rows: Vec<ImageHistoryPoint>, query: &ImageQuery
     paginate_vec(filtered, query.cursor, query.limit)
 }
 
-pub(crate) fn finalize_page<T>(mut rows: Vec<T>, cursor: Option<usize>, limit: Option<usize>) -> QueryPage<T> {
+pub(crate) fn finalize_page<T>(
+    mut rows: Vec<T>,
+    cursor: Option<usize>,
+    limit: Option<usize>,
+) -> QueryPage<T> {
     if let Some(limit) = limit {
         let next_cursor = if rows.len() > limit {
             rows.truncate(limit);
@@ -160,6 +250,9 @@ pub(crate) fn finalize_page<T>(mut rows: Vec<T>, cursor: Option<usize>, limit: O
         };
         QueryPage { rows, next_cursor }
     } else {
-        QueryPage { rows, next_cursor: None }
+        QueryPage {
+            rows,
+            next_cursor: None,
+        }
     }
 }

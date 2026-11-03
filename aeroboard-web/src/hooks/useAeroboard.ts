@@ -135,6 +135,7 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
     const imageStoreRef = useRef<ImageStore>({});
     const mediaStoreRef = useRef<MediaStore>({});
     const dashboardConfigsRef = useRef<DashboardConfigStore>({});
+    const seenBatchesRef = useRef(new Set<string>());
     const [serverDashboardDefaults, setServerDashboardDefaults] = useState<PartialDashboardDefaults | null>(null);
     const [dashboardConfigError, setDashboardConfigError] = useState<string | null>(null);
     const startTimes = useRef<Record<string, number>>({});
@@ -340,6 +341,16 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
 
     const handleArrowMessage = useCallback((data: ArrayBuffer) => {
         const table = arrow.tableFromIPC(new Uint8Array(data));
+        const envelope = table.schema.metadata.get('aeroboard.envelope');
+        if (envelope) {
+            const id = (JSON.parse(envelope) as {batch_id?: string}).batch_id;
+            if (id) {
+                const seen = seenBatchesRef.current;
+                if (seen.has(id)) return;
+                seen.add(id);
+                if (seen.size > 8192) seen.delete(seen.values().next().value!);
+            }
+        }
         let shouldUpdate = false;
 
         for (const batch of table.batches) {
@@ -350,6 +361,7 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
             const nameCol = batch.getChild('name');
             const valueCol = batch.getChild('value');
             const stepCol = batch.getChild('step');
+            const assetIdCol = batch.getChild('asset_id');
             const imageCol = batch.getChild('image_data');
             const audioCol = batch.getChild('audio_data');
             const videoCol = batch.getChild('video_data');
@@ -377,6 +389,8 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
                     const payload = imageCol.get(i) as Uint8Array | null;
                     const format = String(formatCol.get(i));
                     upsertImageFrame(imageStoreRef.current, {
+                        asset_id: assetIdCol?.get(i) == null ? undefined : String(assetIdCol.get(i)),
+                        step: stepCol?.get(i) == null ? null : Number(stepCol.get(i)),
                         ts_ms: Number(timeCol.get(i)),
                         run_id: String(runIdCol.get(i)),
                         name: String(nameCol.get(i)),
@@ -399,6 +413,8 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
                         ? URL.createObjectURL(new Blob([payload as Uint8Array<ArrayBuffer>], { type: mediaMimeType(kind, format) }))
                         : undefined;
                     upsertMediaClip(mediaStoreRef.current, {
+                        asset_id: assetIdCol?.get(i) == null ? undefined : String(assetIdCol.get(i)),
+                        step: stepCol?.get(i) == null ? null : Number(stepCol.get(i)),
                         kind,
                         ts_ms: Number(timeCol.get(i)),
                         run_id: String(runIdCol.get(i)),
@@ -440,6 +456,7 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
             ws.binaryType = 'arraybuffer';
 
             ws.onopen = () => {
+                window.dispatchEvent(new Event("aeroboard:catalog"));
                 setConnected(true);
                 attempts = 0;
                 // Anything sent while we were disconnected was persisted, not pushed.
@@ -468,6 +485,9 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
                         if (message.type === 'lagged') {
                             console.warn(`[Aeroboard] Live stream skipped ${message.skipped ?? '?'} batches; re-fetching history`);
                             resync();
+                            window.dispatchEvent(new Event("aeroboard:catalog"));
+                        } else if (message.type === 'catalog_changed') {
+                            window.dispatchEvent(new Event("aeroboard:catalog"));
                         }
                     }
                 } catch (err) {

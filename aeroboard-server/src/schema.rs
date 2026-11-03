@@ -16,7 +16,11 @@ use arrow::record_batch::RecordBatch;
 use crate::telemetry::TelemetryKind;
 
 fn timestamp_field() -> Field {
-    Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false)
+    Field::new(
+        "timestamp",
+        DataType::Timestamp(TimeUnit::Millisecond, None),
+        false,
+    )
 }
 
 /// Schema for scalar values (e.g., loss, accuracy). `step` is optional: older
@@ -108,6 +112,21 @@ pub fn normalize_batch(kind: &TelemetryKind, batch: &RecordBatch) -> Result<Reco
     };
 
     let actual = batch.schema();
+    let expected = if kind.media_data_column().is_some() && actual.index_of("asset_id").is_ok() {
+        let mut fields = expected
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        fields.extend([
+            Field::new("asset_id", DataType::Utf8, false),
+            Field::new("step", DataType::Float64, true),
+            Field::new("segment", DataType::Utf8, true),
+        ]);
+        Arc::new(Schema::new(fields))
+    } else {
+        expected
+    };
     let optional_trailing = usize::from(*kind == TelemetryKind::Scalars);
     let required = expected.fields().len() - optional_trailing;
     let column_count = actual.fields().len();
@@ -123,7 +142,10 @@ pub fn normalize_batch(kind: &TelemetryKind, batch: &RecordBatch) -> Result<Reco
     for (index, expected_field) in expected.fields().iter().enumerate() {
         let Some(actual_field) = actual.fields().get(index) else {
             // Only the optional trailing scalar `step` column can be missing.
-            columns.push(arrow::array::new_null_array(expected_field.data_type(), batch.num_rows()));
+            columns.push(arrow::array::new_null_array(
+                expected_field.data_type(),
+                batch.num_rows(),
+            ));
             continue;
         };
         if actual_field.name() != expected_field.name() {

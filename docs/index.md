@@ -39,6 +39,7 @@ user-guide/core-concepts
 user-guide/logging-data
 user-guide/integrations
 user-guide/dashboard
+user-guide/workspaces
 ```
 
 ```{toctree}
@@ -50,6 +51,8 @@ developer-guide/architecture
 developer-guide/repository-layout
 developer-guide/development-workflow
 developer-guide/storage-model
+developer-guide/feature-implementation-plan
+developer-guide/workspace-verification
 ```
 
 ```{toctree}
@@ -81,6 +84,7 @@ reference/configuration
 - Repository Layout describes where code lives and which directory owns which concern.
 - Development Workflow gives setup, test, lint, and local debugging guidance.
 - Storage Model explains the storage abstraction and how filesystem, GreptimeDB, and live-only modes behave.
+- Feature Implementation Plan records the scope and verification gates for lifecycle, metric goals, saved views, comparisons, events, and offline capture.
 
 ### Reference
 

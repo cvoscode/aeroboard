@@ -3,6 +3,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.legacy_server
+
 import aeroboard_client
 from aeroboard_client.client import (
     DASHBOARD_CONFIG_KEY,

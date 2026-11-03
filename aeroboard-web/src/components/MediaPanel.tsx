@@ -7,6 +7,7 @@ import { isAnimatedImageFormat } from "../lib/media";
 interface MediaPanelProps {
   series: MediaSeries[];
   getMediaSource: (clip: MediaClip, attempt?: number) => string;
+  onPositionSelect?: (clip: MediaClip) => void;
 }
 
 const MAX_LOAD_ATTEMPTS = 3;
@@ -17,7 +18,7 @@ function formatTimestamp(tsMs: number): string {
   return new Date(tsMs).toLocaleString();
 }
 
-export default function MediaPanel({ series, getMediaSource }: MediaPanelProps) {
+export default function MediaPanel({ series, getMediaSource, onPositionSelect }: MediaPanelProps) {
   return (
     <div className="media-grid">
       {series.map((entry) => (
@@ -26,6 +27,7 @@ export default function MediaPanel({ series, getMediaSource }: MediaPanelProps) 
           series={entry}
           clipCount={entry.clips.length}
           getMediaSource={getMediaSource}
+          onPositionSelect={onPositionSelect}
         />
       ))}
     </div>
@@ -37,9 +39,10 @@ interface MediaSeriesCardProps {
   /** Passed separately so memo() re-renders when live clips are appended in place. */
   clipCount: number;
   getMediaSource: (clip: MediaClip, attempt?: number) => string;
+  onPositionSelect?: (clip: MediaClip) => void;
 }
 
-const MediaSeriesCard = memo(function MediaSeriesCard({ series, clipCount, getMediaSource }: MediaSeriesCardProps) {
+const MediaSeriesCard = memo(function MediaSeriesCard({ series, clipCount, getMediaSource, onPositionSelect }: MediaSeriesCardProps) {
   const [index, setIndex] = useState(0);
   const [followLatest, setFollowLatest] = useState(true);
 
@@ -79,6 +82,7 @@ const MediaSeriesCard = memo(function MediaSeriesCard({ series, clipCount, getMe
         </div>
         <div className="media-card-meta">
           <span className="image-time-pill">{formatTimestamp(clip.ts_ms)}</span>
+          {clip.step != null ? <button type="button" onClick={() => onPositionSelect?.(clip)}>Show step {clip.step} on charts</button> : null}
           {!followLatest && newerClips > 0 ? (
             <button type="button" className="selector-action-btn" onClick={() => setFollowLatest(true)}>
               Latest ({newerClips} newer)
@@ -88,7 +92,7 @@ const MediaSeriesCard = memo(function MediaSeriesCard({ series, clipCount, getMe
       </div>
 
       <div className={`media-stage media-stage-${series.kind}`}>
-        <MediaPlayer key={`${playerClip.ts_ms}`} clip={playerClip} getMediaSource={getMediaSource} onPlay={pinPlayingClip} />
+        <MediaPlayer key={playerClip.asset_id ?? `${playerClip.ts_ms}`} clip={playerClip} getMediaSource={getMediaSource} onPlay={pinPlayingClip} />
       </div>
 
       {clipCount > 1 ? (

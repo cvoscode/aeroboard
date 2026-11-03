@@ -14,3 +14,4 @@ docs/_build/
 # Local tool state (regenerated; not source)
 .repowise/wiki.db*
 .playwright-mcp/
+aeroboard-spool/

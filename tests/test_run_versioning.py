@@ -1,4 +1,7 @@
 from unittest.mock import Mock, patch
+import pytest
+
+pytestmark = pytest.mark.legacy_server
 
 from aeroboard_client.client import AeroboardClient, resolve_run_id, _fetch_existing_run_ids, _normalize_run_id
 
