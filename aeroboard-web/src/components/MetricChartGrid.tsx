@@ -1,16 +1,23 @@
-import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
-import { SortableContext, arrayMove, rectSortingStrategy, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
+import { DndContext, KeyboardSensor, PointerSensor, closestCenter, pointerWithin, useSensor, useSensors, type CollisionDetection, type DragEndEvent } from "@dnd-kit/core";
+import { SortableContext, rectSortingStrategy, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 
 import type { TimeSeriesData } from "../hooks/useAeroboard";
 import type { XAxisType } from "./LineChart";
 import type { WidthMode } from "../hooks/useDashboardPreferences";
 import { SortableMetricChart } from "./SortableMetricChart";
+import { chartBaseName } from "../lib/dashboardDefaults";
 import type { RunEvent } from "../hooks/useWorkspace";
 
 const STAGE_COLORS: Record<string, string> = {
   train: "#00d2ff",
   val: "#ff4c6b",
   test: "#00e676",
+};
+
+/** Cards differ in height, so the drop follows the pointer; the keyboard has none and uses card centers. */
+const dropTarget: CollisionDetection = (args) => {
+  const underPointer = pointerWithin(args);
+  return underPointer.length > 0 ? underPointer : closestCenter(args);
 };
 
 interface MetricChartGridProps {
@@ -36,7 +43,8 @@ interface MetricChartGridProps {
   singleRunRevision: string;
   setFavoriteCharts: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
   setCollapsedCharts: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
-  setOrderedMetrics: React.Dispatch<React.SetStateAction<string[]>>;
+  onReorderChart: (active: string, over: string) => void;
+  onPinChart: (key: string) => void;
   /** Effective target line per chart (user override, else configured default). */
   optimalValues: Record<string, number | null>;
   setOptimalValues: React.Dispatch<React.SetStateAction<Record<string, number | null>>>;
@@ -61,38 +69,33 @@ export function MetricChartGrid({
   singleRunRevision,
   setFavoriteCharts,
   setCollapsedCharts,
-  setOrderedMetrics,
+  onReorderChart,
+  onPinChart,
   optimalValues,
   setOptimalValues,
 }: MetricChartGridProps) {
   const sensors = useSensors(
-    useSensor(PointerSensor),
+    // The card header starts drags too, so a plain click on it must not count as one.
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
-  const isChartCollapsed = (groupKey: string) => collapsedCharts[groupKey] ?? !favoriteCharts[groupKey];
+  const isChartCollapsed = (groupKey: string) => collapsedCharts[chartBaseName(groupKey)] ?? !favoriteCharts[groupKey];
 
   // Removal is stored as null, not deleted, so a configured default target stays off.
   const setOptimalValue = (groupKey: string, value: number | null) => {
-    setOptimalValues((prev) => ({ ...prev, [groupKey]: value }));
+    setOptimalValues((prev) => ({ ...prev, [chartBaseName(groupKey)]: value }));
   };
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
-    if (!over || active.id === over.id) return;
-
-    const currentOrder = [...visibleMetricKeys];
-    const oldIdx = currentOrder.indexOf(active.id as string);
-    const newIdx = currentOrder.indexOf(over.id as string);
-    if (oldIdx < 0 || newIdx < 0) return;
-
-    setOrderedMetrics(arrayMove(currentOrder, oldIdx, newIdx));
+    if (over && active.id !== over.id) onReorderChart(String(active.id), String(over.id));
   };
 
   return (
-    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+    <DndContext sensors={sensors} collisionDetection={dropTarget} onDragEnd={handleDragEnd}>
       <SortableContext items={visibleMetricKeys} strategy={rectSortingStrategy}>
-        <div className="grid-layout">
+        <div className={`grid-layout grid-layout--${widthMode}`}>
           {visibleMetricKeys.map((groupKey) => {
             const targets = groupedMetrics[groupKey];
             if (!targets) return null;
@@ -135,12 +138,15 @@ export function MetricChartGrid({
                 widthMode={widthMode}
                 revisionKey={`${singleRunRevision}:${groupKey}:${xAxisType}:${removeOutliers ? "trim" : "full"}`}
                 favorite={!!favoriteCharts[groupKey]}
-                onToggleFavorite={() => setFavoriteCharts((prev) => ({ ...prev, [groupKey]: !favoriteCharts[groupKey] }))}
+                onToggleFavorite={() => {
+                  setFavoriteCharts((prev) => ({ ...prev, [chartBaseName(groupKey)]: !favoriteCharts[groupKey] }));
+                  if (!favoriteCharts[groupKey]) onPinChart(groupKey);
+                }}
                 collapsed={isChartCollapsed(groupKey)}
-                onToggleCollapse={() => setCollapsedCharts((prev) => ({ ...prev, [groupKey]: !isChartCollapsed(groupKey) }))}
+                onToggleCollapse={() => setCollapsedCharts((prev) => ({ ...prev, [chartBaseName(groupKey)]: !isChartCollapsed(groupKey) }))}
                 optimalValue={optimalValues[groupKey] ?? null}
                 onOptimalValueChange={(value) => setOptimalValue(groupKey, value)}
-                logarithmic={!!logCharts[groupKey]} onToggleLog={() => onToggleLog(groupKey)} onHide={() => onHideChart(groupKey)}
+                logarithmic={!!logCharts[chartBaseName(groupKey)]} onToggleLog={() => onToggleLog(groupKey)} onHide={() => onHideChart(groupKey)}
                 markers={events.flatMap(event => {
                   const position = xAxisType === "step" ? event.data.step : xAxisType === "wall" ? event.data.timestamp_ms / 1000 : seriesData[0] ? event.data.timestamp_ms / 1000 - seriesData[0].fullData.wallTimes[0] : null;
                   return position === null ? [] : [{id: event.id, x: position, label: event.data.label}];

@@ -1,11 +1,11 @@
 import { useRef, useState, type CSSProperties, type FormEvent } from "react";
-import { ChevronDown, ChevronRight, Crosshair, GripVertical, Star } from "lucide-react";
+import { ChevronDown, ChevronRight, Crosshair, Download, EyeOff, GripVertical, Star } from "lucide-react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
 import { LineChart, type ChartMarker, type XAxisType } from "./LineChart";
+import { MetricName } from "./MetricName";
 import { exportChart } from "../lib/export";
-import { formatReferenceValue } from "../lib/format";
 import type { TimeSeriesData } from "../hooks/useAeroboard";
 import type { WidthMode } from "../hooks/useDashboardPreferences";
 
@@ -52,7 +52,7 @@ export function SortableMetricChart({
   optimalValue,
   onOptimalValueChange,
 }: SortableMetricChartProps) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({ id });
   const cardRef = useRef<HTMLDivElement | null>(null);
   const [editingOptimal, setEditingOptimal] = useState(false);
   const [optimalDraft, setOptimalDraft] = useState("");
@@ -79,11 +79,11 @@ export function SortableMetricChart({
   const optimalDraftInvalid = optimalDraft.trim() !== "" && !Number.isFinite(Number(optimalDraft.trim()));
 
   const style: CSSProperties = {
-    transform: CSS.Transform.toString(transform),
+    // Translate only: scaling would squash a chart swapping with a card of another height.
+    transform: CSS.Translate.toString(transform),
     transition,
     zIndex: isDragging ? 100 : 1,
     opacity: isDragging ? 0.8 : 1,
-    gridColumn: widthMode === "full" ? "span 12" : widthMode === "wide" ? "span 6" : "span 4",
   };
 
   return (
@@ -93,14 +93,19 @@ export function SortableMetricChart({
       className={`chart-card width-${widthMode} ${collapsed ? "collapsed" : ""} ${favorite ? "favorite" : ""}`}
     >
       <div className="chart-card-glow" />
-      <div className="chart-header">
+      <div
+        className="chart-header"
+        onPointerDown={event => {
+          if (!(event.target as Element).closest("button, input, a")) listeners?.onPointerDown(event);
+        }}
+      >
         <div className="chart-header-left">
-          <button className="collapse-toggle" onClick={onToggleCollapse}>
+          <button className="collapse-toggle" onClick={onToggleCollapse} aria-label={`${collapsed ? "Expand" : "Collapse"} ${groupKey}`} aria-expanded={!collapsed}>
             {collapsed ? <ChevronRight size={18} /> : <ChevronDown size={18} />}
           </button>
           <div className="title-area">
-            <h3 className="chart-title">{groupKey.toUpperCase()}</h3>
-            <small className="chart-meta">{seriesData.length} traces</small>
+            <h3 className="chart-title" title={groupKey} aria-label={groupKey}><MetricName name={groupKey} /></h3>
+            <small className="chart-meta">{seriesData.length} {seriesData.length === 1 ? "trace" : "traces"}</small>
           </div>
         </div>
 
@@ -108,25 +113,18 @@ export function SortableMetricChart({
           {seriesData.map((series) => (
             <div key={series.name} className="legend-item">
               <span className="legend-dot" style={{ backgroundColor: series.color || "#00d2ff" }} />
+              <span className="legend-label" title={series.name}>{series.name}</span>
               <span className="legend-val" style={{ color: series.color || "var(--accent-secondary)" }}>
                 {series.fullData.values[series.fullData.count - 1]?.toFixed(4)}
               </span>
-              <span className="legend-label">{series.name}</span>
             </div>
           ))}
-          {optimalValue !== null ? (
-            <button type="button" className="legend-item legend-optimal" onClick={openOptimalEditor} title="Edit optimal value">
-              <span className="legend-optimal-swatch" aria-hidden="true" />
-              <span className="legend-val legend-optimal-val">{formatReferenceValue(optimalValue)}</span>
-              <span className="legend-label">optimal</span>
-            </button>
-          ) : null}
         </div>
 
         <div className="chart-actions">
           <button type="button" className="chip-btn" aria-pressed={logarithmic} onClick={onToggleLog} title="Toggle logarithmic y-axis">{logarithmic ? "Log" : "Linear"}</button>
-          <button type="button" className="chip-btn" disabled={collapsed} onClick={() => exportChart(cardRef.current,`${groupKey} · ${xAxisType} · smoothing ${smoothing} · ${removeOutliers ? "trimmed" : "all values"}`)}>PNG</button>
-          <button type="button" className="chip-btn" onClick={onHide} title="Hide this chart">Hide</button>
+          <button type="button" className="chart-icon-btn" aria-label="PNG" title="Download chart as PNG" disabled={collapsed} onClick={() => exportChart(cardRef.current,`${groupKey} · ${xAxisType} · smoothing ${smoothing} · ${removeOutliers ? "trimmed" : "all values"}`)}><Download size={14} /></button>
+          <button type="button" className="chart-icon-btn" aria-label={`Hide ${groupKey}`} onClick={onHide} title="Hide this chart"><EyeOff size={14} /></button>
           <button
             className={`favorite-toggle optimal-toggle ${optimalValue !== null ? "is-active" : ""}`}
             type="button"
@@ -146,7 +144,7 @@ export function SortableMetricChart({
           >
             <Star size={16} fill={favorite ? "currentColor" : "none"} />
           </button>
-          <div className="drag-handle-subtle" {...attributes} {...listeners}>
+          <div ref={setActivatorNodeRef} className="drag-handle-subtle" {...attributes} onKeyDown={event => listeners?.onKeyDown(event)}>
             <GripVertical size={16} />
           </div>
         </div>

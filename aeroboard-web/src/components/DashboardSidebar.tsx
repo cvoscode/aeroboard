@@ -195,7 +195,6 @@ export function DashboardSidebar({
                         </small>
                       </div>
                     </div>
-                    <span className="experiment-group-latest">latest {group.runs[0]?.versionLabel}</span>
                   </button>
 
                   {!isCollapsed ? (

@@ -24,6 +24,7 @@ interface LineChartProps {
 }
 
 const DEFAULT_COLORS = ['#00d2ff', '#ff4c6b', '#00e676', '#ffeb3b', '#e040fb'];
+const stepFormat = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 
 /** Dashed horizontal line drawn straight onto uPlot's canvas: no extra series or DOM. */
 function drawReferenceLine(u: uPlot, value: number | null, color: string) {
@@ -178,7 +179,7 @@ export function LineChart({
                     stroke: color + '80',
                     width: 1,
                     spanGaps: true,
-                    points: { show: false }
+                    points: { show: (_u, _seriesIdx, first, last) => first === last, size: 5, fill: color + '80' }
                 });
             }
             series.push({
@@ -186,16 +187,16 @@ export function LineChart({
                 stroke: color,
                 width: 2.5,
                 spanGaps: true,
-                points: { show: false }
+                points: { show: (_u, _seriesIdx, first, last) => first === last, size: 5, fill: color }
             });
         });
 
         const opts: uPlot.Options = {
-            title,
             width: container.clientWidth,
             height,
             padding: [10, 10, 0, 10],
             scales: {
+                x: { time: xAxisType === 'wall' },
                 y: {
                     distr: logarithmic ? 3 : 1,
                     auto: true,
@@ -206,9 +207,9 @@ export function LineChart({
                 {
                     stroke: chartTheme.axis,
                     grid: { stroke: chartTheme.grid, width: 1 },
-                    space: 50,
+                    space: 80,
                     values: xAxisType !== 'wall'
-                        ? (_u, vals) => vals.map(v => v == null ? '' : xAxisType === 'rel' ? xRelFormat(v) : v.toFixed(0))
+                        ? (_u, vals) => vals.map(v => v == null ? '' : xAxisType === 'rel' ? xRelFormat(v) : stepFormat.format(v))
                         : undefined
                 },
                 {

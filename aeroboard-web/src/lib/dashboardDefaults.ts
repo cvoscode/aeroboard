@@ -108,7 +108,7 @@ export function resolveDashboardDefaults(
   return { starred: resolveNames("starred"), order: resolveNames("order"), targets };
 }
 
-function chartBaseName(name: string): string {
+export function chartBaseName(name: string): string {
   const parts = name.split("/");
   return parts.length > 1 ? parts[1] : parts[0];
 }
@@ -120,6 +120,41 @@ function chartBaseName(name: string): string {
  */
 export function matchesChart(configuredName: string, groupKey: string): boolean {
   return configuredName === groupKey || chartBaseName(configuredName) === groupKey || chartBaseName(groupKey) === configuredName;
+}
+
+/**
+ * Your chart settings belong to the metric, so single-run and compare mode share them.
+ * Entries stored under a full name predate that, so a chart-name entry wins over them.
+ */
+export function settingsByMetric<T>(settings: Record<string, T>): Record<string, T> {
+  const entries = Object.entries(settings);
+  return Object.fromEntries([
+    ...entries.filter(([name]) => chartBaseName(name) !== name).map(([name, value]) => [chartBaseName(name), value] as const),
+    ...entries.filter(([name]) => chartBaseName(name) === name),
+  ]);
+}
+
+export function uniqueMetrics(names: string[]): string[] {
+  return Array.from(new Set(names.map(chartBaseName)));
+}
+
+/** Move a chart to the position of the one it was dropped on. Other entries keep their place. */
+export function moveChart(order: string[], active: string, over: string): string[] {
+  const from = order.indexOf(chartBaseName(active));
+  const to = order.indexOf(chartBaseName(over));
+  if (from < 0 || to < 0 || from === to) return order;
+  const next = [...order];
+  next.splice(to, 0, ...next.splice(from, 1));
+  return next;
+}
+
+/** Place a chart straight after the last pinned chart. */
+export function pinChart(order: string[], chart: string, pinned: string[]): string[] {
+  const name = chartBaseName(chart);
+  const next = order.filter((entry) => entry !== name);
+  const lastPinned = next.reduce((last, entry, index) => (pinned.includes(entry) ? index : last), -1);
+  next.splice(lastPinned + 1, 0, name);
+  return next;
 }
 
 export function isStarredByDefault(defaults: DashboardDefaults, groupKey: string): boolean {

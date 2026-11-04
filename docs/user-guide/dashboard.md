@@ -17,6 +17,10 @@ This split lets the UI recover existing data after a refresh and then continue u
 
 The current UI is oriented around experiment inspection and comparison.
 
+The top bar contains project and saved-view selection, followed by the page tabs. The left drawer holds run selection and chart controls. On smaller screens, open it with **Controls**.
+
+Use the metrics search to narrow the chart list. **Show hidden charts** opens a list where you pick which charts to bring back; a chart marked *Not in selected runs* reappears once a selected run reports it. **Metric objectives** is a slim bar that stays closed until you open it, and it remembers your choice; it reports how many targets were reached, and each tile shows a metric's best value. **Compact**, **Wide**, and **Full** adjust chart width to the available space. Cards in a row share the same height, every expanded chart is the same size, and long titles wrap at `/`, `.`, and `_`. Target values appear on their plot lines; the crosshair button opens the target editor.
+
 ### Scalar charts
 
 Scalar metrics are decoded from Arrow IPC frames and stored in typed arrays before being rendered with `uPlot`.
@@ -57,9 +61,9 @@ aeroboard.init(
 
 For defaults shared by all runs, create `aeroboard.toml` in the directory where you run `aeroboard start`. The [configuration reference](../reference/configuration.md#initial-dashboard-view) covers the file format and custom paths.
 
-Use each chart's star button to pin it, drag to reorder, or click the crosshair to add or edit a target. Targets appear as dashed horizontal lines, and the y-axis grows to keep them visible.
+Use each chart's star button to pin it, drag a chart by its header to reorder it, or click the crosshair to add or edit a target. A dragged chart stays where you drop it, even among pinned charts. Targets appear as dashed horizontal lines, and the y-axis grows to keep them visible.
 
-Your browser saves chart changes and gives them priority over the training script and server defaults. Choose **Reset chart layout** in the sidebar to apply the configured initial view again, including any target you removed manually.
+Your browser saves chart changes and gives them priority over the training script and server defaults. Stars, hidden charts, collapsed charts, order, targets, and the log scale belong to the metric, so they apply in both single-run and compare mode: changing `val/loss` also changes `train/loss`, and both follow the `loss` chart. Choose **Reset chart layout** in the sidebar to apply the configured initial view again, including any target you removed manually.
 
 Full metric names such as `val/loss` also match the grouped `loss` chart in single-run mode. Per-run targets override server targets even when one uses a full name and the other uses a chart name. When comparing runs, the first selected run with a matching target supplies that chart's line.
 

@@ -4,7 +4,11 @@ import test from "node:test";
 import {
   defaultOrderRank,
   isStarredByDefault,
+  moveChart,
+  pinChart,
   resolveDashboardDefaults,
+  settingsByMetric,
+  uniqueMetrics,
 } from "../src/lib/dashboardDefaults.ts";
 
 test("saved view lists can explicitly clear inherited stars and zero overrides targets", () => {
@@ -122,4 +126,41 @@ test("no configuration produces an empty initial view", () => {
   assert.deepEqual(resolveDashboardDefaults(null, [null], ["loss"]), {
     starred: [], order: [], targets: {},
   });
+});
+
+test("settings saved under a full metric name apply to the shared chart", () => {
+  assert.deepEqual(settingsByMetric({"val/loss":true,"train/acc":false}),{loss:true,acc:false});
+});
+
+test("a chart-name setting beats an older full-name entry in either storage order", () => {
+  assert.deepEqual(settingsByMetric({"val/loss":true,loss:false}),{loss:false});
+  assert.deepEqual(settingsByMetric({loss:false,"val/loss":true}),{loss:false});
+});
+
+test("full metric names collapse to one entry and keep their first position", () => {
+  assert.deepEqual(uniqueMetrics(["val/loss","acc","train/loss","lr"]),["loss","acc","lr"]);
+});
+
+test("moving a chart takes the position of the chart it was dropped on", () => {
+  assert.deepEqual(moveChart(["a","b","c","d"],"d","b"),["a","d","b","c"]);
+  assert.deepEqual(moveChart(["a","b","c","d"],"a","c"),["b","c","a","d"]);
+});
+
+test("charts outside the current list keep their place when another chart moves", () => {
+  assert.deepEqual(moveChart(["a","hidden","b","c"],"c","a"),["c","a","hidden","b"]);
+});
+
+test("moving accepts compare chart keys for the shared metric", () => {
+  assert.deepEqual(moveChart(["loss","acc","lr"],"val/lr","train/loss"),["lr","loss","acc"]);
+});
+
+test("dropping a chart on itself or an unknown chart leaves the order alone", () => {
+  const order=["loss","acc"];
+  assert.equal(moveChart(order,"val/loss","train/loss"),order);
+  assert.equal(moveChart(order,"loss","missing"),order);
+});
+
+test("a newly starred chart joins the end of the pinned charts", () => {
+  assert.deepEqual(pinChart(["a","b","c","d"],"d",["a","b"]),["a","b","d","c"]);
+  assert.deepEqual(pinChart(["a","b","c"],"val/c",[]),["c","a","b"]);
 });

@@ -43,7 +43,7 @@ export function DashboardHeader({
             <span>Controls</span>
           </button>
 
-          <h2 className="viewport-title">
+          <h2 className="viewport-title" title={effectiveActiveTab === "analysis" ? `${effectiveSelectedRuns.length} Runs Compared` : effectiveSelectedRuns[0]}>
             {effectiveActiveTab === "analysis"
               ? `${effectiveSelectedRuns.length} Runs Compared`
               : effectiveSelectedRuns.length > 0

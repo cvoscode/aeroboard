@@ -1,12 +1,14 @@
 import React, { lazy, Suspense, useEffect, useMemo, useState } from "react";
-import { Activity } from "lucide-react";
+import { Activity, Download, Search } from "lucide-react";
 
 import "./App.css";
 import "./workspace.css";
 import { DashboardHeader } from "./components/DashboardHeader";
 import { DashboardSidebar } from "./components/DashboardSidebar";
 import { ConfirmDialog } from "./components/ConfirmDialog";
+import { HiddenChartsDialog } from "./components/HiddenChartsDialog";
 import { MetricChartGrid } from "./components/MetricChartGrid";
+import { ObjectiveOverview } from "./components/ObjectiveOverview";
 import { useAeroboard } from "./hooks/useAeroboard";
 import { useDashboardPreferences, type WidthMode } from "./hooks/useDashboardPreferences";
 import { usePersistentState } from "./hooks/usePersistentState";
@@ -24,6 +26,11 @@ import {
   resolveDashboardDefaults,
   parseDashboardDefaults,
   matchesChart,
+  chartBaseName,
+  moveChart,
+  pinChart,
+  settingsByMetric,
+  uniqueMetrics,
 } from "./lib/dashboardDefaults";
 const MediaPanel = lazy(() => import("./components/MediaPanel"));
 
@@ -182,8 +189,8 @@ function App() {
   const baseline = typeof controls.baseline === "string" ? controls.baseline : "";
   const comparisonStep = typeof controls.comparisonStep === "number" && Number.isFinite(controls.comparisonStep) ? controls.comparisonStep : null;
   const comparisonSegment = typeof controls.comparisonSegment === "string" ? controls.comparisonSegment : "";
-  const logCharts = flags(controls.logCharts);
-  const hiddenCharts = names(controls.hiddenCharts);
+  const logCharts = settingsByMetric(flags(controls.logCharts));
+  const hiddenCharts = uniqueMetrics(names(controls.hiddenCharts));
   const [runEvents, setRunEvents] = useState<RunEvent[]>([]);
   const [focusedEvent, setFocusedEvent] = useState<RunEvent | null>(null);
   const [isDeletingRuns, setIsDeletingRuns] = useState(false);
@@ -359,30 +366,46 @@ function App() {
   // UI choices (localStorage) win; otherwise fall back to the configured defaults.
   const effectiveFavoriteCharts = useMemo(() => {
     const result: Record<string, boolean> = {};
-    for (const key of groupKeys) result[key] = favoriteCharts[key] ?? isStarredByDefault(dashboardDefaults, key);
+    const favorites = settingsByMetric(favoriteCharts);
+    for (const key of groupKeys) result[key] = favorites[chartBaseName(key)] ?? isStarredByDefault(dashboardDefaults, key);
     return result;
   }, [dashboardDefaults, favoriteCharts, groupKeys]);
 
   const effectiveOptimalValues = useMemo(() => {
     const result: Record<string, number | null> = {};
-    for (const key of groupKeys) result[key] = key in optimalValues ? optimalValues[key] : names(viewSettings.removedTargets).some(name => matchesChart(name,key)) ? null : dashboardDefaults.targets[key] ?? null;
+    const targets = settingsByMetric(optimalValues);
+    for (const key of groupKeys) result[key] = chartBaseName(key) in targets ? targets[chartBaseName(key)] : names(viewSettings.removedTargets).some(name => matchesChart(name,key)) ? null : dashboardDefaults.targets[key] ?? null;
     return result;
   }, [dashboardDefaults, groupKeys, optimalValues, viewSettings.removedTargets]);
 
+  // A saved position is honoured exactly; pinning stars to the top only sorts charts without one.
+  const savedOrder = useMemo(() => {
+    const viewOrder = parseDashboardDefaults(viewSettings.dashboard).order ?? [];
+    return uniqueMetrics(orderedMetrics.length > 0 ? orderedMetrics : viewOrder);
+  }, [orderedMetrics, viewSettings.dashboard]);
+
   const orderedMetricKeys = useMemo(() => {
-    const keys = new Set(groupKeys);
-    const userOrdered = orderedMetrics.filter((metric) => keys.has(metric));
-    const rest = groupKeys
-      .filter((metric) => !orderedMetrics.includes(metric))
+    const position = new Map(savedOrder.map((name, index) => [name, index]));
+    const positionOf = (key: string) => position.get(chartBaseName(key)) ?? Number.POSITIVE_INFINITY;
+    const placed = groupKeys
+      .filter((key) => position.has(chartBaseName(key)))
+      .sort((a, b) => positionOf(a) - positionOf(b) || a.localeCompare(b));
+    const unplaced = groupKeys
+      .filter((key) => !position.has(chartBaseName(key)))
       .sort((a, b) => defaultOrderRank(dashboardDefaults, a) - defaultOrderRank(dashboardDefaults, b) || a.localeCompare(b));
-    return [...userOrdered, ...rest];
-  }, [dashboardDefaults, groupKeys, orderedMetrics]);
+    return [
+      ...placed,
+      ...unplaced.filter((key) => effectiveFavoriteCharts[key]),
+      ...unplaced.filter((key) => !effectiveFavoriteCharts[key]),
+    ];
+  }, [dashboardDefaults, effectiveFavoriteCharts, groupKeys, savedOrder]);
+
+  // Every chart, including hidden ones and those filtered out by search, so moving one keeps the rest in place.
+  const chartOrder = uniqueMetrics([...savedOrder, ...orderedMetricKeys]);
 
   const visibleMetricKeys = useMemo(() => {
-    const favorites = orderedMetricKeys.filter((key) => effectiveFavoriteCharts[key]);
-    const nonFavorites = orderedMetricKeys.filter((key) => !effectiveFavoriteCharts[key] && groupedMetrics[key]);
-    return [...favorites, ...nonFavorites].filter(key => !hiddenCharts.includes(key) && (!metricSearch || key.toLowerCase().includes(metricSearch.toLowerCase()) || groupedMetrics[key]?.some(name => name.toLowerCase().includes(metricSearch.toLowerCase()))));
-  }, [effectiveFavoriteCharts, groupedMetrics, orderedMetricKeys, hiddenCharts, metricSearch]);
+    return orderedMetricKeys.filter(key => !hiddenCharts.includes(chartBaseName(key)) && (!metricSearch || key.toLowerCase().includes(metricSearch.toLowerCase()) || groupedMetrics[key]?.some(name => name.toLowerCase().includes(metricSearch.toLowerCase()))));
+  }, [groupedMetrics, orderedMetricKeys, hiddenCharts, metricSearch]);
 
   const singleRunRevision =
     effectiveActiveTab === "analysis" ? "compare" : mode === "single" ? (effectiveSelectedRuns[0] ?? "none") : "compare";
@@ -559,15 +582,16 @@ function App() {
         xRange={globalXRange}
         widthMode={widthMode}
         favoriteCharts={effectiveFavoriteCharts}
-        collapsedCharts={{...flags(viewSettings.collapsedCharts), ...collapsedCharts}}
+        collapsedCharts={{...settingsByMetric(flags(viewSettings.collapsedCharts)), ...settingsByMetric(collapsedCharts)}}
         singleRunRevision={singleRunRevision}
         setFavoriteCharts={setFavoriteCharts}
         setCollapsedCharts={setCollapsedCharts}
-        setOrderedMetrics={setOrderedMetrics}
+        onReorderChart={(active, over) => setOrderedMetrics(moveChart(chartOrder, active, over))}
+        onPinChart={key => {if (savedOrder.length) setOrderedMetrics(pinChart(chartOrder, key, uniqueMetrics(groupKeys.filter(chart => effectiveFavoriteCharts[chart]))));}}
         optimalValues={effectiveOptimalValues}
         setOptimalValues={setOptimalValues}
-        logCharts={logCharts} onToggleLog={key => updateControl<Record<string,boolean>>("logCharts",previous => ({...previous,[key]:!previous[key]}),{})}
-        onHideChart={key => updateControl<string[]>("hiddenCharts",previous => [...previous,key],[])}
+        logCharts={logCharts} onToggleLog={key => updateControl<Record<string,boolean>>("logCharts",previous => {const current = settingsByMetric(previous);const metric = chartBaseName(key);return {...current,[metric]:!current[metric]};},{})}
+        onHideChart={key => updateControl<string[]>("hiddenCharts",previous => uniqueMetrics([...previous,key]),[])}
         events={[...runEvents, ...(focusedEvent && !runEvents.some(event => event.id === focusedEvent.id) ? [focusedEvent] : [])].filter(event => workspace.records.some(run => run.id === event.data.run_uid && effectiveSelectedRuns.includes(run.data.run_id)))}
         onEventSelect={selectEvent}
       />
@@ -586,7 +610,7 @@ function App() {
     dashboard: {starred: groupKeys.filter(key => effectiveFavoriteCharts[key]), order: orderedMetricKeys,
       targets: Object.fromEntries(Object.entries(effectiveOptimalValues).filter((entry): entry is [string, number] => entry[1] !== null))},
     removedTargets: Object.keys(effectiveOptimalValues).filter(key => effectiveOptimalValues[key] === null),
-    collapsedCharts: {...flags(viewSettings.collapsedCharts), ...collapsedCharts},
+    collapsedCharts: {...settingsByMetric(flags(viewSettings.collapsedCharts)), ...settingsByMetric(collapsedCharts)},
     controls: {...controls, mode, widthMode, xAxisType, smoothing, removeOutliers, xRange: globalXRange,
       reducer: comparisonReducer, baseline, comparisonStep, compareMetrics: selectedCompareMetrics, compareHyperparameters: selectedCompareHyperparameters},
     selectedRuns: effectiveSelectedRuns,
@@ -706,16 +730,14 @@ function App() {
           {workspace.capabilities && workspace.projects.length > 0 && !workspace.projects.some(project => project.id === projectId) ? <p role="status">Project unavailable. <a href="?project=default">Open the Default project</a>.</p> : null}
           {workspace.capabilities && viewChoice !== "__default__" && viewChoice !== "__none__" && !activeView ? <p role="status">Saved view unavailable. Configured defaults are active.</p> : null}
           {effectiveActiveTab === "scalars" ? <div className="workspace-toolbar chart-filter-toolbar">
-            <input type="search" aria-label="Search metrics" placeholder="Find a metric or namespace…" value={metricSearch} onChange={event => updateControl("metricSearch",event.target.value,"")} />
-            {hiddenCharts.length ? <button type="button" onClick={() => updateControl("hiddenCharts",[],[])}>Show hidden charts ({hiddenCharts.length})</button> : null}
-            <a href={`/api/export/scalars.csv?${new URLSearchParams({run_id: effectiveSelectedRuns.join(",")})}`} download="metrics-raw.csv">Export raw CSV</a>
+            <div className="metric-toolbar-heading"><h2>Metrics</h2><span>{visibleMetricKeys.length}</span></div>
+            <div className="metric-search"><Search size={15} aria-hidden="true" /><input type="search" aria-label="Search metrics" placeholder="Find a metric or namespace…" value={metricSearch} onChange={event => updateControl("metricSearch",event.target.value,"")} /></div>
+            {hiddenCharts.length ? <HiddenChartsDialog hidden={hiddenCharts} available={uniqueMetrics(groupKeys)} onShow={keys => updateControl<string[]>("hiddenCharts",previous => uniqueMetrics(previous).filter(key => !keys.includes(key)),[])} /> : null}
+            <a href={`/api/export/scalars.csv?${new URLSearchParams({run_id: effectiveSelectedRuns.join(",")})}`} download="metrics-raw.csv"><Download size={14} aria-hidden="true" />Export raw CSV</a>
           </div> : null}
           {scoreError && workspace.capabilities ? <p role="status">Scorecards unavailable: {scoreError}</p> : null}
-          {effectiveActiveTab === "scalars" && scores.some(score => score.goal) ? <div className="scorecard-grid">{scores.filter(score => score.goal).slice(0,12).map(score => <div className="comparison-card metric-scorecard" key={`${score.run_id}:${score.name}`}>
-            <small>{score.run_id} · {score.name} · {score.goal}</small><strong>{score.best?.toPrecision(5) ?? "—"}{score.unit ? ` ${score.unit}` : ""}</strong>
-            <span>Best at step {score.best_step ?? "unknown"} · last {score.last?.toPrecision(5) ?? "non-finite / missing"}</span>
-            {score.target !== null ? <span>Target {score.target} · {score.time_to_target_ms === null ? "not reached" : `reached after ${(score.time_to_target_ms/1000).toFixed(1)}s`}</span> : null}
-          </div>)}</div> : null}
+          {effectiveActiveTab === "scalars" ? <ObjectiveOverview scores={scores} showRun={effectiveSelectedRuns.length > 1}
+            open={controls.objectivesOpen === true} onOpenChange={open => updateControl("objectivesOpen",open,false)} /> : null}
           {renderActiveTab()}
           {focusedEvent && workspace.records.some(run => run.id === focusedEvent.data.run_uid && effectiveSelectedRuns.includes(run.data.run_id)) ? <div className="comparison-card"><button type="button" onClick={() => setFocusedEvent(null)}>Close event</button><h3>{focusedEvent.data.label}</h3>
             <p>{focusedEvent.data.kind} · {focusedEvent.data.step === null ? new Date(focusedEvent.data.timestamp_ms).toLocaleString() : `Step ${focusedEvent.data.step}`}</p>
