@@ -25,6 +25,7 @@ export default defineConfig({
           if (id.includes('node_modules/apache-arrow')) return 'arrow';
           if (id.includes('node_modules/@dnd-kit')) return 'dnd';
           if (id.includes('node_modules/lucide-react')) return 'icons';
+          if (id.includes('node_modules/ag-grid') || id.includes('node_modules/ag-stack')) return 'data-grid';
         },
       },
     },

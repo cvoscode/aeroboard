@@ -4,7 +4,7 @@ export interface Entity<T = Record<string, unknown>> { id: string; parent: strin
 export interface RunData {
   run_id: string; display_name: string; project_id: string; status: string; display_status: string;
   tags: string[]; notes: string; archived: boolean; provenance: Record<string, unknown>;
-  started_at_ms: number | null; ended_at_ms: number | null; last_heartbeat_ms: number | null;
+  created_at_ms?: number | null; started_at_ms: number | null; ended_at_ms: number | null; last_heartbeat_ms: number | null;
   active_session: string | null; attempt: number; error?: string | null;
   metadata_revision: number;
   delivery?: {status: string; committed_batches: number; final_sequence: number | null; dropped_rows: number};

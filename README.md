@@ -254,7 +254,7 @@ Logged hyperparameters appear in the comparison table and can be selected as axe
 
 ### Audio and video
 
-Audio and video clips appear in the **Audio / Video** tab, one card per stream with a clip slider that follows the newest clip.
+Audio and video clips appear in the **Audio and video** tab, one card per stream with a clip slider that follows the newest clip.
 
 - The SDK never transcodes video. Encode frames first (for example `ffmpeg -i frames_%04d.png -c:v libx264 -pix_fmt yuv420p out.mp4`) and log the file.
 - Each clip can be at most 32 MB. The server accepts Flight messages up to `AEROBOARD_MAX_MESSAGE_MB` (default `64`).

@@ -36,7 +36,7 @@ export function ImageTimelineViewer({ series, getImageSource, onPositionSelect }
   if (!series || !frame) {
     return (
       <div className="comparison-card empty-state-card">
-        <h3>Image Timeline</h3>
+        <h3>Image timeline</h3>
         <p>Select a run and image stream to scrub through historized frames.</p>
       </div>
     );

@@ -1,12 +1,7 @@
 import { useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
-const PALETTE = [
-  '#00d2ff', '#00e676', '#ff4c6b', '#ffeb3b', '#e040fb',
-  '#ff9800', '#9c27b0', '#60efff', '#ff6b9d', '#c3f584',
-  '#ffd166', '#06d6a0', '#ef476f', '#118ab2', '#5d7af6',
-  '#f8edeb', '#b7b7a4', '#a8dadc', '#e76f51', '#ffffff',
-];
+import { RUN_COLORS } from '../lib/runColors';
 
 interface ColorPickerProps {
   color: string;
@@ -34,9 +29,9 @@ export function ColorPicker({ color, onChange }: ColorPickerProps) {
         style={{ top: pos.top, left: pos.left }}
         onClick={(e) => e.stopPropagation()}
       >
-        <p className="color-modal-title">Trace Color</p>
+        <p className="color-modal-title">Run color</p>
         <div className="color-swatch-grid">
-          {PALETTE.map((paletteColor) => (
+          {RUN_COLORS.map((paletteColor) => (
             <button
               key={paletteColor}
               className={`swatch-btn ${paletteColor === color ? 'active' : ''}`}

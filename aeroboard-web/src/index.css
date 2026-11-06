@@ -1,129 +1,118 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&family=Outfit:wght@500;700;900&display=swap');
+@import '@fontsource/b612/400.css';
+@import '@fontsource/b612/700.css';
+@import '@fontsource/b612/400-italic.css';
 
+/*
+ * The interface stays neutral so the only saturated color on screen is data:
+ * run colors live in src/lib/runColors.ts, and text never wears them.
+ * B612 is the typeface Airbus commissioned for cockpit displays. It has two
+ * weights, 400 and 700, so use those rather than anything in between.
+ */
 :root {
   color-scheme: dark;
-  --bg-primary: #0a0a0b;
-  --bg-sidebar: #0f1115;
-  --bg-sidebar-gradient-start: #0f1115;
-  --bg-sidebar-gradient-end: #0b0d12;
-  --bg-card: rgba(255, 255, 255, 0.03);
-  --bg-overlay: #14181f;
-  --bg-page-glow-1: rgba(0, 210, 255, 0.12);
-  --bg-page-glow-2: rgba(0, 230, 118, 0.08);
-  --surface-contrast: rgba(0, 0, 0, 0.3);
-  --surface-card-strong: rgba(0, 0, 0, 0.2);
-  --surface-subtler: rgba(255, 255, 255, 0.015);
-  --surface-subtle: rgba(255, 255, 255, 0.03);
-  --surface-subtle-strong: rgba(255, 255, 255, 0.045);
-  --surface-muted: rgba(255, 255, 255, 0.04);
-  --surface-strong: rgba(255, 255, 255, 0.08);
-  --surface-stage: rgba(255, 255, 255, 0.02);
-  --surface-accent-soft: rgba(0, 210, 255, 0.1);
-  --surface-accent-strong: rgba(0, 210, 255, 0.12);
-  --surface-accent-selected: linear-gradient(135deg, rgba(0, 210, 255, 0.09), rgba(0, 230, 118, 0.05));
-  --surface-danger-soft: rgba(255, 76, 107, 0.08);
-  --surface-danger-strong: rgba(255, 76, 107, 0.14);
-  --surface-warning-soft: rgba(255, 235, 59, 0.09);
-  --text-primary: #ffffff;
-  --text-secondary: #9ba1a6;
-  --text-muted: #5e666c;
-  --text-on-accent: #00141b;
-  --text-danger: #ff8ea1;
-  --text-warning: #ffe866;
-  --run-name-color: #d9e2e7;
-  --run-version-pill-text: #c5cbd1;
-  --accent-primary: #00d2ff;
-  --accent-secondary: #00e676;
-  --accent-critical: #ff4c6b;
-  --panel-border: rgba(255, 255, 255, 0.08);
-  --panel-border-subtle: rgba(255, 255, 255, 0.05);
-  --panel-border-strong: rgba(255, 255, 255, 0.16);
-  --panel-border-accent: rgba(0, 210, 255, 0.3);
-  --panel-border-success: rgba(0, 230, 118, 0.2);
-  --panel-border-danger: rgba(255, 76, 107, 0.28);
-  --panel-border-danger-strong: rgba(255, 76, 107, 0.42);
-  --panel-border-warning: rgba(255, 235, 59, 0.32);
-  --panel-border-warning-strong: rgba(255, 235, 59, 0.42);
-  --sidebar-sheen: rgba(255, 255, 255, 0.02);
-  --sidebar-edge: rgba(255, 255, 255, 0.02);
-  --logo-gradient-start: #ffffff;
-  --shadow-main: 0 8px 32px 0 rgba(0, 0, 0, 0.5);
-  --shadow-card: 0 10px 30px rgba(0, 0, 0, 0.18);
-  --shadow-overlay: 0 24px 60px rgba(0, 0, 0, 0.8);
+  --font-ui: 'B612', system-ui, sans-serif;
+  --radius-control: 3px;
+  --radius-panel: 4px;
+  --bg-primary: #1b2026;
+  --bg-sidebar: #161a1f;
+  --bg-card: #232a32;
+  --bg-overlay: #2a323b;
+  --surface-contrast: #161a1f;
+  --surface-card-strong: #232a32;
+  --surface-subtler: rgba(255, 255, 255, 0.02);
+  --surface-subtle: rgba(255, 255, 255, 0.04);
+  --surface-subtle-strong: rgba(255, 255, 255, 0.07);
+  --surface-muted: rgba(255, 255, 255, 0.06);
+  --surface-strong: rgba(255, 255, 255, 0.1);
+  --surface-stage: #161a1f;
+  --surface-accent-soft: rgba(167, 194, 224, 0.14);
+  --surface-accent-strong: rgba(167, 194, 224, 0.2);
+  --surface-accent-selected: #2e3742;
+  --surface-danger-soft: rgba(236, 131, 120, 0.1);
+  --surface-danger-strong: rgba(236, 131, 120, 0.18);
+  --surface-warning-soft: rgba(217, 180, 95, 0.12);
+  --text-primary: #e6eaee;
+  --text-secondary: #a9b3bd;
+  --text-muted: #8a95a1;
+  --text-on-accent: #14202c;
+  --text-danger: #ec8378;
+  --text-warning: #d9b45f;
+  --run-name-color: #d3d9df;
+  --run-version-pill-text: #a9b3bd;
+  --accent-primary: #a7c2e0;
+  --accent-secondary: #a9b3bd;
+  --accent-critical: #d94f4f;
+  --panel-border: rgba(255, 255, 255, 0.11);
+  --panel-border-subtle: rgba(255, 255, 255, 0.07);
+  --panel-border-strong: rgba(255, 255, 255, 0.24);
+  --panel-border-accent: rgba(167, 194, 224, 0.45);
+  --panel-border-success: rgba(255, 255, 255, 0.11);
+  --panel-border-danger: rgba(236, 131, 120, 0.4);
+  --panel-border-danger-strong: rgba(236, 131, 120, 0.6);
+  --panel-border-warning: rgba(217, 180, 95, 0.4);
+  --panel-border-warning-strong: rgba(217, 180, 95, 0.6);
+  --shadow-overlay: 0 8px 28px rgba(0, 0, 0, 0.4);
   --shadow-overlay-ring: 0 0 0 1px rgba(255, 255, 255, 0.04);
-  --shadow-accent: 0 0 8px rgba(0, 210, 255, 0.5);
-  --shadow-accent-strong: 0 0 14px rgba(0, 210, 255, 0.7);
-  --scrollbar-thumb: rgba(255, 255, 255, 0.12);
-  --plot-axis: #9ba1a6;
-  --plot-grid: rgba(255, 255, 255, 0.05);
-  --plot-reference: #ffc940;
-  --plot-selection: rgba(0, 210, 255, 0.12);
-  --plot-selection-border: rgba(0, 210, 255, 0.78);
-  --plot-selection-inset: rgba(255, 255, 255, 0.08);
-  --parallel-axis: rgba(255, 255, 255, 0.15);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.16);
+  --plot-axis: #a9b3bd;
+  --plot-grid: rgba(255, 255, 255, 0.07);
+  --plot-reference: #d9b45f;
+  --plot-selection: rgba(167, 194, 224, 0.14);
+  --plot-selection-border: rgba(167, 194, 224, 0.7);
+  --plot-selection-inset: rgba(255, 255, 255, 0.06);
+  --parallel-axis: rgba(255, 255, 255, 0.18);
 }
 
 :root[data-theme='light'] {
   color-scheme: light;
-  --bg-primary: #eef3f8;
-  --bg-sidebar: #f5f8fc;
-  --bg-sidebar-gradient-start: #fbfdff;
-  --bg-sidebar-gradient-end: #e8eef7;
-  --bg-card: rgba(255, 255, 255, 0.72);
-  --bg-overlay: #ffffff;
-  --bg-page-glow-1: rgba(0, 114, 245, 0.1);
-  --bg-page-glow-2: rgba(10, 160, 94, 0.08);
-  --surface-contrast: rgba(255, 255, 255, 0.72);
-  --surface-card-strong: rgba(255, 255, 255, 0.78);
-  --surface-subtler: rgba(19, 32, 59, 0.02);
-  --surface-subtle: rgba(19, 32, 59, 0.04);
-  --surface-subtle-strong: rgba(19, 32, 59, 0.07);
-  --surface-muted: rgba(19, 32, 59, 0.06);
-  --surface-strong: rgba(19, 32, 59, 0.1);
-  --surface-stage: rgba(255, 255, 255, 0.84);
-  --surface-accent-soft: rgba(0, 114, 245, 0.12);
-  --surface-accent-strong: rgba(0, 114, 245, 0.1);
-  --surface-accent-selected: linear-gradient(135deg, rgba(0, 114, 245, 0.14), rgba(10, 160, 94, 0.08));
-  --surface-danger-soft: rgba(216, 58, 98, 0.1);
-  --surface-danger-strong: rgba(216, 58, 98, 0.14);
-  --surface-warning-soft: rgba(214, 158, 0, 0.12);
-  --text-primary: #13203b;
-  --text-secondary: #51627d;
-  --text-muted: #72819a;
+  --bg-primary: #e8ebea;
+  --bg-sidebar: #dde1e0;
+  --bg-card: #f7f8f7;
+  --bg-overlay: #fcfcfb;
+  --surface-contrast: #dde1e0;
+  --surface-card-strong: #f7f8f7;
+  --surface-subtler: rgba(26, 33, 39, 0.02);
+  --surface-subtle: rgba(26, 33, 39, 0.04);
+  --surface-subtle-strong: rgba(26, 33, 39, 0.07);
+  --surface-muted: rgba(26, 33, 39, 0.06);
+  --surface-strong: rgba(26, 33, 39, 0.1);
+  --surface-stage: #e8ebea;
+  --surface-accent-soft: rgba(31, 78, 134, 0.1);
+  --surface-accent-strong: rgba(31, 78, 134, 0.16);
+  --surface-accent-selected: #f7f8f7;
+  --surface-danger-soft: rgba(169, 50, 38, 0.08);
+  --surface-danger-strong: rgba(169, 50, 38, 0.14);
+  --surface-warning-soft: rgba(138, 98, 0, 0.1);
+  --text-primary: #1a2127;
+  --text-secondary: #46525c;
+  --text-muted: #59656f;
   --text-on-accent: #ffffff;
-  --text-danger: #b42349;
-  --text-warning: #8f6a00;
-  --run-name-color: #1d2943;
-  --run-version-pill-text: #465671;
-  --accent-primary: #0072f5;
-  --accent-secondary: #0aa05e;
-  --accent-critical: #d83a62;
-  --panel-border: rgba(19, 32, 59, 0.12);
-  --panel-border-subtle: rgba(19, 32, 59, 0.08);
-  --panel-border-strong: rgba(19, 32, 59, 0.2);
-  --panel-border-accent: rgba(0, 114, 245, 0.28);
-  --panel-border-success: rgba(10, 160, 94, 0.22);
-  --panel-border-danger: rgba(216, 58, 98, 0.22);
-  --panel-border-danger-strong: rgba(216, 58, 98, 0.32);
-  --panel-border-warning: rgba(214, 158, 0, 0.28);
-  --panel-border-warning-strong: rgba(214, 158, 0, 0.34);
-  --sidebar-sheen: rgba(255, 255, 255, 0.7);
-  --sidebar-edge: rgba(255, 255, 255, 0.5);
-  --logo-gradient-start: #13203b;
-  --shadow-main: 0 18px 40px rgba(34, 54, 87, 0.12);
-  --shadow-card: 0 12px 30px rgba(34, 54, 87, 0.08);
-  --shadow-overlay: 0 20px 48px rgba(34, 54, 87, 0.18);
-  --shadow-overlay-ring: 0 0 0 1px rgba(19, 32, 59, 0.08);
-  --shadow-accent: 0 0 0 4px rgba(0, 114, 245, 0.12);
-  --shadow-accent-strong: 0 0 0 6px rgba(0, 114, 245, 0.18);
-  --scrollbar-thumb: rgba(19, 32, 59, 0.18);
-  --plot-axis: #51627d;
-  --plot-grid: rgba(19, 32, 59, 0.12);
-  --plot-reference: #b26a00;
-  --plot-selection: rgba(0, 114, 245, 0.12);
-  --plot-selection-border: rgba(0, 114, 245, 0.55);
-  --plot-selection-inset: rgba(255, 255, 255, 0.5);
-  --parallel-axis: rgba(19, 32, 59, 0.18);
+  --text-danger: #a93226;
+  --text-warning: #8a6200;
+  --run-name-color: #27313a;
+  --run-version-pill-text: #46525c;
+  --accent-primary: #1f4e86;
+  --accent-secondary: #46525c;
+  --accent-critical: #a93226;
+  --panel-border: rgba(26, 33, 39, 0.16);
+  --panel-border-subtle: rgba(26, 33, 39, 0.1);
+  --panel-border-strong: rgba(26, 33, 39, 0.34);
+  --panel-border-accent: rgba(31, 78, 134, 0.5);
+  --panel-border-success: rgba(26, 33, 39, 0.16);
+  --panel-border-danger: rgba(169, 50, 38, 0.36);
+  --panel-border-danger-strong: rgba(169, 50, 38, 0.55);
+  --panel-border-warning: rgba(138, 98, 0, 0.36);
+  --panel-border-warning-strong: rgba(138, 98, 0, 0.55);
+  --shadow-overlay: 0 8px 28px rgba(26, 33, 39, 0.2);
+  --shadow-overlay-ring: 0 0 0 1px rgba(26, 33, 39, 0.06);
+  --scrollbar-thumb: rgba(26, 33, 39, 0.24);
+  --plot-axis: #46525c;
+  --plot-grid: rgba(26, 33, 39, 0.1);
+  --plot-reference: #8a6200;
+  --plot-selection: rgba(31, 78, 134, 0.1);
+  --plot-selection-border: rgba(31, 78, 134, 0.6);
+  --plot-selection-inset: rgba(255, 255, 255, 0.4);
+  --parallel-axis: rgba(26, 33, 39, 0.22);
 }
 
 html,
@@ -139,17 +128,15 @@ body,
 }
 
 body {
-  font-family: 'Inter', sans-serif;
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.4;
   background-color: var(--bg-primary);
-  background-image: 
-    radial-gradient(circle at 15% 50%, var(--bg-page-glow-1) 0%, transparent 50%),
-    radial-gradient(circle at 85% 30%, var(--bg-page-glow-2) 0%, transparent 50%);
   color: var(--text-primary);
   min-height: 100vh;
   overflow-x: hidden;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  transition: background-color 0.25s ease, color 0.25s ease;
 }
 
 button,
@@ -159,63 +146,16 @@ textarea {
   font: inherit;
 }
 
-/* Glassmorphism Classes */
-.glass-panel {
-  background: var(--bg-card);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid var(--panel-border);
-  border-radius: 16px;
-  box-shadow: var(--shadow-main);
-}
-
-.gradient-text {
-  background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-secondary) 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  color: transparent;
-}
-
-/* Animations */
-@keyframes pulse {
-  0% { transform: scale(1); opacity: 0.8; }
-  50% { transform: scale(1.05); opacity: 1; }
-  100% { transform: scale(1); opacity: 0.8; }
-}
-
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-.animate-fade-in {
-  animation: fadeIn 0.4s ease-out forwards;
-}
-
-/* uPlot Overrides for Modern Look */
-.u-title {
-  font-family: 'Outfit', sans-serif !important;
-  color: var(--text-primary) !important;
-  font-weight: 700 !important;
-}
-
+/* uPlot */
 .u-legend {
   color: var(--text-secondary) !important;
-  font-family: 'Inter', sans-serif !important;
 }
 
 .u-axis-text {
   fill: var(--text-secondary) !important;
-  font-family: 'Inter', sans-serif !important;
   font-size: 11px !important;
 }
 
 .u-grid {
   stroke: var(--plot-grid) !important;
-}
-
-.u-wrap {
-  border-radius: 8px;
-  overflow: hidden;
 }

@@ -1,6 +1,5 @@
 import { useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { AlertTriangle } from 'lucide-react';
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -24,12 +23,14 @@ export function ConfirmDialog({
   dangerous = false,
 }: ConfirmDialogProps) {
   const confirmRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
 
+  // A stray Enter must not confirm something that can't be undone.
   useEffect(() => {
     if (open) {
-      confirmRef.current?.focus();
+      (dangerous ? cancelRef : confirmRef).current?.focus();
     }
-  }, [open]);
+  }, [open, dangerous]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -53,22 +54,15 @@ export function ConfirmDialog({
         aria-modal="true"
         aria-labelledby="confirm-dialog-title"
       >
-        <div className="confirm-dialog-icon">
-          {dangerous ? (
-            <AlertTriangle size={24} />
-          ) : (
-            <AlertTriangle size={24} />
-          )}
-        </div>
         <h2 id="confirm-dialog-title" className="confirm-dialog-title">
           {title}
         </h2>
         <p className="confirm-dialog-message">{message}</p>
         <div className="confirm-dialog-actions">
           <button
+            ref={cancelRef}
             className="confirm-dialog-cancel"
             onClick={onCancel}
-            autoFocus
           >
             {cancelLabel}
           </button>

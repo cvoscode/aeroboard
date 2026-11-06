@@ -14,11 +14,12 @@ try {
   await page.goto(`${base}/?project=examples`);
   await page.getByLabel("Project", {exact: true}).waitFor();
   assert.equal(await page.locator(".main-header").getByLabel("View", {exact: true}).count(), 1);
-  assert.equal(await page.locator(".dashboard-content .workspace-panel").count(), 0);
+  assert.equal(await page.locator(".dashboard-content .workspace-panel:visible").count(), 0);
   assert.equal(await page.getByRole("dialog").count(), 0);
   await page.waitForFunction(() => document.querySelectorAll(".metric-scorecard").length > 0);
   await page.getByRole("searchbox", {name: "Search metrics"}).fill("loss");
-  await page.getByTitle("Toggle logarithmic y-axis").first().click();
+  await page.getByRole("combobox", {name: /^Y-axis scale for /}).first().selectOption("log");
+  await page.getByRole("button", {name: /^Linear trend for /}).first().click();
   await page.getByRole("button", {name: "Project and view settings", exact: true}).click();
   await page.getByLabel("View name").fill(`Browser check ${Date.now()}`);
   const saved = page.waitForResponse(response => response.request().method() === "POST" && response.url().includes("/views"));
@@ -30,7 +31,8 @@ try {
   shared.on("pageerror", error => errors.push(String(error)));
   await shared.goto(`${base}/?project=examples&view=${view.id}`);
   await shared.waitForFunction(() => document.querySelector('input[aria-label="Search metrics"]')?.value === "loss");
-  assert.equal(await shared.getByTitle("Toggle logarithmic y-axis").first().textContent(), "Log");
+  assert.equal(await shared.getByRole("combobox", {name: /^Y-axis scale for /}).first().inputValue(), "log");
+  assert.equal(await shared.getByRole("button", {name: /^Linear trend for /}).first().getAttribute("aria-pressed"), "true");
   await shared.locator(".chart-card canvas").first().waitFor();
   const image = shared.waitForEvent("download");
   await shared.getByRole("button", {name: "PNG", exact: true}).first().click();
@@ -58,7 +60,7 @@ try {
   await boxes.nth(0).check(); await boxes.nth(1).check();
   await shared.getByRole("button", {name: "Compare selected (2)"}).click();
   assert.equal(await shared.getByRole("dialog").count(), 0);
-  await shared.getByRole("tab", {name: "Hyperparameter Analysis"}).click();
+  await shared.getByRole("tab", {name: "Hyperparameters"}).click();
   await shared.getByRole("button", {name: "val/loss", exact: true}).click();
   await shared.getByLabel("Metric reducer").selectOption("best");
   const baseline = shared.getByLabel("Baseline run");

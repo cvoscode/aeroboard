@@ -1,17 +1,21 @@
 import { DndContext, KeyboardSensor, PointerSensor, closestCenter, pointerWithin, useSensor, useSensors, type CollisionDetection, type DragEndEvent } from "@dnd-kit/core";
-import { SortableContext, rectSortingStrategy, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
+import { SortableContext, rectSortingStrategy, sortableKeyboardCoordinates, verticalListSortingStrategy } from "@dnd-kit/sortable";
 
 import type { TimeSeriesData } from "../hooks/useAeroboard";
 import type { XAxisType } from "./LineChart";
 import type { WidthMode } from "../hooks/useDashboardPreferences";
 import { SortableMetricChart } from "./SortableMetricChart";
 import { chartBaseName } from "../lib/dashboardDefaults";
+import { RUN_COLORS } from "../lib/runColors";
 import type { RunEvent } from "../hooks/useWorkspace";
+import type { YAxisScale } from "../lib/chartScale";
+import type { MetricGroup } from "../lib/metricGroups";
+import { SortableMetricGroup } from "./SortableMetricGroup";
 
 const STAGE_COLORS: Record<string, string> = {
-  train: "#00d2ff",
-  val: "#ff4c6b",
-  test: "#00e676",
+  train: RUN_COLORS[0],
+  val: RUN_COLORS[1],
+  test: RUN_COLORS[2],
 };
 
 /** Cards differ in height, so the drop follows the pointer; the keyboard has none and uses card centers. */
@@ -21,12 +25,18 @@ const dropTarget: CollisionDetection = (args) => {
 };
 
 interface MetricChartGridProps {
-  logCharts: Record<string, boolean>;
-  onToggleLog: (key: string) => void;
+  chartScales: Record<string, YAxisScale>;
+  onScaleChange: (key: string, scale: YAxisScale) => void;
+  trendCharts: Record<string, boolean>;
+  onToggleTrend: (key: string) => void;
   onHideChart: (key: string) => void;
   events: RunEvent[];
   onEventSelect: (event: RunEvent) => void;
   visibleMetricKeys: string[];
+  metricGroups: MetricGroup[];
+  metricSearch: string;
+  onToggleHiddenGroup: (id: string) => void;
+  onReorderGroup: (active: string, over: string) => void;
   groupedMetrics: Record<string, string[]>;
   currentMode: "single" | "compare";
   effectiveSelectedRuns: string[];
@@ -51,8 +61,12 @@ interface MetricChartGridProps {
 }
 
 export function MetricChartGrid({
-  logCharts, onToggleLog, onHideChart, events, onEventSelect,
+  chartScales, onScaleChange, trendCharts, onToggleTrend, onHideChart, events, onEventSelect,
   visibleMetricKeys,
+  metricGroups,
+  metricSearch,
+  onToggleHiddenGroup,
+  onReorderGroup,
   groupedMetrics,
   currentMode,
   effectiveSelectedRuns,
@@ -92,11 +106,11 @@ export function MetricChartGrid({
     if (over && active.id !== over.id) onReorderChart(String(active.id), String(over.id));
   };
 
-  return (
+  const renderCharts = (keys: string[]) => (
     <DndContext sensors={sensors} collisionDetection={dropTarget} onDragEnd={handleDragEnd}>
-      <SortableContext items={visibleMetricKeys} strategy={rectSortingStrategy}>
+      <SortableContext items={keys} strategy={rectSortingStrategy}>
         <div className={`grid-layout grid-layout--${widthMode}`}>
-          {visibleMetricKeys.map((groupKey) => {
+          {keys.map((groupKey) => {
             const targets = groupedMetrics[groupKey];
             if (!targets) return null;
 
@@ -146,7 +160,8 @@ export function MetricChartGrid({
                 onToggleCollapse={() => setCollapsedCharts((prev) => ({ ...prev, [chartBaseName(groupKey)]: !isChartCollapsed(groupKey) }))}
                 optimalValue={optimalValues[groupKey] ?? null}
                 onOptimalValueChange={(value) => setOptimalValue(groupKey, value)}
-                logarithmic={!!logCharts[chartBaseName(groupKey)]} onToggleLog={() => onToggleLog(groupKey)} onHide={() => onHideChart(groupKey)}
+                yAxisScale={chartScales[chartBaseName(groupKey)] ?? "linear"} onScaleChange={scale => onScaleChange(groupKey, scale)} onHide={() => onHideChart(groupKey)}
+                showTrend={!!trendCharts[chartBaseName(groupKey)]} onToggleTrend={() => onToggleTrend(groupKey)}
                 markers={events.flatMap(event => {
                   const position = xAxisType === "step" ? event.data.step : xAxisType === "wall" ? event.data.timestamp_ms / 1000 : seriesData[0] ? event.data.timestamp_ms / 1000 - seriesData[0].fullData.wallTimes[0] : null;
                   return position === null ? [] : [{id: event.id, x: position, label: event.data.label}];
@@ -158,5 +173,40 @@ export function MetricChartGrid({
         </div>
       </SortableContext>
     </DndContext>
+  );
+
+  if (!metricGroups.length) return renderCharts(visibleMetricKeys);
+
+  const assigned = new Set(metricGroups.flatMap(group => group.metrics));
+  const ungrouped = visibleMetricKeys.filter(key => !assigned.has(chartBaseName(key)));
+  const needle = metricSearch.trim().toLowerCase();
+  const sections = metricGroups.map(group => ({
+    group, keys: visibleMetricKeys.filter(key => group.metrics.includes(chartBaseName(key))),
+  })).filter(({ group, keys }) => !needle || keys.length > 0 || group.name.toLowerCase().includes(needle));
+
+  return (
+    <div className="metric-group-stack">
+      <DndContext sensors={sensors} collisionDetection={dropTarget} onDragEnd={({ active, over }) => {
+        if (over && active.id !== over.id) onReorderGroup(String(active.id), String(over.id));
+      }}>
+        <SortableContext items={sections.map(({ group }) => group.id)} strategy={verticalListSortingStrategy}>
+          {sections.map(({ group, keys }, index) => (
+            <SortableMetricGroup key={group.id} group={group} chartCount={keys.length}
+              canMoveUp={index > 0} canMoveDown={index < sections.length - 1}
+              onToggleHidden={() => onToggleHiddenGroup(group.id)}
+              onMoveUp={() => onReorderGroup(group.id, sections[index - 1].group.id)}
+              onMoveDown={() => onReorderGroup(group.id, sections[index + 1].group.id)}>
+              {keys.length ? renderCharts(keys) : <p className="metric-group-empty">No visible charts in the selected runs.</p>}
+            </SortableMetricGroup>
+          ))}
+        </SortableContext>
+      </DndContext>
+      {ungrouped.length ? (
+        <section className="metric-group" aria-label="Ungrouped metrics">
+          <h2 className="ungrouped-metrics-title">Ungrouped</h2>
+          {renderCharts(ungrouped)}
+        </section>
+      ) : null}
+    </div>
   );
 }

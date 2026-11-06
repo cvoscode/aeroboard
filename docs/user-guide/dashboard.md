@@ -17,13 +17,23 @@ This split lets the UI recover existing data after a refresh and then continue u
 
 The current UI is oriented around experiment inspection and comparison.
 
-The top bar contains project and saved-view selection, followed by the page tabs. The left drawer holds run selection and chart controls. On smaller screens, open it with **Controls**.
+The top bar contains project and saved-view selection, followed by the page tabs. The left panel lists your runs, newest first, grouped by experiment. Hover a row for its full name, or delete a run or a whole group with its trash icon. **Delete all runs** removes every run on the server, in all projects. Chart settings sit above the charts. On smaller screens, open the run list with **Runs**.
 
 Use the metrics search to narrow the chart list. **Show hidden charts** opens a list where you pick which charts to bring back; a chart marked *Not in selected runs* reappears once a selected run reports it. **Metric objectives** is a slim bar that stays closed until you open it, and it remembers your choice; it reports how many targets were reached, and each tile shows a metric's best value. **Compact**, **Wide**, and **Full** adjust chart width to the available space. Cards in a row share the same height, every expanded chart is the same size, and long titles wrap at `/`, `.`, and `_`. Target values appear on their plot lines; the crosshair button opens the target editor.
+
+In persistent storage modes, the trash button on a run card deletes that run and its stored data after confirmation. The trash button on a group header deletes every version in that group, including versions hidden by the run filter. Other groups are kept.
 
 ### Scalar charts
 
 Scalar metrics are decoded from Arrow IPC frames and stored in typed arrays before being rendered with `uPlot`.
+
+Hover over a chart to see the nearest step or timestamp and each series' value at that position. With smoothing enabled, the tooltip shows both raw and smoothed values. A dash means the series has no sample at that position.
+
+Each chart's scale selector offers **Linear**, **Log**, and **Exponential**. Exponential gives small differences near the high end of the displayed range more space. It supports zero and negative values, and the axis labels, hover values, and target lines remain in the original units. Scale choices are saved per metric and shared between single-run and compare mode.
+
+Drag across a chart to zoom in, and double-click to reset. The y-axis refits to what is on screen, for drag zooms and for the **Range** slider alike, so a target line outside the zoomed view moves off the chart until you zoom back out.
+
+Use the trend button beside the scale selector to add a dashed linear trend for each trace. Trends fit raw samples in the visible window and update when you zoom, adjust the window, or receive live data. Hover values include the fitted values. At least two distinct x positions are needed. Trend choices are saved per metric and shared between single-run and compare mode. The fit uses original units, so nonlinear axes can make it appear curved.
 
 Practical implications:
 
@@ -63,13 +73,21 @@ For defaults shared by all runs, create `aeroboard.toml` in the directory where 
 
 Use each chart's star button to pin it, drag a chart by its header to reorder it, or click the crosshair to add or edit a target. A dragged chart stays where you drop it, even among pinned charts. Targets appear as dashed horizontal lines, and the y-axis grows to keep them visible.
 
-Your browser saves chart changes and gives them priority over the training script and server defaults. Stars, hidden charts, collapsed charts, order, targets, and the log scale belong to the metric, so they apply in both single-run and compare mode: changing `val/loss` also changes `train/loss`, and both follow the `loss` chart. Choose **Reset chart layout** in the sidebar to apply the configured initial view again, including any target you removed manually.
+Choose **Metric groups** to create named groups such as **Losses** and **Metrics**, then select the charts to include. Click a group's heading to hide or show all its charts. Drag the group's grip, or use its up/down buttons, to move the whole group. Charts can still be reordered within each group. Group membership, visibility, and order are saved in your browser and included in saved views, and apply in both single-run and compare mode. Searching also matches group names. To change membership or rename a group, select it in **Metric groups**; **Ungroup charts** removes the group and returns its charts to the ungrouped section. Individually hidden charts stay hidden when you show their group again.
+
+Your browser saves chart changes and gives them priority over the training script and server defaults. Stars, hidden charts, collapsed charts, order, targets, and the y-axis scale belong to the metric, so they apply in both single-run and compare mode: changing `val/loss` also changes `train/loss`, and both follow the `loss` chart. Choose **Reset chart layout** above the charts to apply the configured initial view again, including any target you removed manually.
 
 Full metric names such as `val/loss` also match the grouped `loss` chart in single-run mode. Per-run targets override server targets even when one uses a full name and the other uses a chart name. When comparing runs, the first selected run with a matching target supplies that chart's line.
 
 ### Comparison views
 
 Hyperparameters are especially useful in views that compare multiple runs side by side. If you want those views to be meaningful, log hyperparameters early in the run.
+
+In **Hyperparameters**, the comparison table uses AG Grid Community, with virtual scrolling for rows and columns and pinned run names. Click a header to sort, Shift-click to sort by several columns, drag headers to reorder them, or drag their edges to resize. Each column has a text or numeric filter; the search field searches across run names, statuses, hyperparameters, and metrics. **Clear filters** resets both kinds of filter. CSV exports follow the grid's current filters, sort order, and column order, and retain the original hyperparameter values.
+
+Long configuration values stay compact; click one to inspect its full contents in a dialog. Choose a baseline to see configuration differences grouped by run, with nested fields such as `encoder.dropout` compared separately. JSON and Python dictionary values are supported.
+
+Parallel coordinates keep numeric axes spaced apart and scroll horizontally when you select many fields. Missing values leave gaps instead of removing a run; the legend reports how many observations each run has. Constant axes place all observations at the center. Metric axes use the same **Last observation**, **Best (defined goal)**, or **At training step** reducer as the comparison table.
 
 ### Image timeline
 

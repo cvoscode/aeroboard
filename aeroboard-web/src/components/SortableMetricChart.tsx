@@ -1,5 +1,6 @@
 import { useRef, useState, type CSSProperties, type FormEvent } from "react";
-import { ChevronDown, ChevronRight, Crosshair, Download, EyeOff, GripVertical, Star } from "lucide-react";
+import { RUN_COLORS } from "../lib/runColors";
+import { ChevronDown, ChevronRight, Crosshair, Download, EyeOff, GripVertical, Star, TrendingUp } from "lucide-react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
@@ -8,10 +9,13 @@ import { MetricName } from "./MetricName";
 import { exportChart } from "../lib/export";
 import type { TimeSeriesData } from "../hooks/useAeroboard";
 import type { WidthMode } from "../hooks/useDashboardPreferences";
+import type { YAxisScale } from "../lib/chartScale";
 
 interface SortableMetricChartProps {
-  logarithmic: boolean;
-  onToggleLog: () => void;
+  yAxisScale: YAxisScale;
+  onScaleChange: (scale: YAxisScale) => void;
+  showTrend: boolean;
+  onToggleTrend: () => void;
   onHide: () => void;
   markers: ChartMarker[];
   onMarkerSelect: (id: string) => void;
@@ -34,7 +38,7 @@ interface SortableMetricChartProps {
 }
 
 export function SortableMetricChart({
-  logarithmic, onToggleLog, onHide, markers, onMarkerSelect,
+  yAxisScale, onScaleChange, showTrend, onToggleTrend, onHide, markers, onMarkerSelect,
   id,
   groupKey,
   seriesData,
@@ -92,11 +96,10 @@ export function SortableMetricChart({
       style={style}
       className={`chart-card width-${widthMode} ${collapsed ? "collapsed" : ""} ${favorite ? "favorite" : ""}`}
     >
-      <div className="chart-card-glow" />
       <div
         className="chart-header"
         onPointerDown={event => {
-          if (!(event.target as Element).closest("button, input, a")) listeners?.onPointerDown(event);
+          if (!(event.target as Element).closest("button, input, select, a")) listeners?.onPointerDown(event);
         }}
       >
         <div className="chart-header-left">
@@ -112,18 +115,30 @@ export function SortableMetricChart({
         <div className="chart-legend">
           {seriesData.map((series) => (
             <div key={series.name} className="legend-item">
-              <span className="legend-dot" style={{ backgroundColor: series.color || "#00d2ff" }} />
+              <span className="legend-dot" style={{ backgroundColor: series.color || RUN_COLORS[0] }} />
               <span className="legend-label" title={series.name}>{series.name}</span>
-              <span className="legend-val" style={{ color: series.color || "var(--accent-secondary)" }}>
+              <span className="legend-val">
                 {series.fullData.values[series.fullData.count - 1]?.toFixed(4)}
               </span>
             </div>
           ))}
+          {showTrend ? <span className="trend-legend"><span aria-hidden="true" />Linear trend</span> : null}
         </div>
 
         <div className="chart-actions">
-          <button type="button" className="chip-btn" aria-pressed={logarithmic} onClick={onToggleLog} title="Toggle logarithmic y-axis">{logarithmic ? "Log" : "Linear"}</button>
-          <button type="button" className="chart-icon-btn" aria-label="PNG" title="Download chart as PNG" disabled={collapsed} onClick={() => exportChart(cardRef.current,`${groupKey} · ${xAxisType} · smoothing ${smoothing} · ${removeOutliers ? "trimmed" : "all values"}`)}><Download size={14} /></button>
+          <select className="chart-scale-select" aria-label={`Y-axis scale for ${groupKey}`} value={yAxisScale}
+            title={yAxisScale === "exponential" ? "Exponential: expands differences near the high end" : "Y-axis scale"}
+            onChange={event => onScaleChange(event.target.value as YAxisScale)}>
+            <option value="linear">Linear</option>
+            <option value="log">Log</option>
+            <option value="exponential">Exponential</option>
+          </select>
+          <button type="button" className={`chart-icon-btn ${showTrend ? "is-active" : ""}`}
+            aria-label={`Linear trend for ${groupKey}`} aria-pressed={showTrend} onClick={onToggleTrend}
+            title={showTrend ? "Hide linear trends" : "Show linear trends fitted to raw samples in the visible window"}>
+            <TrendingUp size={14} />
+          </button>
+          <button type="button" className="chart-icon-btn" aria-label="PNG" title="Download chart as PNG" disabled={collapsed} onClick={() => exportChart(cardRef.current,`${groupKey} · ${xAxisType} · ${yAxisScale}${showTrend ? " · linear trend" : ""} · smoothing ${smoothing} · ${removeOutliers ? "trimmed" : "all values"}`)}><Download size={14} /></button>
           <button type="button" className="chart-icon-btn" aria-label={`Hide ${groupKey}`} onClick={onHide} title="Hide this chart"><EyeOff size={14} /></button>
           <button
             className={`favorite-toggle optimal-toggle ${optimalValue !== null ? "is-active" : ""}`}
@@ -183,7 +198,6 @@ export function SortableMetricChart({
         </form>
       ) : null}
 
-      {logarithmic ? <p className="workspace-hint">Log scale shows positive finite samples only.{optimalValue !== null && optimalValue <= 0 ? " The nonpositive target line is hidden." : ""}</p> : null}
       {markers.length ? <div className="chart-event-markers">{markers.slice(-12).map(marker => <button key={marker.id} type="button" onClick={() => onMarkerSelect(marker.id)} title={marker.label}>◆ {marker.label}</button>)}</div> : null}
       {!collapsed && (
         <div className="plot-container">
@@ -197,7 +211,8 @@ export function SortableMetricChart({
             removeOutliers={removeOutliers}
             xRange={xRange}
             referenceValue={optimalValue}
-            logarithmic={logarithmic} markers={markers} onMarkerSelect={onMarkerSelect}
+            yAxisScale={yAxisScale} markers={markers} onMarkerSelect={onMarkerSelect}
+            showTrend={showTrend}
             height={280}
           />
         </div>

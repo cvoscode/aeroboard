@@ -1,125 +1,87 @@
-import type { RunSummary } from '../hooks/useAeroboard';
+import { useEffect, useRef, useState } from "react";
+import { RUN_COLORS } from "../lib/runColors";
+import type { RunSummary } from "../hooks/useAeroboard";
+import type { Score } from "../hooks/useWorkspace";
+import type { Reducer } from "../lib/comparison";
+import { axisLabelLines, formatAxisValue, parallelAxes, parallelPoints } from "../lib/parallelCoordinates";
 
 interface ParallelCoordinatesProps {
   runs: RunSummary[];
   selectedHyperparameters: string[];
   selectedMetrics: string[];
   runColors: Record<string, string>;
+  scores: Score[];
+  reducer: Reducer;
 }
 
-function parseNumeric(value: string): number | null {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
+export function ParallelCoordinates({ runs, selectedHyperparameters, selectedMetrics, runColors, scores, reducer }: ParallelCoordinatesProps) {
+  const container = useRef<HTMLDivElement>(null);
+  const [availableWidth, setAvailableWidth] = useState(640);
+  const axes = parallelAxes(runs, selectedHyperparameters, selectedMetrics, scores, reducer);
+  const hasChart = runs.length > 0 && axes.length >= 2;
+  useEffect(() => {
+    const element = container.current;
+    if (!element) return;
+    const observer = new ResizeObserver(entries => setAvailableWidth(entries[0].contentRect.width));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [hasChart]);
 
-interface AxisDescriptor {
-  key: string;
-  label: string;
-  getValue: (run: RunSummary) => number | null;
-}
-
-export function ParallelCoordinates({ runs, selectedHyperparameters, selectedMetrics, runColors }: ParallelCoordinatesProps) {
-  const axes: AxisDescriptor[] = [
-    ...selectedHyperparameters.map((key) => ({
-      key: `hp:${key}`,
-      label: key,
-      getValue: (run: RunSummary) => {
-        const hp = run.hyperparameters.find((entry) => entry.key === key);
-        return hp ? parseNumeric(hp.value) : null;
-      },
-    })),
-    ...selectedMetrics.map((key) => ({
-      key: `metric:${key}`,
-      label: key,
-      getValue: (run: RunSummary) => run.metric_summaries.find((entry) => entry.name === key)?.last ?? null,
-    })),
-  ];
-
-  const usableAxes = axes.filter((axis) => runs.some((run) => axis.getValue(run) !== null));
-
-  if (runs.length === 0 || usableAxes.length < 2) {
-    return (
-      <div className="comparison-card empty-state-card">
-        <h3>Parallel Coordinates</h3>
-        <p>Choose at least two numeric hyperparameters or metrics to draw the comparison.</p>
-      </div>
-    );
+  if (!hasChart) {
+    return <div className="comparison-card empty-state-card">
+      <h3>Parallel coordinates</h3>
+      <p>Choose at least two numeric hyperparameters or metrics with observations for the selected reducer.</p>
+    </div>;
   }
 
-  const width = 900;
-  const height = 360;
-  const padding = { top: 28, right: 30, bottom: 42, left: 30 };
-  const axisSpacing = usableAxes.length > 1 ? (width - padding.left - padding.right) / (usableAxes.length - 1) : 0;
-
-  const ranges = usableAxes.map((axis) => {
-    const values = runs.map((run) => axis.getValue(run)).filter((value): value is number => value !== null);
-    if (values.length === 0) {
-      return { min: 0, max: 1 };
-    }
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    return { min, max: max === min ? max + 1 : max };
-  });
-
-  const lines = runs.map((run) => {
-    const points = usableAxes.map((axis, index) => {
-      const value = axis.getValue(run);
-      if (value === null) {
-        return null;
-      }
-      const range = ranges[index];
-      const ratio = (value - range.min) / (range.max - range.min);
-      const x = padding.left + index * axisSpacing;
-      const y = padding.top + (1 - ratio) * (height - padding.top - padding.bottom);
-      return { x, y, value };
-    });
-
-    if (points.some((point) => point === null)) {
-      return null;
-    }
-
-    return {
-      run,
-      path: points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${(point as { x: number; y: number }).x} ${(point as { x: number; y: number }).y}`).join(' '),
-      points: points as { x: number; y: number; value: number }[],
-    };
-  }).filter((line): line is { run: RunSummary; path: string; points: { x: number; y: number; value: number }[] } => line !== null);
+  const height = 400;
+  const padding = { top: 36, right: 72, bottom: 84, left: 72 };
+  const width = Math.max(availableWidth, 640, (axes.length - 1) * 160 + padding.left + padding.right);
+  const spacing = (width - padding.left - padding.right) / (axes.length - 1);
+  const plotHeight = height - padding.top - padding.bottom;
+  const lines = runs.map((run, index) => ({ run, ...parallelPoints(axes, index, spacing, padding.top, plotHeight, padding.left) }));
 
   return (
-    <div className="comparison-card">
+    <div className="comparison-card parallel-card">
       <div className="comparison-card-header">
         <div>
-          <h3>Parallel Coordinates</h3>
-          <p>Selected numeric hyperparameters + metrics</p>
+          <h3>Parallel coordinates</h3>
+          <p>{axes.length} numeric axes · {reducer === "at_step" ? "At training step" : reducer === "best" ? "Best (defined goal)" : "Last observation"}. Gaps indicate missing values.</p>
         </div>
       </div>
-      <div className="parallel-svg-wrap">
-        <svg viewBox={`0 0 ${width} ${height}`} className="parallel-svg" role="img" aria-label="Parallel coordinates chart">
-          {usableAxes.map((axis, index) => {
-            const x = padding.left + index * axisSpacing;
-            const range = ranges[index];
-            return (
-              <g key={axis.key}>
-                <line x1={x} y1={padding.top} x2={x} y2={height - padding.bottom} className="parallel-axis" />
-                <text x={x} y={height - 12} textAnchor="middle" className="parallel-axis-label">{axis.label}</text>
-                <text x={x} y={padding.top - 8} textAnchor="middle" className="parallel-axis-range">{range.max.toFixed(3)}</text>
-                <text x={x} y={height - padding.bottom + 14} textAnchor="middle" className="parallel-axis-range">{range.min.toFixed(3)}</text>
-              </g>
-            );
+      <p className="comparison-scroll-hint">Scroll horizontally to explore all axes. Hover over a point for its run and value.</p>
+      <div ref={container} className="parallel-svg-wrap" tabIndex={0} role="region" aria-label="Scrollable parallel coordinates">
+        <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="parallel-svg" role="img" aria-label="Parallel coordinates chart">
+          {axes.map((axis, index) => {
+            const x = padding.left + index * spacing;
+            return <g key={axis.key} className="parallel-axis-group" data-axis={axis.key}>
+              <title>{axis.label}</title>
+              <line x1={x} y1={padding.top} x2={x} y2={height - padding.bottom} className="parallel-axis" />
+              <text x={x} y={height - padding.bottom + 40} textAnchor="middle" className="parallel-axis-label">
+                {axisLabelLines(axis.label).map((line, row) => <tspan key={row} x={x} dy={row ? 14 : 0}>{line}</tspan>)}
+              </text>
+              {axis.min === axis.max ? (
+                <text x={x} y={padding.top - 12} textAnchor="middle" className="parallel-axis-range">{formatAxisValue(axis.min)} (constant)</text>
+              ) : <>
+                <text x={x} y={padding.top - 12} textAnchor="middle" className="parallel-axis-range">{formatAxisValue(axis.max)}</text>
+                <text x={x} y={height - padding.bottom + 18} textAnchor="middle" className="parallel-axis-range">{formatAxisValue(axis.min)}</text>
+              </>}
+            </g>;
           })}
-
-          {lines.map(({ run, path, points }) => (
-            <g key={run.run_id}>
-              <path d={path} fill="none" stroke={runColors[run.run_id] ?? '#00d2ff'} strokeWidth="2.2" strokeOpacity="0.85" />
-              {points.map((point, index) => (
-                <circle key={`${run.run_id}-${index}`} cx={point.x} cy={point.y} r="3.5" fill={runColors[run.run_id] ?? '#00d2ff'}>
-                  <title>{`${run.run_id} • ${usableAxes[index].label}: ${point.value.toFixed(4)}`}</title>
-                </circle>
-              ))}
-            </g>
-          ))}
+          {lines.map(({ run, path, points }) => <g key={run.run_id} className="parallel-run" data-run={run.run_id}>
+            <path d={path} fill="none" stroke={runColors[run.run_id] ?? RUN_COLORS[0]} strokeWidth="2.2" strokeOpacity="0.8" />
+            {points.map(point => <circle key={point.axisIndex} cx={point.x} cy={point.y} r="4" fill={runColors[run.run_id] ?? RUN_COLORS[0]}>
+              <title>{`${run.run_id} • ${axes[point.axisIndex].label}: ${point.value}`}</title>
+            </circle>)}
+          </g>)}
         </svg>
       </div>
+      <ul className="parallel-legend" aria-label="Parallel coordinates runs">
+        {lines.map(({ run, points }) => <li key={run.run_id}>
+          <span className="legend-dot" style={{ backgroundColor: runColors[run.run_id] ?? RUN_COLORS[0] }} />
+          <span>{run.run_id}</span><small>{points.length}/{axes.length} values</small>
+        </li>)}
+      </ul>
     </div>
   );
 }

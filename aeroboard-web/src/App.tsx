@@ -1,22 +1,27 @@
 import React, { lazy, Suspense, useEffect, useMemo, useState } from "react";
-import { Activity, Download, Search } from "lucide-react";
+import { Download, Search } from "lucide-react";
 
 import "./App.css";
 import "./workspace.css";
 import { DashboardHeader } from "./components/DashboardHeader";
+import { ChartControls, ComparisonAxes } from "./components/ViewControls";
 import { DashboardSidebar } from "./components/DashboardSidebar";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { HiddenChartsDialog } from "./components/HiddenChartsDialog";
 import { MetricChartGrid } from "./components/MetricChartGrid";
+import { MetricGroupsDialog } from "./components/MetricGroupsDialog";
 import { ObjectiveOverview } from "./components/ObjectiveOverview";
 import { useAeroboard } from "./hooks/useAeroboard";
 import { useDashboardPreferences, type WidthMode } from "./hooks/useDashboardPreferences";
 import { usePersistentState } from "./hooks/usePersistentState";
-import { useWorkspace, useScores, type RunEvent, type SavedView } from "./hooks/useWorkspace";
+import { useWorkspace, useScores, type RunEvent, type RunRecord, type SavedView } from "./hooks/useWorkspace";
 import { WorkspacePanel } from "./components/WorkspacePanel";
 import type { Reducer } from "./lib/comparison";
-import { buildExperimentGroups, filterExperimentGroups } from "./lib/runGroups";
+import { buildExperimentGroups, filterExperimentGroups, sortRunsNewestFirst } from "./lib/runGroups";
+import { RUN_COLORS } from "./lib/runColors";
 import type { XAxisType } from "./components/LineChart";
+import { parseChartScales, type YAxisScale } from "./lib/chartScale";
+import { moveMetricGroup, parseMetricGroups, saveMetricGroup, type MetricGroup } from "./lib/metricGroups";
 
 const ComparePanels = lazy(() => import("./components/ComparePanels"));
 const ImagePanel = lazy(() => import("./components/ImagePanel"));
@@ -38,7 +43,6 @@ type DashboardTab = "scalars" | "images" | "media" | "analysis";
 type ThemeMode = "light" | "dark";
 
 const THEME_STORAGE_KEY = "aeroboard-theme";
-const DEFAULT_COLORS = ["#00d2ff", "#ff4c6b", "#00e676", "#ffeb3b", "#e040fb", "#ff9800", "#9c27b0"];
 
 interface ErrorBoundaryState {
   hasError: boolean;
@@ -131,6 +135,7 @@ function App() {
     runs,
     tick,
     deleteAllRuns,
+    forgetRuns,
     getRunDashboardConfig,
     serverDashboardDefaults,
     dashboardConfigError,
@@ -190,14 +195,22 @@ function App() {
   const comparisonStep = typeof controls.comparisonStep === "number" && Number.isFinite(controls.comparisonStep) ? controls.comparisonStep : null;
   const comparisonSegment = typeof controls.comparisonSegment === "string" ? controls.comparisonSegment : "";
   const logCharts = settingsByMetric(flags(controls.logCharts));
+  const trendCharts = settingsByMetric(flags(controls.trendCharts));
+  const chartScales: Record<string, YAxisScale> = {
+    ...Object.fromEntries(Object.entries(logCharts).map(([key, enabled]) => [key, enabled ? "log" : "linear"])),
+    ...settingsByMetric(parseChartScales(controls.chartScales)),
+  };
   const hiddenCharts = uniqueMetrics(names(controls.hiddenCharts));
+  const metricGroups = useMemo(() => parseMetricGroups(controls.metricGroups), [controls.metricGroups]);
   const [runEvents, setRunEvents] = useState<RunEvent[]>([]);
   const [focusedEvent, setFocusedEvent] = useState<RunEvent | null>(null);
   const [isDeletingRuns, setIsDeletingRuns] = useState(false);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const selectedCompareHyperparameters = names(controls.compareHyperparameters);
+  const [deleteRequest, setDeleteRequest] = useState<{
+    title: string; message: string; confirmLabel: string; records: RunRecord[] | null;
+  } | null>(null);
+  const selectedCompareHyperparameters = useMemo(() => names(controls.compareHyperparameters), [controls.compareHyperparameters]);
   const setSelectedCompareHyperparameters = (value: React.SetStateAction<string[]>) => updateControl("compareHyperparameters",value,[]);
-  const selectedCompareMetrics = names(controls.compareMetrics);
+  const selectedCompareMetrics = useMemo(() => names(controls.compareMetrics), [controls.compareMetrics]);
   const setSelectedCompareMetrics = (value: React.SetStateAction<string[]>) => updateControl("compareMetrics",value,[]);
   const [selectedImageName, setSelectedImageName] = useState("");
   const [runFilter, setRunFilter] = useState("");
@@ -217,12 +230,19 @@ function App() {
   const mergedRunColors = useMemo(() => {
     const next = { ...runColors };
     runs.forEach((runId, index) => {
-      if (!next[runId]) next[runId] = DEFAULT_COLORS[index % DEFAULT_COLORS.length];
+      if (!next[runId]) next[runId] = RUN_COLORS[index % RUN_COLORS.length];
     });
     return next;
   }, [runColors, runs]);
 
-  const projectRunIds = useMemo(() => workspace.capabilities ? workspace.records.filter(run => run.parent === projectId && !run.data.archived).map(run => run.data.run_id) : runs, [workspace.capabilities, workspace.records, projectId, runs]);
+  const runStartTimes = useMemo(() => Object.fromEntries(workspace.records.flatMap(run => {
+    const startedAt = run.data.started_at_ms ?? run.data.created_at_ms;
+    return startedAt ? [[run.data.run_id, startedAt]] : [];
+  })), [workspace.records]);
+  const projectRunIds = useMemo(() => sortRunsNewestFirst(
+    workspace.capabilities ? workspace.records.filter(run => run.parent === projectId && !run.data.archived).map(run => run.data.run_id) : runs,
+    runStartTimes,
+  ), [workspace.capabilities, workspace.records, projectId, runs, runStartTimes]);
   const effectiveSelectedRuns = useMemo(() => {
     const viewRunIds = names(viewSettings.selectedRuns);
     const fallback = viewRunIds.length > 0 ? viewRunIds : projectRunIds.length > 0 ? [projectRunIds[0]] : [];
@@ -251,7 +271,7 @@ function App() {
     void loadMediaForRun(selectedRun);
   }, [activeTab, effectiveSelectedRuns, loadMediaForRun]);
 
-  const experimentGroups = useMemo(() => buildExperimentGroups(projectRunIds), [projectRunIds]);
+  const experimentGroups = useMemo(() => buildExperimentGroups(projectRunIds, runStartTimes), [projectRunIds, runStartTimes]);
   const filteredExperimentGroups = useMemo(() => filterExperimentGroups(experimentGroups, runFilter), [experimentGroups, runFilter]);
 
   const bounds = useMemo(
@@ -291,12 +311,6 @@ function App() {
     return selectedRun ? getMediaSeriesForRun(selectedRun) : [];
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `tick`: the store is a ref
   }, [effectiveSelectedRuns, getMediaSeriesForRun, tick]);
-
-  const hasAnyImages = useMemo(
-    () => runs.some((runId) => getImageSeriesForRun(runId).length > 0),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- `tick`: the store is a ref
-    [getImageSeriesForRun, runs, tick],
-  );
 
   const selectedRunsHaveImages = useMemo(
     () => effectiveSelectedRuns.some((runId) => getImageSeriesForRun(runId).length > 0),
@@ -403,18 +417,20 @@ function App() {
   // Every chart, including hidden ones and those filtered out by search, so moving one keeps the rest in place.
   const chartOrder = uniqueMetrics([...savedOrder, ...orderedMetricKeys]);
 
-  const visibleMetricKeys = useMemo(() => {
-    return orderedMetricKeys.filter(key => !hiddenCharts.includes(chartBaseName(key)) && (!metricSearch || key.toLowerCase().includes(metricSearch.toLowerCase()) || groupedMetrics[key]?.some(name => name.toLowerCase().includes(metricSearch.toLowerCase()))));
-  }, [groupedMetrics, orderedMetricKeys, hiddenCharts, metricSearch]);
+  const filteredMetricKeys = useMemo(() => {
+    const needle = metricSearch.trim().toLowerCase();
+    return orderedMetricKeys.filter(key => !hiddenCharts.includes(chartBaseName(key)) && (!needle || key.toLowerCase().includes(needle) || groupedMetrics[key]?.some(name => name.toLowerCase().includes(needle)) || metricGroups.some(group => group.metrics.includes(chartBaseName(key)) && group.name.toLowerCase().includes(needle))));
+  }, [groupedMetrics, orderedMetricKeys, hiddenCharts, metricSearch, metricGroups]);
+  const visibleMetricKeys = filteredMetricKeys.filter(key => !metricGroups.some(group => group.hidden && group.metrics.includes(chartBaseName(key))));
 
   const singleRunRevision =
     effectiveActiveTab === "analysis" ? "compare" : mode === "single" ? (effectiveSelectedRuns[0] ?? "none") : "compare";
 
   const visibleTabs: { id: DashboardTab; label: string }[] = [
-    { id: "scalars", label: "Scalar Values" },
-    { id: "images", label: "Images / Plots" },
-    { id: "media", label: "Audio / Video" },
-    { id: "analysis", label: "Hyperparameter Analysis" },
+    { id: "scalars", label: "Metrics" },
+    { id: "images", label: "Images" },
+    { id: "media", label: "Audio and video" },
+    { id: "analysis", label: "Hyperparameters" },
   ];
 
   const changeMode = (nextMode: "single" | "compare") => {
@@ -459,12 +475,54 @@ function App() {
   const handleDeleteAllRuns = () => {
     if (runs.length === 0 || isDeletingRuns) return;
     setDeleteError(null);
-    setShowDeleteConfirm(true);
+    setDeleteRequest({title: "Delete all runs", message: "This deletes every run on this server, in all projects, along with its persisted history. This can’t be undone.", confirmLabel: "Delete all", records: null});
   };
 
-  const handleConfirmDeleteAll = async () => {
-    setShowDeleteConfirm(false);
+  const handleDeleteRuns = (runIds: string[], experimentName?: string) => {
+    const hiddenByFilter = experimentName !== undefined
+      && (filteredExperimentGroups.find(group => group.experimentName === experimentName)?.runs.length ?? 0) < runIds.length;
+    if (isDeletingRuns || !workspace.capabilities?.persistent) return;
+    const records = runIds.map(runId => workspace.records.find(run => run.data.run_id === runId && run.parent === projectId));
+    if (!records.length || records.some(run => !run)) {
+      setDeleteError("Run information changed. Refresh the dashboard and try again.");
+      return;
+    }
+    setDeleteError(null);
+    const running = (records as RunRecord[]).filter(run => run.data.display_status === "running").length;
+    const runningNote = running === 0 ? ""
+      : experimentName ? ` ${running} ${running === 1 ? "is" : "are"} still running: training continues, but new data will be rejected.`
+      : " It’s still running: training continues, but new data will be rejected.";
+    setDeleteRequest({
+      title: experimentName ? "Delete run group" : "Delete run",
+      message: experimentName
+        ? `Delete all ${records.length} run version${records.length === 1 ? "" : "s"} in “${experimentName}” and their persisted data?${hiddenByFilter ? " This includes versions hidden by the filter." : ""}${runningNote} This can’t be undone.`
+        : `Delete “${runIds[0]}” and its persisted data?${runningNote} This can’t be undone.`,
+      confirmLabel: experimentName ? "Delete group" : "Delete run",
+      records: records as RunRecord[],
+    });
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteRequest || isDeletingRuns) return;
+    setDeleteRequest(null);
     setIsDeletingRuns(true);
+
+    if (deleteRequest.records) {
+      const failures: string[] = [];
+      for (const run of deleteRequest.records) {
+        try {
+          await workspace.mutate(`/run-records/${encodeURIComponent(run.id)}?revision=${run.data.metadata_revision}`, "DELETE");
+          forgetRuns([run.data.run_id]);
+          setSelectedRuns(previous => previous.filter(id => id !== run.data.run_id));
+        } catch (error) {
+          failures.push(`${run.data.run_id}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      setIsDeletingRuns(false);
+      setDeleteError(failures.length ? `Could not delete ${failures.length} run${failures.length === 1 ? "" : "s"}. ${failures.join("; ")}` : null);
+      return;
+    }
+
     const result = await deleteAllRuns();
     setIsDeletingRuns(false);
 
@@ -487,17 +545,24 @@ function App() {
       const hasAnyRuns = runs.length > 0;
       return (
         <div className="placeholder-hero">
-          <Activity size={56} className="floating-icon" />
-          <h2>{hasAnyRuns ? "Select a Run" : "Awaiting Telemetry..."}</h2>
-          <p>{hasAnyRuns ? "Choose a run from the sidebar to view its metrics." : "Start a training run to see metrics here."}</p>
-          {!hasAnyRuns ? <span className="placeholder-cta">Run a training script to begin</span> : null}
+          <h2>{hasAnyRuns ? "Select a run" : "No runs yet"}</h2>
+          <p>{hasAnyRuns ? "Choose a run from the list to see its metrics." : "Start a training script that logs to Aeroboard and its metrics appear here."}</p>
         </div>
       );
     }
 
     if (effectiveActiveTab === "analysis") {
       return (
-        <Suspense fallback={<div className="comparison-card empty-state-card"><h3>Loading analysis view…</h3></div>}>
+        <Suspense fallback={<div className="comparison-card empty-state-card"><h3>Loading hyperparameters…</h3></div>}>
+          <ComparisonAxes
+            availableHyperparameters={availableHyperparameters}
+            selectedCompareHyperparameters={selectedCompareHyperparameters}
+            onToggleSelection={toggleSelection}
+            onToggleAllHyperparameters={toggleAllHyperparameters}
+            availableMetricSummaries={availableMetricSummaries}
+            selectedCompareMetrics={selectedCompareMetrics}
+            onToggleAllMetrics={toggleAllMetrics}
+          />
           <ComparePanels
             runs={runSummaries}
             selectedHyperparameters={selectedCompareHyperparameters}
@@ -516,7 +581,7 @@ function App() {
       if (loadStatus.images === "loading" && !activeImageSeries) {
         return (
           <div className="comparison-card empty-state-card">
-            <h3>Images / Plots</h3>
+            <h3>Images</h3>
             <p>Loading image history for the selected run…</p>
           </div>
         );
@@ -525,14 +590,22 @@ function App() {
       if (!selectedRunsHaveImages || !activeImageSeries) {
         return (
           <div className="comparison-card empty-state-card">
-            <h3>Images / Plots</h3>
+            <h3>Images</h3>
             <p>Select a run with logged images to view visual outputs. Image history is loaded on demand.</p>
           </div>
         );
       }
 
       return (
-        <Suspense fallback={<div className="comparison-card empty-state-card"><h3>Loading image view…</h3></div>}>
+        <Suspense fallback={<div className="comparison-card empty-state-card"><h3>Loading images…</h3></div>}>
+          {imageSeriesOptions.length > 1 ? (
+            <label className="image-stream-picker">
+              <span>Image stream</span>
+              <select className="image-series-select" value={resolvedImageName} onChange={(event) => setSelectedImageName(event.target.value)}>
+                {imageSeriesOptions.map((series) => <option key={series.name} value={series.name}>{series.name}</option>)}
+              </select>
+            </label>
+          ) : null}
           <ImagePanel series={activeImageSeries} getImageSource={getImageSource} onPositionSelect={selectMediaPosition} />
         </Suspense>
       );
@@ -542,7 +615,7 @@ function App() {
       if (mediaSeries.length === 0) {
         return (
           <div className="comparison-card empty-state-card">
-            <h3>Audio / Video</h3>
+            <h3>Audio and video</h3>
             <p>
               {loadStatus.media === "loading"
                 ? "Loading media history for the selected run…"
@@ -553,7 +626,7 @@ function App() {
       }
 
       return (
-        <Suspense fallback={<div className="comparison-card empty-state-card"><h3>Loading media view…</h3></div>}>
+        <Suspense fallback={<div className="comparison-card empty-state-card"><h3>Loading media…</h3></div>}>
           <MediaPanel series={mediaSeries} getMediaSource={getMediaSource} onPositionSelect={selectMediaPosition} />
         </Suspense>
       );
@@ -562,14 +635,18 @@ function App() {
     if (orderedMetricKeys.length === 0) {
       return (
         <div className="placeholder-hero">
-          <h2>Ingesting Metrics...</h2>
+          <h2>Waiting for metrics</h2>
         </div>
       );
     }
 
     return (
       <MetricChartGrid
-        visibleMetricKeys={visibleMetricKeys}
+        visibleMetricKeys={filteredMetricKeys}
+        metricGroups={metricGroups}
+        metricSearch={metricSearch}
+        onToggleHiddenGroup={id => updateControl<MetricGroup[]>("metricGroups", previous => parseMetricGroups(previous).map(group => group.id === id ? {...group, hidden: !group.hidden} : group), [])}
+        onReorderGroup={(active, over) => updateControl<MetricGroup[]>("metricGroups", previous => moveMetricGroup(parseMetricGroups(previous), active, over), [])}
         groupedMetrics={groupedMetrics}
         currentMode={currentMode}
         effectiveSelectedRuns={effectiveSelectedRuns}
@@ -590,7 +667,12 @@ function App() {
         onPinChart={key => {if (savedOrder.length) setOrderedMetrics(pinChart(chartOrder, key, uniqueMetrics(groupKeys.filter(chart => effectiveFavoriteCharts[chart]))));}}
         optimalValues={effectiveOptimalValues}
         setOptimalValues={setOptimalValues}
-        logCharts={logCharts} onToggleLog={key => updateControl<Record<string,boolean>>("logCharts",previous => {const current = settingsByMetric(previous);const metric = chartBaseName(key);return {...current,[metric]:!current[metric]};},{})}
+        chartScales={chartScales} onScaleChange={(key, scale) => updateControl<Record<string, YAxisScale>>("chartScales", previous => ({...settingsByMetric(parseChartScales(previous)), [chartBaseName(key)]: scale}), {})}
+        trendCharts={trendCharts} onToggleTrend={key => updateControl<Record<string, boolean>>("trendCharts", previous => {
+          const current = settingsByMetric(flags(previous));
+          const metric = chartBaseName(key);
+          return {...current, [metric]: !current[metric]};
+        }, {})}
         onHideChart={key => updateControl<string[]>("hiddenCharts",previous => uniqueMetrics([...previous,key]),[])}
         events={[...runEvents, ...(focusedEvent && !runEvents.some(event => event.id === focusedEvent.id) ? [focusedEvent] : [])].filter(event => workspace.records.some(run => run.id === event.data.run_uid && effectiveSelectedRuns.includes(run.data.run_id)))}
         onEventSelect={selectEvent}
@@ -611,7 +693,7 @@ function App() {
       targets: Object.fromEntries(Object.entries(effectiveOptimalValues).filter((entry): entry is [string, number] => entry[1] !== null))},
     removedTargets: Object.keys(effectiveOptimalValues).filter(key => effectiveOptimalValues[key] === null),
     collapsedCharts: {...settingsByMetric(flags(viewSettings.collapsedCharts)), ...settingsByMetric(collapsedCharts)},
-    controls: {...controls, mode, widthMode, xAxisType, smoothing, removeOutliers, xRange: globalXRange,
+    controls: {...controls, metricGroups, mode, widthMode, xAxisType, smoothing, removeOutliers, xRange: globalXRange,
       reducer: comparisonReducer, baseline, comparisonStep, compareMetrics: selectedCompareMetrics, compareHyperparameters: selectedCompareHyperparameters},
     selectedRuns: effectiveSelectedRuns,
   };
@@ -646,6 +728,9 @@ function App() {
         runs={runs}
         isDeletingRuns={isDeletingRuns}
         onDeleteAllRuns={handleDeleteAllRuns}
+        canDeleteRuns={workspace.capabilities?.persistent === true}
+        onDeleteRun={runId => handleDeleteRuns([runId])}
+        onDeleteGroup={name => handleDeleteRuns(experimentGroups.find(group => group.experimentName === name)?.runs.map(run => run.fullRunId) ?? [], name)}
         runFilter={runFilter}
         onRunFilterChange={setRunFilter}
         filteredExperimentGroups={filteredExperimentGroups}
@@ -655,31 +740,7 @@ function App() {
         onToggleRun={toggleRun}
         mergedRunColors={mergedRunColors}
         onRunColorChange={(runId, color) => setRunColors((prev) => ({ ...prev, [runId]: color }))}
-        xAxisType={xAxisType}
-        onXAxisTypeChange={handleXAxisTypeChange}
-        smoothing={smoothing}
-        onSmoothingChange={setSmoothing}
-        removeOutliers={removeOutliers}
-        onRemoveOutliersChange={setRemoveOutliers}
-        widthMode={widthMode}
-        onWidthModeChange={setWidthMode}
-        canResetChartView={hasChartOverrides || Object.keys(controlOverrides).length > 0}
-        onResetChartView={() => {resetChartView();setControlOverrides({});}}
         runStatuses={Object.fromEntries(workspace.records.map(run => [run.data.run_id,run.data.display_status]))}
-        bounds={bounds}
-        globalXRange={globalXRange}
-        onGlobalXRangeChange={setGlobalXRange}
-        availableHyperparameters={availableHyperparameters}
-        selectedCompareHyperparameters={selectedCompareHyperparameters}
-        onToggleSelection={toggleSelection}
-        onToggleAllHyperparameters={toggleAllHyperparameters}
-        availableMetricSummaries={availableMetricSummaries}
-        selectedCompareMetrics={selectedCompareMetrics}
-        onToggleAllMetrics={toggleAllMetrics}
-        hasAnyImages={hasAnyImages}
-        imageSeriesOptions={imageSeriesOptions}
-        selectedImageName={resolvedImageName}
-        onSelectedImageNameChange={setSelectedImageName}
       />
 
       <div className="main-viewport">
@@ -732,9 +793,27 @@ function App() {
           {effectiveActiveTab === "scalars" ? <div className="workspace-toolbar chart-filter-toolbar">
             <div className="metric-toolbar-heading"><h2>Metrics</h2><span>{visibleMetricKeys.length}</span></div>
             <div className="metric-search"><Search size={15} aria-hidden="true" /><input type="search" aria-label="Search metrics" placeholder="Find a metric or namespace…" value={metricSearch} onChange={event => updateControl("metricSearch",event.target.value,"")} /></div>
+            <MetricGroupsDialog groups={metricGroups} metrics={uniqueMetrics(groupKeys)}
+              onSave={group => updateControl<MetricGroup[]>("metricGroups", previous => saveMetricGroup(parseMetricGroups(previous), group), [])}
+              onDelete={id => updateControl<MetricGroup[]>("metricGroups", previous => parseMetricGroups(previous).filter(group => group.id !== id), [])} />
             {hiddenCharts.length ? <HiddenChartsDialog hidden={hiddenCharts} available={uniqueMetrics(groupKeys)} onShow={keys => updateControl<string[]>("hiddenCharts",previous => uniqueMetrics(previous).filter(key => !keys.includes(key)),[])} /> : null}
             <a href={`/api/export/scalars.csv?${new URLSearchParams({run_id: effectiveSelectedRuns.join(",")})}`} download="metrics-raw.csv"><Download size={14} aria-hidden="true" />Export raw CSV</a>
           </div> : null}
+          {effectiveActiveTab === "scalars" && effectiveSelectedRuns.length > 0 ? <ChartControls
+            xAxisType={xAxisType}
+            onXAxisTypeChange={handleXAxisTypeChange}
+            smoothing={smoothing}
+            onSmoothingChange={setSmoothing}
+            removeOutliers={removeOutliers}
+            onRemoveOutliersChange={setRemoveOutliers}
+            widthMode={widthMode}
+            onWidthModeChange={setWidthMode}
+            canResetChartView={hasChartOverrides || Object.keys(controlOverrides).length > 0}
+            onResetChartView={() => {resetChartView();setControlOverrides({});}}
+            bounds={bounds}
+            globalXRange={globalXRange}
+            onGlobalXRangeChange={setGlobalXRange}
+          /> : null}
           {scoreError && workspace.capabilities ? <p role="status">Scorecards unavailable: {scoreError}</p> : null}
           {effectiveActiveTab === "scalars" ? <ObjectiveOverview scores={scores} showRun={effectiveSelectedRuns.length > 1}
             open={controls.objectivesOpen === true} onOpenChange={open => updateControl("objectivesOpen",open,false)} /> : null}
@@ -748,13 +827,13 @@ function App() {
       </div>
 
       <ConfirmDialog
-        open={showDeleteConfirm}
-        title="Delete All Runs"
-        message="Delete all runs and clear persisted history? This cannot be undone."
-        confirmLabel="Delete All"
+        open={deleteRequest !== null}
+        title={deleteRequest?.title ?? ""}
+        message={deleteRequest?.message ?? ""}
+        confirmLabel={deleteRequest?.confirmLabel}
         cancelLabel="Cancel"
-        onConfirm={handleConfirmDeleteAll}
-        onCancel={() => setShowDeleteConfirm(false)}
+        onConfirm={() => void handleConfirmDelete()}
+        onCancel={() => setDeleteRequest(null)}
         dangerous
       />
     </div>

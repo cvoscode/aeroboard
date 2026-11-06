@@ -116,6 +116,8 @@ export interface UseAeroboardResult {
         media: LoadStatus;
     };
     deleteAllRuns: () => Promise<{ ok: boolean; reason?: string }>;
+    /** Remove successfully deleted runs from local caches, including late responses. */
+    forgetRuns: (runIds: string[]) => void;
     loadRunSummaries: (runIds?: string[]) => Promise<void>;
     loadHistoryForRuns: (runIds: string[]) => Promise<void>;
     loadImagesForRun: (runId: string) => Promise<void>;
@@ -143,6 +145,7 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
     const runsRef = useRef<string[]>([]);
     /** Runs the server reported via /api/runs (the sidebar also shows runs seen live). */
     const fetchedRunsRef = useRef<string[]>([]);
+    const deletedRunsRef = useRef(new Set<string>());
     const [tick, setTick] = useState(0);
     const refreshScheduledRef = useRef(false);
     const loadedSummaryRunsRef = useRef<Set<string>>(new Set());
@@ -177,7 +180,7 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
                 ...Object.keys(storeRef.current),
                 ...Object.keys(imageStoreRef.current),
                 ...Object.keys(mediaStoreRef.current),
-            ])).sort();
+            ])).filter(runId => !deletedRunsRef.current.has(runId)).sort();
             // Only publish a new array when the list changed, so effects keyed on
             // `runs` don't re-run on every live batch.
             if (!sameList(allRuns, runsRef.current)) {
@@ -206,7 +209,7 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
         // no summary for (e.g. media only, or live-only mode) must not be re-requested
         // on every live batch.
         const missingRuns = targetRuns.filter(
-            (runId) => !loadedSummaryRunsRef.current.has(runId) && !pendingSummaryRunsRef.current.has(runId),
+            (runId) => !deletedRunsRef.current.has(runId) && !loadedSummaryRunsRef.current.has(runId) && !pendingSummaryRunsRef.current.has(runId),
         );
         if (missingRuns.length === 0) return;
         missingRuns.forEach((runId) => pendingSummaryRunsRef.current.add(runId));
@@ -215,6 +218,7 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
         try {
             const summaries = await fetchRunSummaries(apiBase, missingRuns);
             for (const rawSummary of summaries) {
+                if (deletedRunsRef.current.has(rawSummary.run_id)) continue;
                 const { summary, config } = extractRunDashboardConfig(rawSummary);
                 summaryRef.current[summary.run_id] = mergeSummaries(summary, summaryRef.current[summary.run_id]);
                 if (config) dashboardConfigsRef.current[summary.run_id] ??= config;
@@ -233,7 +237,7 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
     /** Fetch persisted history and merge it with live points already received. */
     const fetchHistory = useCallback(async (runIds: string[], force: boolean) => {
         const targetRuns = runIds.filter(
-            (runId) => (force || !loadedHistoryRunsRef.current.has(runId)) && !pendingHistoryRunsRef.current.has(runId),
+            (runId) => !deletedRunsRef.current.has(runId) && (force || !loadedHistoryRunsRef.current.has(runId)) && !pendingHistoryRunsRef.current.has(runId),
         );
         if (targetRuns.length === 0) return;
         targetRuns.forEach((runId) => pendingHistoryRunsRef.current.add(runId));
@@ -241,7 +245,9 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
         setLoadStatus((prev) => ({ ...prev, history: "loading" }));
         try {
             const rows = await fetchScalarHistory(apiBase, targetRuns);
-            mergeHistoryRows(storeRef.current, summaryRef.current, startTimes.current, targetRuns, rows);
+            mergeHistoryRows(storeRef.current, summaryRef.current, startTimes.current,
+                targetRuns.filter(runId => !deletedRunsRef.current.has(runId)),
+                rows.filter(row => !deletedRunsRef.current.has(row.run_id)));
             targetRuns.forEach((runId) => loadedHistoryRunsRef.current.add(runId));
             refreshRuns();
             setLoadStatus((prev) => ({ ...prev, history: "ready" }));
@@ -256,13 +262,14 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
     const loadHistoryForRuns = useCallback((runIds: string[]) => fetchHistory(runIds, false), [fetchHistory]);
 
     const loadImagesForRun = useCallback(async (runId: string) => {
-        if (!runId || loadedImageRunsRef.current.has(runId)) return;
+        if (!runId || deletedRunsRef.current.has(runId) || loadedImageRunsRef.current.has(runId)) return;
         loadedImageRunsRef.current.add(runId);
 
         setLoadStatus((prev) => ({ ...prev, images: "loading" }));
         try {
             const frames = await fetchImageHistory(apiBase, runId);
             for (const frame of frames) {
+                if (deletedRunsRef.current.has(frame.run_id)) continue;
                 upsertImageFrame(imageStoreRef.current, frame);
             }
             refreshRuns();
@@ -275,7 +282,7 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
     }, [apiBase, refreshRuns]);
 
     const loadMediaForRun = useCallback(async (runId: string) => {
-        if (!runId || loadedMediaRunsRef.current.has(runId)) return;
+        if (!runId || deletedRunsRef.current.has(runId) || loadedMediaRunsRef.current.has(runId)) return;
         loadedMediaRunsRef.current.add(runId);
 
         setLoadStatus((prev) => ({ ...prev, media: "loading" }));
@@ -283,7 +290,9 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
             // Metadata only: clip bytes are streamed on demand by the <audio>/<video> elements.
             const perKind = await Promise.all(MEDIA_KINDS.map((kind) => fetchMediaHistory(apiBase, kind, runId)));
             for (const clips of perKind) {
-                for (const clip of clips) upsertMediaClip(mediaStoreRef.current, clip);
+                for (const clip of clips) {
+                    if (!deletedRunsRef.current.has(clip.run_id)) upsertMediaClip(mediaStoreRef.current, clip);
+                }
             }
             refreshRuns();
             setLoadStatus((prev) => ({ ...prev, media: "ready" }));
@@ -372,6 +381,7 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
             if (nameCol && valueCol && !keyCol) {
                 const rows: ScalarRow[] = [];
                 for (let i = 0; i < batch.numRows; i++) {
+                    if (deletedRunsRef.current.has(String(runIdCol.get(i)))) continue;
                     const step = stepCol?.get(i);
                     rows.push({
                         ts_ms: Number(timeCol.get(i)),
@@ -386,6 +396,7 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
                 }
             } else if (nameCol && imageCol && formatCol) {
                 for (let i = 0; i < batch.numRows; i++) {
+                    if (deletedRunsRef.current.has(String(runIdCol.get(i)))) continue;
                     const payload = imageCol.get(i) as Uint8Array | null;
                     const format = String(formatCol.get(i));
                     upsertImageFrame(imageStoreRef.current, {
@@ -405,6 +416,7 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
                 const kind: MediaKind = audioCol ? 'audio' : 'video';
                 const dataCol = (audioCol ?? videoCol)!;
                 for (let i = 0; i < batch.numRows; i++) {
+                    if (deletedRunsRef.current.has(String(runIdCol.get(i)))) continue;
                     const format = String(formatCol.get(i));
                     const payload = dataCol.get(i) as Uint8Array | null;
                     // The server strips payloads when clips are persisted; those are
@@ -426,6 +438,7 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
                 }
             } else if (keyCol && valueCol && valueTypeCol) {
                 for (let i = 0; i < batch.numRows; i++) {
+                    if (deletedRunsRef.current.has(String(runIdCol.get(i)))) continue;
                     setHyperparameter(
                         summaryRef.current,
                         dashboardConfigsRef.current,
@@ -571,6 +584,25 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
         return readGlobalXBounds(storeRef.current, targetRuns, xAxis);
     }, []);
 
+    const forgetRuns = useCallback((runIds: string[]) => {
+        for (const runId of runIds) {
+            deletedRunsRef.current.add(runId);
+            delete storeRef.current[runId];
+            delete summaryRef.current[runId];
+            delete startTimes.current[runId];
+            delete dashboardConfigsRef.current[runId];
+            if (imageStoreRef.current[runId]) revokeImageStore({ [runId]: imageStoreRef.current[runId] });
+            delete imageStoreRef.current[runId];
+            if (mediaStoreRef.current[runId]) revokeMediaStore({ [runId]: mediaStoreRef.current[runId] });
+            delete mediaStoreRef.current[runId];
+            for (const cache of [loadedSummaryRunsRef, loadedHistoryRunsRef, loadedImageRunsRef, loadedMediaRunsRef]) {
+                cache.current.delete(runId);
+            }
+        }
+        fetchedRunsRef.current = fetchedRunsRef.current.filter(runId => !deletedRunsRef.current.has(runId));
+        refreshRuns();
+    }, [refreshRuns]);
+
     const deleteAllRuns = useCallback(async (): Promise<{ ok: boolean; reason?: string }> => {
         try {
             const resp = await fetch(`${apiBase}/api/history`, { method: 'DELETE' });
@@ -627,6 +659,7 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
         tick,
         loadStatus,
         deleteAllRuns,
+        forgetRuns,
         loadRunSummaries,
         loadHistoryForRuns,
         loadImagesForRun,

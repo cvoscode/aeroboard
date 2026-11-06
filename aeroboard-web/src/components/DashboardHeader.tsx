@@ -28,6 +28,10 @@ export function DashboardHeader({
   onDismissDeleteError,
   children,
 }: DashboardHeaderProps) {
+  const title = effectiveSelectedRuns.length > 1 || effectiveActiveTab === "analysis"
+    ? `${effectiveSelectedRuns.length} ${effectiveSelectedRuns.length === 1 ? "run" : "runs"} selected`
+    : effectiveSelectedRuns[0] ?? "No run selected";
+
   return (
     <header className="main-header">
       <div className="main-header-content">
@@ -40,20 +44,14 @@ export function DashboardHeader({
             aria-controls="dashboard-sidebar"
           >
             {sidebarOpen ? <X size={16} /> : <Menu size={16} />}
-            <span>Controls</span>
+            <span>Runs</span>
           </button>
 
-          <h2 className="viewport-title" title={effectiveActiveTab === "analysis" ? `${effectiveSelectedRuns.length} Runs Compared` : effectiveSelectedRuns[0]}>
-            {effectiveActiveTab === "analysis"
-              ? `${effectiveSelectedRuns.length} Runs Compared`
-              : effectiveSelectedRuns.length > 0
-                ? effectiveSelectedRuns[0]
-                : "No run selected"}
-          </h2>
+          <h2 className="viewport-title" title={effectiveSelectedRuns.join(", ")}>{title}</h2>
 
           <div className={`connection-badge ${connected ? "is-live" : ""}`}>
             <div className="pulse-dot" />
-            <span>{connected ? "LIVE" : "OFFLINE"}</span>
+            <span>{connected ? "Live" : "Offline"}</span>
           </div>
         </div>
 
