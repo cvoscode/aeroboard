@@ -1,4 +1,5 @@
-import { useRef, useState, type CSSProperties, type FormEvent } from "react";
+import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type FormEvent } from "react";
+import { seriesVersion, subscribeSeries } from "../hooks/aeroboard/seriesSubscriptions";
 import { RUN_COLORS } from "../lib/runColors";
 import { ChevronDown, ChevronRight, Crosshair, Download, EyeOff, GripVertical, Star, TrendingUp } from "lucide-react";
 import { useSortable } from "@dnd-kit/sortable";
@@ -28,7 +29,6 @@ interface SortableMetricChartProps {
   removeOutliers: boolean;
   xRange: [number, number] | null;
   widthMode: WidthMode;
-  revisionKey: string;
   onToggleCollapse: () => void;
   collapsed: boolean;
   favorite: boolean;
@@ -37,7 +37,7 @@ interface SortableMetricChartProps {
   onOptimalValueChange: (value: number | null) => void;
 }
 
-export function SortableMetricChart({
+export const SortableMetricChart = memo(function SortableMetricChart({
   yAxisScale, onScaleChange, showTrend, onToggleTrend, onHide, markers, onMarkerSelect,
   id,
   groupKey,
@@ -48,7 +48,6 @@ export function SortableMetricChart({
   removeOutliers,
   xRange,
   widthMode,
-  revisionKey,
   onToggleCollapse,
   collapsed,
   favorite,
@@ -58,6 +57,19 @@ export function SortableMetricChart({
 }: SortableMetricChartProps) {
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({ id });
   const cardRef = useRef<HTMLDivElement | null>(null);
+  const [nearViewport,setNearViewport]=useState(true);
+  useEffect(()=>{
+    if(!cardRef.current||typeof IntersectionObserver==='undefined')return;
+    const observer=new IntersectionObserver(([entry])=>setNearViewport(entry.isIntersecting),{rootMargin:'400px'});
+    observer.observe(cardRef.current);return ()=>observer.disconnect();
+  },[]);
+  const subscribe=useCallback((listener:()=>void)=>{
+    if(!nearViewport)return ()=>{};
+    const cleanup=seriesData.map(series=>subscribeSeries(series.fullData,listener));
+    return ()=>cleanup.forEach(fn=>fn());
+  },[seriesData,nearViewport]);
+  const snapshot=useCallback(()=>seriesData.reduce((total,series)=>total+seriesVersion(series.fullData),0),[seriesData]);
+  const dataVersion=useSyncExternalStore(subscribe,snapshot,snapshot);
   const [editingOptimal, setEditingOptimal] = useState(false);
   const [optimalDraft, setOptimalDraft] = useState("");
 
@@ -199,12 +211,12 @@ export function SortableMetricChart({
       ) : null}
 
       {markers.length ? <div className="chart-event-markers">{markers.slice(-12).map(marker => <button key={marker.id} type="button" onClick={() => onMarkerSelect(marker.id)} title={marker.label}>◆ {marker.label}</button>)}</div> : null}
-      {!collapsed && (
+      {!collapsed && nearViewport && (
         <div className="plot-container">
           <LineChart
-            key={revisionKey}
             title={groupKey}
             seriesData={seriesData}
+            dataVersion={dataVersion}
             themeKey={theme}
             xAxisType={xAxisType}
             smoothing={smoothing}
@@ -219,4 +231,4 @@ export function SortableMetricChart({
       )}
     </div>
   );
-}
+});

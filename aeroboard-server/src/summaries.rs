@@ -19,14 +19,18 @@ use crate::history::{HistoryPoint, HyperparameterEntry, MetricSummary, RunSummar
 use crate::storage::{BoxError, HistoryQueryOptions, StorageEngine};
 use crate::telemetry::{TelemetryBatch, TelemetryKind};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct MetricStats {
     /// Position of `last` as (timestamp, step): fast loops log several steps per
     /// millisecond, and storage may return such ties in any order.
     last_ts_ms: i64,
+    #[serde(with = "float_bits")]
     last_step: f64,
+    #[serde(with = "float_bits")]
     last: f64,
+    #[serde(with = "float_bits")]
     min: f64,
+    #[serde(with = "float_bits")]
     max: f64,
 }
 
@@ -71,7 +75,7 @@ impl MetricStats {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RunAccumulator {
     metrics: BTreeMap<String, MetricStats>,
     hyperparameters: BTreeMap<String, HyperparameterEntry>,
@@ -176,6 +180,9 @@ impl SummaryCache {
         storage: &dyn StorageEngine,
         run_ids: &BTreeSet<String>,
     ) -> Result<Vec<RunSummary>, BoxError> {
+        if let Some(summaries) = storage.persisted_summaries(run_ids).await? {
+            return Ok(summaries);
+        }
         let targets: BTreeSet<String> = if run_ids.is_empty() {
             storage.list_runs().await?.into_iter().collect()
         } else {
@@ -294,9 +301,77 @@ impl SummaryCache {
         }
     }
 
+    pub async fn remove(&self, run_id: &str) {
+        let mut state = self.state.lock().await;
+        state.runs.remove(run_id);
+        state.generation += 1;
+    }
     pub async fn clear(&self) {
         let mut state = self.state.lock().await;
         state.runs.clear();
         state.generation += 1;
     }
+}
+
+// Preserve NaN diagnostics and infinite empty bounds across restarts.
+mod float_bits {
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(value.to_bits())
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+        Ok(f64::from_bits(u64::deserialize(deserializer)?))
+    }
+}
+
+pub(crate) fn save_accumulator(
+    db: &rusqlite::Connection,
+    run_id: &str,
+    accumulator: &RunAccumulator,
+) -> crate::catalog::Result<()> {
+    let body = serde_json::to_vec(accumulator)
+        .map_err(|e| crate::catalog::CatalogError::invalid(e.to_string()))?;
+    db.execute("INSERT INTO run_summaries VALUES(?1,?2) ON CONFLICT(run_id) DO UPDATE SET body=excluded.body",rusqlite::params![run_id,body])?;
+    Ok(())
+}
+pub(crate) fn persist_batch(
+    db: &rusqlite::Connection,
+    telemetry: &TelemetryBatch,
+) -> crate::catalog::Result<()> {
+    use rusqlite::OptionalExtension;
+    crate::analytics::persist_batch(db, telemetry)?;
+    let mut runs = match telemetry.kind {
+        TelemetryKind::Scalars => accumulate(
+            &crate::storage::codec::parse_scalar_batch(&telemetry.batch),
+            vec![],
+        ),
+        TelemetryKind::Hyperparameters => accumulate(
+            &[],
+            crate::storage::codec::parse_hparam_batch(&telemetry.batch),
+        ),
+        _ => BTreeMap::new(),
+    };
+    // Media also advances the data revision, driving metadata and score refreshes.
+    let run_ids = telemetry.batch.column(1).as_string::<i32>();
+    for i in 0..run_ids.len() {
+        runs.entry(run_ids.value(i).to_owned()).or_default();
+    }
+    for (run_id, delta) in runs {
+        let stored: Option<Vec<u8>> = db
+            .query_row(
+                "SELECT body FROM run_summaries WHERE run_id=?1",
+                [&run_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let mut accumulator: RunAccumulator = stored
+            .map(|bytes| serde_json::from_slice(&bytes))
+            .transpose()
+            .map_err(|e| crate::catalog::CatalogError::invalid(e.to_string()))?
+            .unwrap_or_default();
+        accumulator.merge(&delta);
+        save_accumulator(db, &run_id, &accumulator)?;
+        db.execute("INSERT INTO data_revisions VALUES(?1,1) ON CONFLICT(run_id) DO UPDATE SET revision=revision+1",[&run_id])?;
+    }
+    Ok(())
 }

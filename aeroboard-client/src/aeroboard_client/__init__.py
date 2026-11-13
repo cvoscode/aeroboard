@@ -15,9 +15,6 @@ Example:
 
 from aeroboard_client.client import (
     AeroboardClient,
-    AeroboardLightningLogger,
-    AeroboardRayTuneLoggerCallback,
-    AeroboardLightningCallback,
     AeroboardClientError,
     FlightConnectionError,
     _normalize_dashboard_config,
@@ -167,3 +164,11 @@ __all__ = [
     "log_event",
     "finish",
 ]
+
+def __getattr__(name):
+    if name in {"AeroboardLightningLogger","AeroboardLightningCallback","AeroboardRayTuneLoggerCallback"}:
+        from . import client
+        value=getattr(client,name)
+        globals()[name]=value
+        return value
+    raise AttributeError(name)

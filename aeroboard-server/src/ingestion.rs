@@ -13,7 +13,8 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::schema::normalize_batch;
 use crate::t_junction::TJunction;
-use crate::telemetry::{TelemetryBatch, TelemetryKind};
+use crate::telemetry::{BatchEnvelope, TelemetryBatch, TelemetryKind};
+use arrow::record_batch::RecordBatch;
 
 #[derive(Clone)]
 pub struct AeroboardFlightServer {
@@ -22,6 +23,39 @@ pub struct AeroboardFlightServer {
 }
 
 impl AeroboardFlightServer {
+    async fn check_identity(
+        &self,
+        envelope: &BatchEnvelope,
+        batch: &RecordBatch,
+    ) -> Result<(String, bool), Status> {
+        use arrow::array::AsArray;
+        let catalog = self
+            .catalog
+            .as_ref()
+            .ok_or_else(|| Status::unimplemented("versioned ingestion unavailable"))?;
+        if envelope.server_id != catalog.store_id {
+            return Err(Status::invalid_argument(
+                "batch belongs to another server store",
+            ));
+        }
+        let check = envelope.clone();
+        let asset_ids = batch
+            .schema()
+            .index_of("asset_id")
+            .ok()
+            .map(|index| {
+                let ids = batch.column(index).as_string::<i32>();
+                (0..batch.num_rows())
+                    .map(|row| ids.value(row).to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        catalog
+            .read(move |db| crate::catalog::check_batch(db, &check, &asset_ids))
+            .await
+            .map_err(|error| Status::invalid_argument(error.to_string()))
+    }
+
     /// Decode, validate and publish every batch of one `do_put` stream.
     ///
     /// Returns the number of rows accepted, once every batch has been persisted.
@@ -48,13 +82,13 @@ impl AeroboardFlightServer {
 
         let mut rows = 0;
         let mut pending_writes = Vec::new();
-        let mut identified = false;
-        let mut identified_batch = None;
+
         while let Some(decoded) = decoder.next().await {
             let decoded = decoded.map_err(|error| match error {
                 FlightError::Tonic(status) => *status,
                 other => Status::invalid_argument(format!("invalid Arrow Flight data: {other}")),
             })?;
+            let app_metadata = decoded.app_metadata().clone();
             let DecodedPayload::RecordBatch(batch) = decoded.payload else {
                 continue;
             };
@@ -64,23 +98,26 @@ impl AeroboardFlightServer {
             } else {
                 declared_kind.clone()
             };
-            if identified {
-                return Err(Status::invalid_argument(
-                    "versioned uploads require one batch per RPC",
-                ));
-            }
+            let batch = if !app_metadata.is_empty() {
+                let mut metadata = batch.schema().metadata().clone();
+                metadata.insert(
+                    crate::telemetry::ENVELOPE_KEY.into(),
+                    String::from_utf8(app_metadata.to_vec())
+                        .map_err(|_| Status::invalid_argument("invalid envelope UTF-8"))?,
+                );
+                {
+                    let schema = Arc::new(batch.schema().as_ref().clone().with_metadata(metadata));
+                    arrow::record_batch::RecordBatch::try_new(schema, batch.columns().to_vec())
+                }
+                .map_err(|e| Status::invalid_argument(e.to_string()))?
+            } else {
+                batch
+            };
             let envelope = batch
                 .schema()
                 .metadata()
                 .get(crate::telemetry::ENVELOPE_KEY)
-                .map(|raw| {
-                    if raw.len() > 16384 {
-                        return Err(Status::invalid_argument("batch envelope is too large"));
-                    }
-                    serde_json::from_str::<crate::telemetry::BatchEnvelope>(raw).map_err(|e| {
-                        Status::invalid_argument(format!("invalid batch envelope: {e}"))
-                    })
-                })
+                .map(|raw| parse_envelope(raw))
                 .transpose()?;
             let mut batch = normalize_batch(&kind, &batch).map_err(|reason| {
                 tracing::warn!("Rejected telemetry batch: {reason}");
@@ -97,70 +134,8 @@ impl AeroboardFlightServer {
                 }
             }
             if let Some(envelope) = envelope {
-                identified = true;
-                if rows > 0 {
-                    return Err(Status::invalid_argument(
-                        "versioned uploads require one batch per RPC",
-                    ));
-                }
-                if envelope.version != 1
-                    || envelope.sequence < 1
-                    || envelope.captured_at_ms < 0
-                    || [&envelope.batch_id, &envelope.run_uid, &envelope.session_id]
-                        .iter()
-                        .any(|id| uuid::Uuid::parse_str(id).is_err())
-                {
-                    return Err(Status::invalid_argument(
-                        "invalid batch identity or version",
-                    ));
-                }
-                if crate::telemetry::batch_checksum(&batch).map_err(Status::invalid_argument)?
-                    != envelope.checksum
-                {
-                    return Err(Status::invalid_argument(
-                        "batch checksum does not match its envelope",
-                    ));
-                }
-                let catalog = self
-                    .catalog
-                    .as_ref()
-                    .ok_or_else(|| Status::unimplemented("versioned ingestion unavailable"))?;
-                if envelope.server_id != catalog.store_id {
-                    return Err(Status::invalid_argument(
-                        "batch belongs to another server store",
-                    ));
-                }
-                let check = envelope.clone();
-                let asset_ids = batch.schema().index_of("asset_id").ok().map(|index| {
-                    let ids = batch.column(index).as_string::<i32>();
-                    (0..batch.num_rows())
-                        .map(|row| ids.value(row).to_owned())
-                        .collect::<Vec<_>>()
-                });
-                let (canonical,ready)=catalog.read(move|db|{
-                    use rusqlite::OptionalExtension;
-                    let run=crate::catalog::run_by_id(db,&check.run_uid)?;
-                    let session=crate::catalog::get(db,"session",&check.session_id)?.ok_or_else(crate::catalog::CatalogError::missing)?;
-                    if session.parent!=run.id{return Err(crate::catalog::CatalogError::invalid("session belongs to another run"));}
-                    if session.data["segment"].as_str()!=check.segment.as_deref(){return Err(crate::catalog::CatalogError::invalid("batch segment does not match its session"));}
-                    if session.data["final_sequence"].as_i64().is_some_and(|last|check.sequence>last){return Err(crate::catalog::CatalogError::invalid("batch exceeds finished session sequence"));}
-                    let occupied:Option<String>=db.query_row("SELECT id FROM receipts WHERE run_uid=?1 AND sequence=?2 AND json_extract(CAST(body AS TEXT),'$.envelope.session_id')=?3",rusqlite::params![check.run_uid,check.sequence,check.session_id],|r|r.get(0)).optional()?;
-                    if occupied.is_some_and(|id|id!=check.batch_id){return Err(crate::catalog::CatalogError::conflict("session sequence was reused"));}
-                    if let Some(ids)=asset_ids{
-                        let mut unique=std::collections::BTreeSet::new();
-                        for id in &ids{
-                            if uuid::Uuid::parse_str(id).is_err()||!unique.insert(id.to_owned()){return Err(crate::catalog::CatalogError::invalid("asset IDs must be distinct UUIDs"));}
-                            if let Some(asset)=crate::catalog::get(db,"asset",id)?&& asset.data["batch_id"]!=check.batch_id{return Err(crate::catalog::CatalogError::conflict("asset ID was reused"));}
-                        }
-                    }
-                    let receipt:Option<(String,bool,Vec<u8>)>=db.query_row("SELECT checksum,committed,body FROM receipts WHERE id=?1",[&check.batch_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-                    let ready=if let Some((checksum,ready,body))=receipt{
-                        let previous:serde_json::Value=serde_json::from_slice(&body).map_err(|_|crate::catalog::CatalogError::invalid("invalid batch receipt"))?;
-                        let identity=serde_json::from_value::<crate::telemetry::BatchEnvelope>(previous["envelope"].clone()).map_err(|_|crate::catalog::CatalogError::invalid("invalid stored batch identity"))?;
-                        if checksum!=check.checksum||identity!=check{return Err(crate::catalog::CatalogError::conflict("batch ID was reused with different contents or identity"));}ready
-                    }else{false};
-                    Ok((run.data["run_id"].as_str().unwrap_or("").to_owned(),ready))
-                }).await.map_err(|e|Status::invalid_argument(e.to_string()))?;
+                validate_envelope(&envelope, &batch)?;
+                let (canonical, ready) = self.check_identity(&envelope, &batch).await?;
                 if ready {
                     rows += batch.num_rows();
                     continue;
@@ -184,12 +159,8 @@ impl AeroboardFlightServer {
                     .collect();
                 let deleted = catalog
                     .read(move |db| {
-                        Ok(crate::catalog::list(db, "run", None)?.iter().any(|r| {
-                            r.data["deleted"] == true
-                                && r.data["run_id"]
-                                    .as_str()
-                                    .is_some_and(|id| names.contains(id))
-                        }))
+                        let deleted = crate::catalog::run_names(db, Some(true))?;
+                        Ok(!names.is_disjoint(&deleted))
                     })
                     .await
                     .map_err(|e| Status::internal(e.to_string()))?;
@@ -200,25 +171,12 @@ impl AeroboardFlightServer {
 
             tracing::debug!("Received {:?} batch with {} rows", kind, batch.num_rows());
             rows += batch.num_rows();
-            if identified {
-                identified_batch = Some((kind, batch));
-                continue;
-            }
             let persisted = self
                 .t_junction
                 .publish(Arc::new(TelemetryBatch::new(kind, Arc::new(batch))))
                 .await
                 .map_err(|error| Status::unavailable(error.to_string()))?;
             pending_writes.push(persisted);
-        }
-
-        if let Some((kind, batch)) = identified_batch {
-            pending_writes.push(
-                self.t_junction
-                    .publish(Arc::new(TelemetryBatch::new(kind, Arc::new(batch))))
-                    .await
-                    .map_err(|e| Status::unavailable(e.to_string()))?,
-            );
         }
 
         // Acknowledge only what is stored: `flush()` on the client then means "durable".
@@ -240,6 +198,39 @@ impl AeroboardFlightServer {
 
         Ok(rows)
     }
+}
+
+fn parse_envelope(raw: &str) -> Result<BatchEnvelope, Status> {
+    if raw.len() > 16384 {
+        return Err(Status::invalid_argument("batch envelope is too large"));
+    }
+    serde_json::from_str(raw)
+        .map_err(|error| Status::invalid_argument(format!("invalid batch envelope: {error}")))
+}
+fn validate_envelope(envelope: &BatchEnvelope, batch: &RecordBatch) -> Result<(), Status> {
+    if ![1, 2].contains(&envelope.version)
+        || envelope.sequence < 1
+        || envelope.captured_at_ms < 0
+        || [&envelope.batch_id, &envelope.run_uid, &envelope.session_id]
+            .iter()
+            .any(|id| uuid::Uuid::parse_str(id).is_err())
+    {
+        return Err(Status::invalid_argument(
+            "invalid batch identity or version",
+        ));
+    }
+    let checksum = if envelope.version == 2 {
+        crate::telemetry::batch_checksum_v2(batch)
+    } else {
+        crate::telemetry::batch_checksum(batch)
+    }
+    .map_err(Status::invalid_argument)?;
+    if checksum != envelope.checksum {
+        return Err(Status::invalid_argument(
+            "batch checksum does not match its envelope",
+        ));
+    }
+    Ok(())
 }
 
 #[tonic::async_trait]

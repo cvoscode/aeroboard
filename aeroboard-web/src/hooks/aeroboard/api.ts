@@ -1,5 +1,5 @@
 import { tableFromIPC } from "apache-arrow";
-import type { ImageFrame, MediaClip, MediaKind, RunSummary, ScalarRow } from "./types";
+import type { ImageFrame, MediaClip, MediaKind, RunSummary } from "./types";
 import { parseDashboardDefaults, type PartialDashboardDefaults } from "../../lib/dashboardDefaults";
 
 function buildUrl(base: string, path: string, params?: Record<string, string | number | boolean | undefined>) {
@@ -58,33 +58,13 @@ export async function fetchRunSummaries(apiBase: string, runIds?: string[]): Pro
  * stream: values stay binary and run/metric names are dictionary-encoded, which
  * is several times smaller than the JSON rows and avoids paging.
  */
-export async function fetchScalarHistory(apiBase: string, runIds: string[]): Promise<ScalarRow[]> {
-  const resp = await fetch(buildUrl(apiBase, "/api/history", { run_id: runIds.join(","), format: "arrow" }));
+export async function fetchScalarHistory(apiBase: string, runIds: string[], startMs?: number, window?: {metric:string;start_ms:number;end_ms:number}): Promise<ReturnType<typeof tableFromIPC>> {
+  const resp = await fetch(buildUrl(apiBase, "/api/history", { run_id: runIds.join(","), format: "arrow", max_points: window ? undefined : 10000, start_ms: window?.start_ms ?? startMs, end_ms: window?.end_ms, metric: window?.metric }));
   if (!resp.ok) {
     throw new Error(`Request failed with status ${resp.status}`);
   }
   const table = tableFromIPC(new Uint8Array(await resp.arrayBuffer()));
-  const rows: ScalarRow[] = [];
-  for (const batch of table.batches) {
-    const timestamps = batch.getChild("timestamp");
-    const runs = batch.getChild("run_id");
-    const names = batch.getChild("name");
-    const values = batch.getChild("value");
-    const steps = batch.getChild("step");
-    if (!timestamps || !runs || !names || !values) continue;
-    for (let i = 0; i < batch.numRows; i++) {
-      const step = steps?.get(i);
-      rows.push({
-        ts_ms: Number(timestamps.get(i)),
-        run_id: String(runs.get(i)),
-        name: String(names.get(i)),
-        value: Number(values.get(i)),
-        step: step === null || step === undefined ? null : Number(step),
-      });
-    }
-  }
-  rows.sort((a, b) => a.ts_ms - b.ts_ms);
-  return rows;
+  return table;
 }
 
 /** Image metadata for a run; frame bytes load lazily via `imageContentUrl`. */

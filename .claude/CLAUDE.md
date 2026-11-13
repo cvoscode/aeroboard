@@ -11,7 +11,7 @@
 > (documentation, ownership, history, decisions). **Always verify against
 > actual source files before making changes** — the index may be stale.
 
-Last indexed: 2026-05-08 (commit ca15972)
+Historical index: 2026-05-08 (commit ca15972). The source and ARCHITECTURE.md are authoritative.
 ### Entry Points
 - `aeroboard-web/src/App.tsx`
 - `aeroboard-server/src/main.rs`
@@ -19,8 +19,8 @@ Last indexed: 2026-05-08 (commit ca15972)
 - `docs/index.md`
 - `site/search/main.js`
 ### Tech Stack
-**Languages:** Python
-**Frameworks:** PyTorch
+**Languages:** Rust, Python, TypeScript
+**Frameworks:** Axum/Tokio/Arrow Flight, React/Vite/uPlot; optional PyTorch Lightning and Ray integrations
 
 **Infra:** Docker Compose### Hotspots (High Churn)
 | File | Churn | 90d Commits | Owner |

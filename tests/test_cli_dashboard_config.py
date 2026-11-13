@@ -23,9 +23,9 @@ def start_server(tmp_path, monkeypatch):
 
     def run(command, **kwargs):
         launched.update(kwargs)
-        return SimpleNamespace(returncode=0)
+        return SimpleNamespace(wait=lambda:0,terminate=lambda:None)
 
-    monkeypatch.setattr(cli.subprocess, "run", run)
+    monkeypatch.setattr(cli.subprocess, "Popen", run)
 
     def start():
         result = CliRunner().invoke(cli.main, ["start"])

@@ -24,6 +24,7 @@ def client():
 
 
 def _sent_dashboard_rows(client):
+    client.flush()
     rows = []
     for descriptor, _schema, writer in client.client.calls:
         if descriptor.path != [b'hyperparameters']:

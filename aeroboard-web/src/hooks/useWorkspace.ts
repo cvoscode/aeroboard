@@ -53,6 +53,11 @@ export function useWorkspace(project: string) {
   const [updated, setUpdated] = useState(0);
   const refresh = useCallback(() => setRevision(v => v + 1), []);
   useEffect(() => {
+    const abort=new AbortController();
+    workspaceRequest<Capabilities>("/capabilities","GET",undefined,abort.signal).then(setCapabilities).catch(error=>{if(!abort.signal.aborted)setError(String(error));});
+    return ()=>abort.abort();
+  },[]);
+  useEffect(() => {
     const abort = new AbortController();
     const signal = abort.signal;
     let pending: ReturnType<typeof setTimeout> | undefined;
@@ -62,14 +67,13 @@ export function useWorkspace(project: string) {
       if (loading) {reload = true; return;}
       loading = true;
       try {
-        const capabilities = await workspaceRequest<Capabilities>("/capabilities", "GET", undefined, signal);
         const [projects, records, views, definitions] = await Promise.all([
           workspaceRequest<Project[]>("/projects", "GET", undefined, signal), allRecords(signal),
           workspaceRequest<SavedView[]>(`/projects/${encodeURIComponent(project)}/views`, "GET", undefined, signal),
           workspaceRequest<MetricDefinition[]>("/metric-definitions", "GET", undefined, signal),
         ]);
         if (signal.aborted) return;
-        setCapabilities(capabilities); setProjects(projects); setRecords(records); setViews(views); setDefinitions(definitions); setError(null);
+        setProjects(projects); setRecords(records); setViews(views); setDefinitions(definitions); setError(null);
         setUpdated(value => value + 1);
       } catch (error) {
         if (!signal.aborted && !(error instanceof Error && error.message.startsWith("404:"))) setError(String(error));
@@ -78,11 +82,36 @@ export function useWorkspace(project: string) {
         if (reload && !signal.aborted) {reload = false; void load();}
       }
     };
-    const schedule = () => { clearTimeout(pending); pending = setTimeout(() => void load(), 150); };
+    const changedRuns=new Set<string>();
+    const changedKinds=new Set<string>();
+    const schedule=(event:Event)=>{
+      const message=(event as CustomEvent<{kind?:string;id?:string}>).detail;
+      if(message?.kind==='run'&&message.id)changedRuns.add(message.id);
+      else if(message?.kind&&['session','event-source','asset'].includes(message.kind))return;
+      else changedKinds.add(message?.kind??'all');
+      clearTimeout(pending);
+      pending=setTimeout(()=>{
+        const targets=Array.from(changedRuns);changedRuns.clear();
+        const kinds=new Set(changedKinds);changedKinds.clear();
+        if(kinds.has('all')||kinds.has('project')||kinds.has('view')){void load();return;}
+        if(targets.length)void Promise.all(targets.map(async id=>{
+          try{return {id,record:await workspaceRequest<RunRecord>(`/run-records/${encodeURIComponent(id)}`,"GET",undefined,signal)};}
+          catch(error){if(error instanceof Error&&/^(404|410):/.test(error.message))return {id,record:null};throw error;}
+        })).then(updates=>{
+          if(signal.aborted)return;
+          setRecords(previous=>{
+            const byId=new Map(previous.map(row=>[row.id,row]));
+            for(const {id,record} of updates){if(!record)byId.delete(id);else if(!byId.has(id)||byId.get(id)!.revision<=record.revision)byId.set(id,record);}
+            return Array.from(byId.values());
+          });setUpdated(v=>v+1);
+        }).catch(error=>{if(!signal.aborted)setError(String(error));});
+        if(kinds.has('metric'))void workspaceRequest<MetricDefinition[]>("/metric-definitions","GET",undefined,signal).then(value=>{if(!signal.aborted){setDefinitions(value);setUpdated(v=>v+1);}}).catch(error=>{if(!signal.aborted)setError(String(error));});
+        if(kinds.has('event'))setUpdated(v=>v+1);
+      },150);
+    };
     void load();
-    const timer = setInterval(schedule, 15_000);
     window.addEventListener("aeroboard:catalog", schedule);
-    return () => {abort.abort(); clearInterval(timer); clearTimeout(pending); window.removeEventListener("aeroboard:catalog", schedule);};
+    return () => {abort.abort(); clearTimeout(pending); window.removeEventListener("aeroboard:catalog", schedule);};
   }, [project, revision]);
   const mutate = useCallback(async <T,>(path: string, method: string, body?: unknown) => {
     try { const value = await workspaceRequest<T>(path, method, body); refresh(); return value; }
@@ -108,8 +137,16 @@ export function useScores(runIds: string[], step: number | null, revision: numbe
         .catch(error => {if (!abort.signal.aborted) setError(String(error));});
     };
     load();
-    const timer = setInterval(load, 3000);
-    return () => {abort.abort(); clearInterval(timer);};
+    let pending:ReturnType<typeof setTimeout>|undefined;
+    const changed=(event:Event)=>{
+      const runs=(event as CustomEvent<{runs?:string[]}>).detail?.runs;
+      if(runs&&!runs.some(run=>key.split(',').includes(run)))return;
+      if(pending!==undefined)return;
+      pending=setTimeout(()=>{pending=undefined;load();},1000);
+    };
+    window.addEventListener("aeroboard:data",changed);
+    window.addEventListener("aeroboard:catalog",changed);
+    return () => {abort.abort();clearTimeout(pending);window.removeEventListener("aeroboard:data",changed);window.removeEventListener("aeroboard:catalog",changed);};
   }, [key, step, revision, segment, requestKey]);
   return {scores: key && result.key === requestKey ? result.rows : [], error};
 }

@@ -7,7 +7,6 @@ import pytest
 pytestmark = pytest.mark.legacy_server
 
 import aeroboard_client
-import aeroboard_client.client as aeroboard_client_module
 from aeroboard_client.client import AeroboardClient, AeroboardLightningCallback, AeroboardLightningLogger, AeroboardRayTuneLoggerCallback, _coerce_image_bytes, _normalize_hparam_value
 
 
@@ -210,7 +209,7 @@ def test_lightning_logger_logs_numeric_metrics_and_step():
 
 def test_ray_tune_callback_creates_trial_run_and_logs_metrics(monkeypatch):
     with patch('aeroboard_client.client.fl.FlightClient', DummyFlightClient):
-        monkeypatch.setattr(aeroboard_client_module, '_RAY_TUNE_AVAILABLE', True)
+        monkeypatch.setattr('aeroboard_client.integrations.ray._RAY_TUNE_AVAILABLE', True)
         callback = AeroboardRayTuneLoggerCallback(
             url='grpc://localhost:50051',
             api_base_url='http://localhost:3000',

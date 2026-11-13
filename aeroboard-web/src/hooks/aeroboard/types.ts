@@ -5,6 +5,10 @@ export interface TimeSeriesData {
   plotX: Float64Array;
   values: Float64Array;
   count: number;
+  startTime?: number;
+  loadWindow?: (startMs:number,endMs:number)=>Promise<void>;
+  minStep?: number;
+  maxStep?: number;
 }
 
 export interface HyperparameterEntry {

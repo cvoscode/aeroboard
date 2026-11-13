@@ -10,15 +10,20 @@ use axum::{
 };
 use tokio::sync::watch;
 use tonic::transport::Server;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::{
+    compression::predicate::{DefaultPredicate, NotForContentType, Predicate},
+    cors::{Any, CorsLayer},
+};
 
 mod analytics;
+mod app_error;
 mod app_state;
 mod catalog;
 mod config;
 mod dashboard_config;
 mod history;
 mod ingestion;
+mod models;
 mod persistence;
 mod retry;
 mod schema;
@@ -27,8 +32,12 @@ mod streaming;
 mod summaries;
 mod t_junction;
 mod telemetry;
+#[cfg(test)]
+#[path = "../tests/http/mod.rs"]
 mod tests;
 mod workspace;
+#[cfg(test)]
+#[path = "../tests/workspace/mod.rs"]
 mod workspace_tests;
 
 use crate::app_state::AppState;
@@ -123,16 +132,27 @@ pub fn build_app(app_state: AppState) -> Router {
         .route("/ws/live", get(streaming::ws_handler))
         .nest("/api", api_routes)
         .fallback_service(
-            tower_http::services::ServeDir::new(config.web_dist_dir.clone()).fallback(
-                tower_http::services::ServeFile::new(config.web_dist_dir.join("index.html")),
-            ),
+            tower_http::services::ServeDir::new(config.web_dist_dir.clone())
+                .precompressed_gzip()
+                .precompressed_br()
+                .fallback(tower_http::services::ServeFile::new(
+                    config.web_dist_dir.join("index.html"),
+                )),
         );
 
     let router = match cors_layer(&config.cors) {
         Some(layer) => router.layer(layer),
         None => router,
     };
-    router.with_state(app_state)
+    router
+        .layer(
+            tower_http::compression::CompressionLayer::new().compress_when(
+                DefaultPredicate::new().and(NotForContentType::const_new(
+                    history::ARROW_STREAM_CONTENT_TYPE,
+                )),
+            ),
+        )
+        .with_state(app_state)
 }
 
 fn server_outcome<E: std::fmt::Display>(
@@ -170,6 +190,7 @@ async fn main() -> Result<(), crate::storage::BoxError> {
 
     let storage = build_storage(&config)?;
     let (app_state, persist_rx) = AppState::new(config.clone(), storage)?;
+    app_state.storage.initialize().await?;
     let t_junction = app_state.t_junction.clone();
 
     // Path A: persistence. Awaited during shutdown so queued batches are written.
@@ -177,7 +198,15 @@ async fn main() -> Result<(), crate::storage::BoxError> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
+        #[cfg(unix)]
+        let shutdown = async {
+            let mut term =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+            tokio::select! { result=tokio::signal::ctrl_c()=>result, _=term.recv()=>Ok(()) }
+        };
+        #[cfg(not(unix))]
+        let shutdown = tokio::signal::ctrl_c();
+        if shutdown.await.is_ok() {
             tracing::info!("Shutdown requested; finishing in-flight uploads");
             let _ = shutdown_tx.send(true);
         }

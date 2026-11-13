@@ -47,18 +47,11 @@ pub fn routes() -> Router<AppState> {
 
 async fn capabilities(State(state): State<AppState>) -> Json<Value> {
     Json(
-        json!({"protocol_version":1,"catalog_version":1,"server_id":state.catalog.store_id,
+        json!({"protocol_version":2,"catalog_version":2,"server_id":state.catalog.store_id,
         "persistent":state.catalog.persistent,"storage":state.config.storage_mode.as_str(),
-        "features":["projects","lifecycle","resume","metric_definitions","views","events","batch_envelopes","assets","scorecards","aggregation","run_deletion"],
+        "features":["projects","lifecycle","resume","metric_definitions","views","events","batch_envelopes","batch_streams","assets","scorecards","aggregation","run_deletion"],
         "durable_replay":state.catalog.persistent,"max_message_bytes":state.config.max_message_bytes,"stale_after_ms":state.catalog.stale_after_ms}),
     )
-}
-
-async fn import(state: &AppState) -> Result<()> {
-    state
-        .catalog
-        .import_runs(crate::history::known_runs(state).await)
-        .await
 }
 
 #[derive(Default, Deserialize)]
@@ -126,7 +119,6 @@ async fn runs(
     State(state): State<AppState>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Value>> {
-    import(&state).await?;
     let filters: Vec<RunFilter> = query
         .filters
         .as_ref()
@@ -151,14 +143,16 @@ async fn runs(
     }
     let offset = query.offset.unwrap_or(0);
     let limit = query.limit.unwrap_or(100).clamp(1, 1000);
+    let stale_after_ms = state.catalog.stale_after_ms;
     let mut rows = state
         .catalog
         .read(move |db| {
+            let search = query.search.as_ref().map(|s| s.to_lowercase());
             let mut rows: Vec<Entity> = catalog::list(db, "run", query.project.as_deref())?
                 .into_iter()
                 .filter(|e| e.data["deleted"] != true)
                 .filter(|e| query.archived.unwrap_or(false) || e.data["archived"] != true)
-                .map(|r| catalog::with_delivery(db, r))
+                .map(|r| catalog::with_delivery(db, r, stale_after_ms))
                 .collect::<Result<Vec<_>>>()?
                 .into_iter()
                 .filter(|e| {
@@ -175,12 +169,9 @@ async fn runs(
                     })
                 })
                 .filter(|e| {
-                    query.search.as_ref().is_none_or(|s| {
-                        e.data
-                            .to_string()
-                            .to_lowercase()
-                            .contains(&s.to_lowercase())
-                    })
+                    search
+                        .as_ref()
+                        .is_none_or(|s| e.data.to_string().to_lowercase().contains(s))
                 })
                 .collect();
             rows.sort_by(|a, b| {
@@ -206,7 +197,7 @@ async fn runs(
                 .summaries(state.storage.as_ref(), &ids)
                 .await
                 .map_err(|e| {
-                    CatalogError(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                    CatalogError::http(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
                 })?
         } else {
             vec![]
@@ -266,13 +257,14 @@ async fn runs(
     ))
 }
 async fn run(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Entity>> {
-    import(&state).await?;
+    let stale_after_ms = state.catalog.stale_after_ms;
     state
         .catalog
         .read(move |db| {
             Ok(Json(catalog::with_delivery(
                 db,
                 catalog::run_by_id(db, &id)?,
+                stale_after_ms,
             )?))
         })
         .await
@@ -304,7 +296,7 @@ async fn heartbeat(
 ) -> Result<Json<Entity>> {
     state
         .catalog
-        .write(move |db| Ok(Json(catalog::update_session(db, &id, &sid, &input, false)?)))
+        .quiet(move |db| Ok(Json(catalog::update_session(db, &id, &sid, &input, false)?)))
         .await
 }
 async fn finish(
@@ -419,13 +411,14 @@ async fn delete_run(
         })
         .await?;
     state.storage.delete_run(&canonical).await.map_err(|e| {
-        CatalogError(
+        CatalogError::http(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             format!("deletion pending; retry this run ID: {e}"),
         )
     })?;
-    state.summaries.clear().await;
-    state.analysis.clear().await;
+    state.summaries.remove(&canonical).await;
+    state.analysis.remove(&canonical).await;
+    state.t_junction.remove_run(&canonical);
     state
         .catalog
         .write(move |db| {
@@ -812,7 +805,7 @@ async fn save_event(
                     return Err(CatalogError::conflict("event ID has different contents"));
                 }
                 if source.data["deleted"] == true {
-                    return Err(CatalogError(
+                    return Err(CatalogError::http(
                         axum::http::StatusCode::GONE,
                         "event was deleted".into(),
                     ));
@@ -901,11 +894,16 @@ async fn delete_event(
         .await
 }
 
-async fn asset(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Entity>> {
+async fn asset(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Entity<crate::models::Asset>>> {
     state
         .catalog
         .read(move |db| {
-            let asset = catalog::get(db, "asset", &id)?.ok_or_else(CatalogError::missing)?;
+            let asset = catalog::get(db, "asset", &id)?
+                .ok_or_else(CatalogError::missing)?
+                .typed::<crate::models::Asset>()?;
             catalog::run_by_id(db, &asset.parent)?;
             Ok(Json(asset))
         })
@@ -920,7 +918,7 @@ async fn asset_content(
     match state.storage.load_asset(&id).await {
         Ok(Some(payload)) => crate::history::media_response(payload, request).await,
         Ok(None) => CatalogError::missing().into_response(),
-        Err(error) => CatalogError(
+        Err(error) => CatalogError::http(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             error.to_string(),
         )

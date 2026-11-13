@@ -173,3 +173,38 @@ export function defaultOrderRank(defaults: DashboardDefaults, groupKey: string):
   const index = defaults.order.findIndex((name) => matchesChart(name, groupKey));
   return index < 0 ? Number.POSITIVE_INFINITY : index;
 }
+
+/** Resolve server -> run -> saved view -> local choices in one pure operation. */
+export function resolveChartPreferences({
+  keys, server, runs, view, favorites, targets, removedTargets, order,
+}: {
+  keys: string[];
+  server: PartialDashboardDefaults | null;
+  runs: (PartialDashboardDefaults | null)[];
+  view: PartialDashboardDefaults;
+  favorites: Record<string, boolean>;
+  targets: Record<string, number | null>;
+  removedTargets: string[];
+  order: string[];
+}) {
+  const defaults = resolveDashboardDefaults(server, runs, keys, view);
+  const localFavorites = settingsByMetric(favorites);
+  const localTargets = settingsByMetric(targets);
+  const effectiveFavoriteCharts: Record<string, boolean> = {};
+  const effectiveOptimalValues: Record<string, number | null> = {};
+  for (const key of keys) {
+    const metric = chartBaseName(key);
+    effectiveFavoriteCharts[key] = localFavorites[metric] ?? isStarredByDefault(defaults, key);
+    effectiveOptimalValues[key] = metric in localTargets ? localTargets[metric]
+      : removedTargets.some(name => matchesChart(name, key)) ? null : defaults.targets[key] ?? null;
+  }
+  const savedOrder = uniqueMetrics(order.length ? order : view.order ?? []);
+  const positions = new Map(savedOrder.map((name, index) => [name, index]));
+  const position = (key: string) => positions.get(chartBaseName(key)) ?? Infinity;
+  const placed = keys.filter(key => positions.has(chartBaseName(key)))
+    .sort((a, b) => position(a) - position(b) || a.localeCompare(b));
+  const unplaced = keys.filter(key => !positions.has(chartBaseName(key)))
+    .sort((a, b) => defaultOrderRank(defaults, a) - defaultOrderRank(defaults, b) || a.localeCompare(b));
+  const orderedMetricKeys = [...placed, ...unplaced.filter(key => effectiveFavoriteCharts[key]), ...unplaced.filter(key => !effectiveFavoriteCharts[key])];
+  return { effectiveFavoriteCharts, effectiveOptimalValues, savedOrder, orderedMetricKeys, chartOrder: uniqueMetrics([...savedOrder, ...orderedMetricKeys]) };
+}

@@ -79,7 +79,7 @@ Path resolution:
 - Without an explicit path or a default file, no configuration is required. If you create the default file after starting the CLI, restart to discover it.
 - When running the Rust binary directly, both the default file and relative explicit paths resolve from the server's working directory.
 
-The server re-reads the selected file on each `GET /api/config`, which the dashboard requests on page load. Edit the file and reload the page to apply changes. A missing selected file, invalid TOML, unknown dashboard option, or non-finite target produces a dashboard banner and empty server defaults.
+The server checks the selected file on each `GET /api/config`, which the dashboard requests on page load. Parsed settings are cached by path, modification time and size. Edit the file and reload the page to apply changes. A missing selected file, invalid TOML, unknown dashboard option, or non-finite target produces a dashboard banner and empty server defaults.
 
 ### Per-run settings
 
@@ -96,7 +96,7 @@ aeroboard.init(
 )
 ```
 
-You can also call `aeroboard.configure_dashboard(...)` or `client.configure_dashboard(...)` later. Each call replaces the previous per-run settings. Omitted fields inherit server defaults; an empty `starred` or `order` list clears that configured list for the run. Settings are flushed immediately.
+You can also call `aeroboard.configure_dashboard(...)` or `client.configure_dashboard(...)` later. Each call replaces the previous per-run settings. Omitted fields inherit server defaults; an empty `starred` or `order` list clears that configured list for the run. Settings are queued immediately without waiting for a server acknowledgment; use `flush()` when delivery must complete before continuing.
 
 ### Precedence and metric names
 

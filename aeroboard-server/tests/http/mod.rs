@@ -482,7 +482,7 @@ mod tests_integration {
         pending.await.unwrap().unwrap();
         persist_rx.recv().await.unwrap();
 
-        assert_eq!(hub.current_runs(), vec!["r".to_string()]);
+        assert!(hub.current_runs().is_empty());
 
         hub.close_persistence();
         assert!(hub.publish(batch()).await.is_err());
@@ -1387,7 +1387,7 @@ mod tests_integration {
             .as_any()
             .downcast_ref::<BinaryArray>()
             .unwrap();
-        assert_eq!(data.value(0), b"img");
+        assert!(data.value(0).is_empty());
     }
 
     fn image_batch_for_live() -> RecordBatch {

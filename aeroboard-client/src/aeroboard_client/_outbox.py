@@ -11,6 +11,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import logging
 import threading
 import time
 import uuid
@@ -89,7 +90,9 @@ class DiskOutbox:
 
     def next(self):
         with self._lock:
-            row = self.db.execute("SELECT ordinal,kind,path,body,rows,checksum,status FROM items ORDER BY ordinal LIMIT 1").fetchone()
+            head=self.db.execute("SELECT ordinal,status FROM items ORDER BY ordinal LIMIT 1").fetchone()
+            if head is None:return None
+            row = self.db.execute("SELECT ordinal,kind,path,body,rows,checksum,status FROM items WHERE ordinal=?",(head[0],)).fetchone()
             if row is None:
                 return None
             if row[6] == "rejected":
@@ -98,6 +101,18 @@ class DiskOutbox:
                 self.reject(row[0], "stored payload checksum mismatch")
                 raise OutboxError("stored payload checksum mismatch; entry was quarantined")
             return row[:5]
+
+    def next_group(self):
+        first=self.next()
+        if first is None:return []
+        if first[1]!="flight":return [first]
+        result=[first];size=len(first[3])
+        with self._lock:
+            for row in self.db.execute("SELECT ordinal,kind,path,body,rows,checksum,status FROM items WHERE ordinal>? ORDER BY ordinal LIMIT 15",(first[0],)):
+                if row[1]!="flight" or row[2]!=first[2] or row[6]!="pending" or size+len(row[3])>8*1024*1024:break
+                if hashlib.sha256(row[3]).hexdigest()!=row[5]:break
+                result.append(row[:5]);size+=len(row[3])
+        return result
 
     def acknowledge(self, ordinal):
         with self._lock, self.db:
@@ -125,10 +140,10 @@ class DiskOutbox:
 
 
 class OutboxSender:
-    def __init__(self, outbox, deliver, *, on_error=print, max_queue_bytes=256*1024**2):
+    def __init__(self, outbox, deliver, *, on_error=None, max_queue_bytes=256*1024**2):
         self.outbox = outbox
         self.deliver = deliver
-        self.on_error = on_error
+        self.on_error = on_error or logging.getLogger(__name__).warning
         self.max_queue_bytes = max_queue_bytes
         self._queue = deque()
         self._bytes = 0
@@ -142,6 +157,10 @@ class OutboxSender:
         self._local_failures = 0
         self._workers = 2
         self._final_status = None
+        initial=self.outbox.status()
+        self._pending=initial["pending_batches"]
+        self._rejected=initial["rejected_batches"]
+        self._disk_revision=0
         self._writer = threading.Thread(target=self._write, name="aeroboard-outbox-writer", daemon=True)
         self._sender = threading.Thread(target=self._send, name="aeroboard-outbox-sync", daemon=True)
         self._writer.start(); self._sender.start()
@@ -181,12 +200,18 @@ class OutboxSender:
                     self._writing = True
                 try:
                     if kind == "flight":
+                        from ._protocol import prepare_batch
+                        payload=prepare_batch(payload)
                         stream = pa.BufferOutputStream()
                         with pa.ipc.new_stream(stream,payload.schema) as writer: writer.write_batch(payload)
                         body = stream.getvalue().to_pybytes()
                     else: body = payload
                     self.outbox.append(kind,path,body,rows)
-                except (OSError,sqlite3.Error,OutboxError,pa.ArrowException) as exc:
+                    with self._condition:
+                        self._pending+=1
+                        self._disk_revision+=1
+                        self._condition.notify_all()
+                except (OSError,sqlite3.Error,OutboxError,pa.ArrowException,TypeError,ValueError) as exc:
                     self.on_error(f"[Aeroboard] Local telemetry capture failed: {exc}")
                     with self._condition:
                         self._dropped_rows += rows; self._local_failures += 1
@@ -201,8 +226,10 @@ class OutboxSender:
             while True:
                 with self._condition:
                     if self._stop: return
+                    observed=self._disk_revision
                 try:
-                    item = self.outbox.next()
+                    group=self.outbox.next_group() if hasattr(self.deliver,"send_many") else ([item] if (item:=self.outbox.next()) is not None else [])
+                    item=group[0] if group else None
                 except (OutboxError, sqlite3.Error) as exc:
                     self.on_error(f"[Aeroboard] Outbox recovery stopped: {exc}")
                     with self._condition:
@@ -210,20 +237,24 @@ class OutboxSender:
                         while not self._stop: self._condition.wait(1)
                     return
                 if item is None:
-                    with self._condition: self._condition.wait(0.1)
+                    with self._condition:
+                        while not self._stop and self._disk_revision==observed:self._condition.wait()
                     continue
                 ordinal,kind,path,body,_rows = item
                 with self._condition: self._sending = True
                 delivered = False
                 try:
-                    self.deliver(kind,path,body)
-                    self.outbox.acknowledge(ordinal)
+                    if len(group)>1:self.deliver.send_many(group)
+                    else:self.deliver(kind,path,body)
+                    for entry in group:self.outbox.acknowledge(entry[0])
+                    with self._condition:self._pending-=len(group)
                     delivered = True; delay = 0.5
                 except Exception as exc:
                     status = getattr(exc,"status",500)
                     permanent = isinstance(exc,(OutboxError,pa.ArrowInvalid,pa.ArrowTypeError,fl.FlightUnauthenticatedError,fl.FlightUnauthorizedError)) or 400<=status<500 and status != 429
                     if permanent:
                         self.outbox.reject(ordinal,exc)
+                        with self._condition:self._pending-=1;self._rejected+=1
                         self.on_error(f"[Aeroboard] Outbox entry quarantined: {exc}")
                         # Dependent operations must not pass a rejected registration/definition.
                         with self._condition:
@@ -253,12 +284,12 @@ class OutboxSender:
         deadline = time.monotonic()+(timeout or 10)
         if not self.wait_local(max(0,deadline-time.monotonic())): return False
         with self._condition:
-            while self.outbox.status()["pending_batches"] or self._sending:
+            while self._pending or self._sending:
                 if self._failing: return False
                 remaining = deadline-time.monotonic()
                 if remaining<=0: return False
-                self._condition.wait(min(remaining,0.1))
-            return self.outbox.status()["rejected_batches"] == 0
+                self._condition.wait(remaining)
+            return self._rejected == 0
 
     @property
     def dropped_rows(self):
@@ -266,7 +297,7 @@ class OutboxSender:
 
     @property
     def pending_batches(self):
-        with self._condition: return len(self._queue)+self.outbox.status()["pending_batches"]
+        with self._condition: return len(self._queue)+self._pending
 
     def status(self):
         with self._condition:
@@ -281,7 +312,7 @@ class OutboxSender:
         cancel = getattr(self.deliver,"cancel",None)
         if cancel is not None: cancel()
         self._writer.join(timeout=2)
-        # A Flight call has a five-second bound; HTTP calls have three. Keep
-        # ownership until the active operation finishes and its DB use ends.
-        self._sender.join(timeout=6)
+        # Keep file ownership until the bounded active operation ends. Requests
+        # have a three-second timeout; Flight uploads allow sixty seconds.
+        self._sender.join(timeout=61)
         return delivered

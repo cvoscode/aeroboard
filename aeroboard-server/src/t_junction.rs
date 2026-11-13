@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
-use arrow::array::{Array, AsArray};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::telemetry::TelemetryBatch;
@@ -42,7 +41,10 @@ impl std::error::Error for PersistenceClosed {}
 
 impl TJunction {
     /// Returns the hub and the receiving end of the persistence queue.
-    pub fn new(live_capacity: usize, persist_capacity: usize) -> (Self, mpsc::Receiver<PersistJob>) {
+    pub fn new(
+        live_capacity: usize,
+        persist_capacity: usize,
+    ) -> (Self, mpsc::Receiver<PersistJob>) {
         let (live, _) = broadcast::channel(live_capacity.max(1));
         let (persist_tx, persist_rx) = mpsc::channel(persist_capacity.max(1));
         let hub = Self {
@@ -63,18 +65,32 @@ impl TJunction {
     /// Waits while the persistence queue is full. The returned receiver resolves
     /// once the batch has been written (or failed to be), so ingestion can
     /// acknowledge uploads only after they are durable.
-    pub async fn publish(&self, batch: Arc<TelemetryBatch>) -> Result<oneshot::Receiver<PersistOutcome>, PersistenceClosed> {
-        self.register_batch_runs(&batch);
-        // No live subscribers is normal (no dashboard open).
-        let _ = self.live.send(batch.clone());
-
+    pub async fn publish(
+        &self,
+        batch: Arc<TelemetryBatch>,
+    ) -> Result<oneshot::Receiver<PersistOutcome>, PersistenceClosed> {
         let sender = self.persist.lock().expect("persist lock poisoned").clone();
         let Some(sender) = sender else {
             return Err(PersistenceClosed);
         };
         let (done, outcome) = oneshot::channel();
-        sender.send(PersistJob { batch, done }).await.map_err(|_| PersistenceClosed)?;
+        sender
+            .send(PersistJob { batch, done })
+            .await
+            .map_err(|_| PersistenceClosed)?;
         Ok(outcome)
+    }
+
+    /// Publish only successful, newly committed writes.
+    pub fn committed(&self, batch: Arc<TelemetryBatch>) {
+        self.register_batch_runs(&batch);
+        let _ = self.live.send(batch);
+    }
+    pub fn remove_run(&self, run_id: &str) {
+        self.live_run_ids
+            .lock()
+            .expect("run id lock poisoned")
+            .remove(run_id);
     }
 
     /// Stop accepting batches for persistence; the loop drains what is queued and exits.
@@ -83,7 +99,12 @@ impl TJunction {
     }
 
     pub fn current_runs(&self) -> Vec<String> {
-        self.live_run_ids.lock().expect("run id lock poisoned").iter().cloned().collect()
+        self.live_run_ids
+            .lock()
+            .expect("run id lock poisoned")
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Pick a run ID with `choose` (given the live run IDs) and register it, all
@@ -97,20 +118,17 @@ impl TJunction {
 
     /// Clear all live run IDs (e.g., after deleting all persisted runs).
     pub fn clear_live_runs(&self) {
-        self.live_run_ids.lock().expect("run id lock poisoned").clear();
+        self.live_run_ids
+            .lock()
+            .expect("run id lock poisoned")
+            .clear();
     }
 
     fn register_batch_runs(&self, telemetry: &TelemetryBatch) {
-        // Batches are validated before publishing, so column 1 is a Utf8 `run_id`.
-        let run_id_array = telemetry.batch.column(1).as_string::<i32>();
-        let mut known = self.live_run_ids.lock().expect("run id lock poisoned");
-        for index in 0..run_id_array.len() {
-            if !run_id_array.is_null(index) {
-                let run_id = run_id_array.value(index);
-                if !known.contains(run_id) {
-                    known.insert(run_id.to_string());
-                }
-            }
-        }
+        let runs = telemetry.run_ids();
+        self.live_run_ids
+            .lock()
+            .expect("run id lock poisoned")
+            .extend(runs.iter().cloned());
     }
 }

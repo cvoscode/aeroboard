@@ -1,21 +1,14 @@
+import { flags as asRecord, names as asStringArray } from "../lib/controls";
 import { usePersistentState } from "./usePersistentState";
 
 export type WidthMode = "compact" | "wide" | "full";
 
-const WIDTH_STORAGE_KEY = "aeroboard-width-mode";
 const FAVORITES_STORAGE_KEY = "aeroboard-favorite-charts";
 const COLLAPSED_STORAGE_KEY = "aeroboard-collapsed-charts";
 const ORDER_STORAGE_KEY = "aeroboard-ordered-metrics";
 const EXPERIMENTS_STORAGE_KEY = "aeroboard-collapsed-experiments";
 const RUN_COLORS_STORAGE_KEY = "aeroboard-run-colors";
 const OPTIMAL_VALUES_STORAGE_KEY = "aeroboard-optimal-values";
-
-function asRecord(raw: unknown): Record<string, boolean> {
-  if (!raw || typeof raw !== "object") return {};
-  return Object.fromEntries(
-    Object.entries(raw).filter((entry): entry is [string, boolean] => typeof entry[1] === "boolean"),
-  );
-}
 
 function asStringRecord(raw: unknown): Record<string, string> {
   if (!raw || typeof raw !== "object") return {};
@@ -35,17 +28,8 @@ function asOptionalNumberRecord(raw: unknown): Record<string, number | null> {
   );
 }
 
-function asStringArray(raw: unknown): string[] {
-  return Array.isArray(raw) ? raw.filter((entry): entry is string => typeof entry === "string") : [];
-}
-
-function asWidthMode(raw: unknown): WidthMode {
-  return raw === "compact" || raw === "wide" || raw === "full" ? raw : "wide";
-}
-
 export function useDashboardPreferences(scope = "legacy") {
   const scoped = (key: string) => scope === "legacy" ? key : `${key}:${scope}`;
-  const [widthMode, setWidthMode] = usePersistentState<WidthMode>(scoped(WIDTH_STORAGE_KEY), "wide", asWidthMode);
   const [favoriteCharts, setFavoriteCharts] = usePersistentState<Record<string, boolean>>(
     scoped(FAVORITES_STORAGE_KEY),
     {},
@@ -95,8 +79,6 @@ export function useDashboardPreferences(scope = "legacy") {
     Object.keys(optimalValues).length > 0;
 
   return {
-    widthMode,
-    setWidthMode,
     favoriteCharts,
     setFavoriteCharts,
     collapsedCharts,

@@ -363,12 +363,15 @@ See the full runnable example in [examples/ray_tune_example.py](examples/ray_tun
 ---
 
 ## Architecture Flow Recap
-1. Python Client -> `RecordBatch` construction -> **Arrow Flight gRPC**.
-2. Rust Server -> Internal `Tokio::Broadcast`.
-3. **Path A**: Rust intercepts broadast -> Formats as Influx Line Protocol -> Async POST to GreptimeDB.
-4. **Path B**: Rust pulls from broadcast -> Formats as `StreamWriter` binary bytes -> WebSockets `/ws/live`.
-5. React Frontend -> Pulls binary `ArrayBuffer` from WS -> Extract native `Float64Array`.
-6. `uPlot` React component -> Paints fast Canvas graphs natively at 60 FPS.
+
+The SDK queues Arrow batches for background delivery over Flight. The server
+reserves receipt identities, writes a group to per-run segments (or native
+Greptime tables), and commits summaries, assets and receipts before acknowledging.
+Committed data streams only to subscribed dashboards. The browser keeps scalar
+columns in typed buffers and decimates charts by viewport width; zooms fetch
+full-resolution windows. See [ARCHITECTURE.md](ARCHITECTURE.md) and the
+[protocol specification](protocol/README.md).
+
 
 ---
 

@@ -107,3 +107,24 @@ def test_client_logging_survives_server_outage():
         assert client._scalar_buffer == []
         client.close(timeout=0.2)
         assert client.had_error()
+
+
+def test_image_encoding_runs_on_sender_and_snapshots_mutable_inputs(monkeypatch):
+    import threading
+    import aeroboard_client.client as module
+    from test_logging_payloads import DummyFlightClient
+    entered,release=threading.Event(),threading.Event()
+    caller=threading.get_ident();workers=[]
+    def encode(image,**kwargs):
+        workers.append(threading.get_ident());entered.set();assert release.wait(2)
+        assert image==b'original'
+        return image,'png'
+    monkeypatch.setattr(module.fl,'FlightClient',DummyFlightClient)
+    monkeypatch.setattr(module.AeroboardClient,'_resolve_run_id',lambda self,base:base)
+    monkeypatch.setattr(module,'_coerce_image_bytes',encode)
+    client=module.AeroboardClient('image-thread',batch_size=1)
+    try:
+        value=bytearray(b'original');client.log_image('image',value);value[:]=b'modified'
+        assert entered.wait(1);assert workers==[workers[0]] and workers[0]!=caller
+        release.set();assert client.flush()
+    finally:release.set();client.close()

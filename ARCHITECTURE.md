@@ -1,97 +1,127 @@
-# Aeroboard Architecture
+# Aeroboard architecture
 
-Aeroboard is a real-time experiment telemetry system for ML workflows: a Python SDK
-sends scalar metrics, hyperparameters and media as Arrow batches to a Rust server,
-which streams them live to a React dashboard and persists them for history.
+Aeroboard combines a Rust/Axum/Arrow Flight server, a Python SDK and CLI, and a
+React/TypeScript dashboard. The root `pyproject.toml` packages the SDK from
+`aeroboard-client/src/aeroboard_client`. Optional Lightning and Ray modules load
+only when their integration classes are requested.
 
-More detail lives in the developer guide:
-[architecture](docs/developer-guide/architecture.md) ·
-[storage model](docs/developer-guide/storage-model.md) ·
-[HTTP API](docs/reference/http-api.md) ·
-[configuration](docs/reference/configuration.md).
+## Delivery and visibility
 
-## Repository layout
+1. The SDK buffers scalar columns, then queues Arrow batches. Image inputs are
+   snapshotted before returning to training; the sender encodes them as WebP.
+   Checksums and IPC serialization run on the delivery worker. `flush()` waits
+   for an acknowledgment; `configure_dashboard()` only queues its update.
+2. Durable SDK mode journals operations in a SQLite outbox. Its writer notifies
+   the sender when work becomes available. Consecutive compatible batches share
+   a Flight stream, with an envelope in each batch's application metadata.
+3. Flight validates schemas, checksums, store/run/session identity and assets,
+   canonicalizes run names, and submits to a bounded persistence queue.
+4. Persistence collects up to 64 jobs / 16 MiB in a 2 ms window. It reserves
+   receipt identities in one transaction, writes the payload group, then commits
+   locations, assets, summaries, scores and receipts together. A lost response
+   can be retried without double-counting observations.
+5. Only newly committed batches enter the live broadcast channel. WebSocket
+   subscriptions select runs. Persistent images, audio and video carry metadata
+   with empty binary payloads; clients retrieve media by asset ID. Other runs
+   produce lightweight activity notices. Lagging subscribers resync history.
 
-- `aeroboard-client/src/aeroboard_client/`: Python SDK and `aeroboard` CLI (packaged by the root `pyproject.toml`).
-- `aeroboard-server/`: Rust ingestion, streaming, persistence and history API; also serves the dashboard.
-- `aeroboard-web/`: React/Vite dashboard.
-- `examples/`: runnable training scripts (plain PyTorch, Lightning, Ray Tune).
-- `tests/`: Python SDK tests. Rust tests live in `aeroboard-server/src/tests.rs`, frontend tests in `aeroboard-web/tests/`.
-- `docker-compose.yml`: optional local GreptimeDB.
+SIGINT and SIGTERM stop the servers and drain accepted writes. The CLI forwards
+termination to its child. HTTP JSON and static responses can be compressed; binary IPC bypasses HTTP compression;
+release assets also contain precompressed gzip files.
 
-## Runtime topology
+## Catalog
 
-```mermaid
-flowchart LR
-    P[Training process<br/>Python SDK] -->|Arrow Flight do_put<br/>:50051| I[Ingestion<br/>validate + normalize]
-    I --> T{TJunction}
-    T -->|bounded mpsc<br/>backpressure| PL[Persistence loop]
-    PL --> S[(StorageEngine<br/>filesystem / GreptimeDB / live-only)]
-    PL -.->|outcome per batch| I
-    PL --> SC[Summary cache]
-    T -->|broadcast<br/>best effort| WS[WebSocket /ws/live]
-    B[Dashboard] -->|GET /api/history?format=arrow<br/>/api/runs/summary, /api/history/media/content| H[History API :3000]
-    H --> S
-    H --> SC
-    WS --> B
-```
+Each persistent data directory contains `catalog.sqlite` in WAL mode, with one
+writer connection and four read connections. Read operations use snapshots.
+Schema version 2 migrates existing receipts to indexed `session_id` and `kind`
+columns and enforces `(run_uid, session_id, sequence)` uniqueness.
 
-Both servers listen on `127.0.0.1` by default (`AEROBOARD_HOST` to change). There is
-no authentication, and no CORS headers are sent unless `AEROBOARD_CORS_ORIGINS` is set.
+`run_lookup` indexes canonical names, project membership and tombstones.
+`payload_locations` maps receipts to storage handles. `run_summaries`,
+`run_scores`, `summary_batches` and `data_revisions` maintain durable reducers and
+per-run revisions. Default score requests read snapshots; a changed objective
+requires a history rebuild outside the write gate. The rebuilt snapshot is saved
+only if the run revision has not advanced during the query.
 
-## End-to-end flow
+Typed entity shapes document runs, sessions, assets and events. Catalog writes
+emit entity kind, ID and revision; heartbeat writes are quiet. The dashboard loads
+capabilities once, patches changed runs and reloads the affected metadata kinds.
+Scores update from data notifications rather than periodic polling.
 
-1. **SDK.** `log()`/`log_metrics()` append rows to in-memory buffers. At `batch_size` the
-   buffer becomes a `RecordBatch` and goes to a background sender thread, which uploads
-   batches in order, retries transient failures with backoff, drops batches the server
-   rejects, and caps unsent data at `max_queue_bytes` (oldest dropped first). Training
-   code never waits on the network. `flush()` waits until the server confirms storage.
-   Run IDs are resolved and reserved by the server (`POST /api/runs/resolve`).
-2. **Ingestion.** `do_put` decodes the stream, determines the kind (descriptor path or
-   column names), and validates and casts each batch to the canonical schema in
-   `schema.rs`. Malformed batches fail the call with `INVALID_ARGUMENT`; they never reach
-   storage code.
-3. **T-junction.** Each batch goes to the live broadcast channel and to the bounded
-   persistence queue. A full queue makes ingestion wait instead of dropping data.
-4. **Persistence.** One loop appends each batch to the `StorageEngine`, updates the
-   summary cache, and reports the outcome to the waiting upload. `do_put` acknowledges
-   only after every batch of the upload is stored, so storage errors reach the client
-   and are retried.
-5. **Live stream.** Each batch is IPC-encoded once and pushed to every WebSocket client.
-   Audio/video payloads are stripped when persisted (clients fetch them lazily). A lagging
-   client gets a `{"type":"lagged"}` message and re-fetches history.
-6. **Dashboard.** On selecting a run it loads history as one Arrow IPC response and merges
-   it with live points already received (sorted by time and step, de-duplicated). It
-   reconnects automatically and re-syncs after gaps. Media is displayed by URL.
+## Storage
 
-## Data model
+The receipt layer delegates payload operations to `PayloadBackend`. It contains
+no backend HTTP client or SQL implementation.
 
-| Kind | Columns (canonical) |
-| --- | --- |
-| scalars | `timestamp` (ms), `run_id`, `name`, `value` (f64), `step` (f64, nullable) |
-| hyperparameters | `timestamp`, `run_id`, `key`, `value`, `value_type` |
-| images / audio / video | `timestamp`, `run_id`, `name`, `image_data`/`audio_data`/`video_data` (binary), `format` |
-| distributions | schema reserved; not persisted or exposed by the SDK |
+### Filesystem
 
-Older clients that send scalars without `step` are accepted; the column is filled with nulls.
+Identified batches live in `segments/<run-uid>/<kind>/<number>.segment`, rolled at
+64 MiB. Each record is a little-endian uint64 IPC-byte length followed by one IPC
+stream. Catalog handles store file path, offset and length. Payload groups share
+file fsyncs; directory entries are synced before the receipt commit. History
+opens each segment once per query and reads its referenced ranges.
 
-## Storage backends
+On startup, old committed `batches/<batch-id>.arrow` payloads are copied into
+segments. Their handles commit before old files are removed, making interruption
+safe to retry. Existing legacy JSONL, JSON-array and raw Arrow run directories
+remain readable for envelope-less clients; these compatibility paths are covered
+by tests. Newly identified SDK uploads always use segments.
 
-- **Filesystem** (default): per-run directories with append-only JSON Lines indexes and
-  one file per media item. Appends cost O(batch) and all I/O runs on the blocking pool.
-  Legacy `index.json` / `*.arrow` layouts are still read.
-- **GreptimeDB**: line-protocol writes into pre-created append-mode tables keyed on
-  `(run_id, metric)`, SQL reads. Tables from Aeroboard < 0.2 must be dropped (Delete All).
-- **Live-only**: nothing is persisted; history endpoints return empty results.
+### GreptimeDB
 
-## Design decisions
+New scalars and hyperparameters use native `aeroboard_scalars` and
+`aeroboard_hyperparameters` tables. Batch ID and row ordinal participate in their
+keys, so retries overwrite the same rows while distinct same-millisecond steps
+remain distinct. Numeric `value` supports external SQL queries; `value_bits`
+retains exact non-finite diagnostics and signed zero. Batch reads share SQL
+requests. Table creation and HTTP retries use the common Greptime client.
 
-- **Separate persistence and live paths.** Durable storage needs backpressure and
-  acknowledgement; live viewing needs low latency and may drop. They used to share one
-  broadcast channel, which silently dropped persisted data whenever storage lagged.
-- **Validate at the edge.** Storage codecs use positional typed downcasts. Normalizing
-  every batch at ingestion keeps a single malformed upload from panicking the server.
-- **Acknowledge after storage.** It makes `flush()` meaningful and gives at-least-once
-  persistence when combined with client retries.
-- **Arrow end to end.** Ingestion, live push and history all use Arrow. Dictionary-encoded
-  history is several times smaller than the equivalent JSON.
+Media bytes use local segments, with catalog asset metadata. Keep the data
+volume with the catalog when running Greptime mode. Startup migrates the old
+hex-encoded `aeroboard_batches` blobs into native rows or media segments before
+removing the old blobs. The older native tables remain readable through the
+compatibility engine.
+
+## History and charts
+
+The identified scalar path filters, concatenates and sorts Arrow columns, with
+an ordered-data fast path. Names are dictionary encoded for responses. IPC is
+streamed in bounded chunks; CSV uses one storage snapshot rather than re-reading
+history for each page. JSON and analytics consumers convert to rows only at
+their API boundary. `max_points` reduces each run/metric series for overviews;
+raw export remains full resolution.
+
+Payload records and history snapshots each have a 128 MiB LRU cache. Snapshot
+keys include the selected runs' data revisions and deletion state, plus the
+metric/time filters and overview budget. Pages share one snapshot; cursor and
+page size only slice its columns. Larger snapshots are served without retention.
+
+The browser merges column vectors directly into per-series buffers. It starts
+with 128 entries and grows geometrically. Wall time, value and step are stored;
+relative/plot axes are derived. Sorted merge removes live/history overlaps, and
+reconnect requests include a timestamp overlap window.
+
+Charts use per-series subscriptions and versions. Ordinary scalar arrivals do
+not tick the entire app. Chart cards mount canvases near the viewport, decimate
+with min/max buckets and refine zoom windows from full-resolution history. Axis
+bounds use timestamps at the ends of each series and maintained step extrema.
+Chart settings context shares stable keyed actions and event markers. Preference
+resolution is a pure function covering server, run, saved-view and local settings.
+Controls, socket lifecycle, deletion and SDK integrations have separate modules;
+component stylesheet files preserve the existing cascade.
+
+## Verification and compatibility
+
+The shared protocol and checksum vectors live in [protocol/](protocol/README.md).
+The SDK negotiates protocol v2 and preserves v1 and older-server naming fallbacks.
+Legacy storage and the `CORS_ORIGIN` alias remain supported intentionally.
+
+Rust API fixtures live under `aeroboard-server/tests/`, unit tests beside modules,
+Python tests under `tests/`, and frontend/browser tests under `aeroboard-web/tests/`.
+CI runs formatting, lint, builds and all five browser suites. Release downloads
+must match the published `SHA256SUMS` before extraction.
+
+[benchmarks/ingest_history.py](benchmarks/ingest_history.py) measures both receipt
+sizes (10k/1M), both batch sizes (100/5,000), a million-point history, and optional
+browser navigation-to-chart. It creates disposable data directories and accepts
+an original server binary for comparisons.

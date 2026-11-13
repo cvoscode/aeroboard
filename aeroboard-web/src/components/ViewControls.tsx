@@ -1,3 +1,6 @@
+import { useCallback, useSyncExternalStore } from "react";
+import { seriesVersion,subscribeSeries } from "../hooks/aeroboard/seriesSubscriptions";
+import type { TimeSeriesData } from "../hooks/useAeroboard";
 import { DualRangeSlider } from "./DualRangeSlider";
 import type { XAxisType } from "./LineChart";
 import type { WidthMode } from "../hooks/useDashboardPreferences";
@@ -26,6 +29,8 @@ interface ChartControlsProps {
   canResetChartView: boolean;
   onResetChartView: () => void;
   bounds: [number, number];
+  series?: TimeSeriesData[];
+  readBounds?: ()=>[number,number];
   globalXRange: [number, number] | null;
   onGlobalXRangeChange: (value: [number, number] | null) => void;
 }
@@ -42,10 +47,15 @@ export function ChartControls({
   onWidthModeChange,
   canResetChartView,
   onResetChartView,
-  bounds,
+  bounds:initialBounds,
+  series=[],readBounds,
   globalXRange,
   onGlobalXRangeChange,
 }: ChartControlsProps) {
+  const subscribe=useCallback((listener:()=>void)=>{const cleanup=series.map(data=>subscribeSeries(data,listener));return ()=>cleanup.forEach(fn=>fn());},[series]);
+  const snapshot=useCallback(()=>series.map(seriesVersion).join(','),[series]);
+  useSyncExternalStore(subscribe,snapshot,snapshot);
+  const bounds=readBounds?.()??initialBounds;
   return (
     <section className="view-controls" aria-label="Chart settings">
       <div className="view-control">

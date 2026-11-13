@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import platform
 import shutil
@@ -130,15 +131,25 @@ def _download_asset(asset_name: str, destination: Path) -> Path:
         _asset_url(asset_name),
         headers={"User-Agent": f"aeroboard/{package_version()}"},
     )
+    temporary=destination.with_name(destination.name+".partial")
     try:
-        with urllib.request.urlopen(request) as response, destination.open("wb") as handle:
-            shutil.copyfileobj(response, handle)
-    except urllib.error.HTTPError as exc:
-        raise RuntimeAssetError(
-            f"Release artifact '{asset_name}' was not found at {_asset_url(asset_name)}"
-        ) from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeAssetError(f"Failed to download release artifact '{asset_name}': {exc.reason}") from exc
+        manifest_request=urllib.request.Request(_asset_url("SHA256SUMS"),headers={"User-Agent":f"aeroboard/{package_version()}"})
+        with urllib.request.urlopen(manifest_request,timeout=30) as response:
+            manifest=response.read().decode("utf-8")
+        checksums={parts[1].lstrip("*"):parts[0] for line in manifest.splitlines() if len(parts:=line.split())==2}
+        expected=checksums.get(asset_name)
+        if expected is None or len(expected)!=64:
+            raise RuntimeAssetError(f"Release checksum missing for '{asset_name}'")
+        digest=hashlib.sha256()
+        with urllib.request.urlopen(request,timeout=60) as response,temporary.open("wb") as handle:
+            while chunk:=response.read(1024*1024):digest.update(chunk);handle.write(chunk)
+        if digest.hexdigest()!=expected.lower():raise RuntimeAssetError(f"Release checksum mismatch for '{asset_name}'")
+        temporary.replace(destination)
+    except (urllib.error.URLError,OSError,UnicodeError) as exc:
+        raise RuntimeAssetError(f"Failed to download verified release artifact '{asset_name}': {exc}") from exc
+    finally:
+        temporary.unlink(missing_ok=True)
+
     return destination
 
 

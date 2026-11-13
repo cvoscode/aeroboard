@@ -91,6 +91,18 @@ impl GreptimeStore {
         Ok(())
     }
 
+    pub(super) async fn write_payload(&self, body: String) -> Result<(), BoxError> {
+        let response = self
+            .send_with_retry(|| self.client.post(self.write_url()).body(body.clone()))
+            .await?;
+        if !response.status().is_success() {
+            return Err(boxed_error(format!(
+                "Greptime write: {}",
+                response.text().await?
+            )));
+        }
+        Ok(())
+    }
     fn write_url(&self) -> String {
         format!("{}/v1/influxdb/write?db=public&precision=ns", self.base_url)
     }
@@ -143,7 +155,7 @@ impl GreptimeStore {
 
     /// Run a SQL query. `Ok(None)` means the table doesn't exist yet (nothing of
     /// that kind has been written), which callers treat as "no rows".
-    async fn sql(&self, sql: &str) -> Result<Option<Value>, BoxError> {
+    pub(super) async fn sql(&self, sql: &str) -> Result<Option<Value>, BoxError> {
         let url = self.sql_url();
         // POST keeps long `IN (...)` filters out of the URL.
         let response = self
@@ -151,7 +163,14 @@ impl GreptimeStore {
             .await?;
         let status = response.status();
         if status.is_success() {
-            return Ok(Some(response.json().await?));
+            let body: Value = response.json().await?;
+            if let Some(error) = body.get("error") {
+                if is_missing_table(status, &error.to_string()) {
+                    return Ok(None);
+                }
+                return Err(boxed_error(format!("GreptimeDB SQL error: {error}")));
+            }
+            return Ok(Some(body));
         }
         let body = response.text().await.unwrap_or_default();
         if is_missing_table(status, &body) {
@@ -478,11 +497,10 @@ impl StorageEngine for GreptimeStore {
     /// Runs that have any persisted data, not just scalars.
     async fn list_runs(&self) -> Result<Vec<String>, BoxError> {
         let mut runs = BTreeSet::new();
-        for table in TABLES {
-            let Some(body) = self
-                .sql(&format!("SELECT DISTINCT run_id FROM {table}"))
-                .await?
-            else {
+        let queries = TABLES.map(|table| format!("SELECT DISTINCT run_id FROM {table}"));
+        let responses = futures::future::join_all(queries.iter().map(|sql| self.sql(sql))).await;
+        for response in responses {
+            let Some(body) = response? else {
                 continue;
             };
             for row in extract_rows(&body)? {

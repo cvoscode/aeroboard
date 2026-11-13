@@ -42,6 +42,7 @@ Returns persisted scalar history plus aggregated run summaries.
 | `end_ms` | integer | Inclusive upper timestamp bound in milliseconds |
 | `limit` | integer | Maximum number of rows to return |
 | `cursor` | integer | Position-based pagination cursor |
+| `max_points` | integer | Optional per-run/metric overview limit, from 4 to 1,000,000; omit for full resolution |
 | `include_summaries` | boolean | Include `run_summaries` (default `true`) |
 | `format` | string | `json` (default) or `arrow` |
 
@@ -240,7 +241,15 @@ Returns the canonical run ID that should be used for a proposed base run name.
 
 ## `GET /ws/live`
 
-Upgrades to a WebSocket connection and streams live Arrow IPC batches as binary messages.
+Upgrades to a WebSocket connection and streams committed Arrow IPC batches as binary messages.
+
+Send `{"type":"subscribe","runs":["canonical-run-id"]}` after connecting and
+when selections change. The server filters binary batches by run. Clients that
+have not subscribed retain the legacy all-run stream. Persistent images, audio
+and video carry metadata with empty payload columns; fetch their asset URLs.
+`data_changed` messages identify runs with activity; entity `*_changed` messages
+include `kind`, `id` and `revision`. Heartbeats do not broadcast catalog reloads.
+A `lagged` message asks the client to resync history.
 
 When persistence is enabled, audio and video payloads are stripped from live messages; clients load them from `/api/history/media/content`.
 

@@ -1,3 +1,4 @@
+import { useScores } from "../hooks/useWorkspace";
 import { MetricName } from "./MetricName";
 import type { Score } from "../hooks/useWorkspace";
 
@@ -60,4 +61,9 @@ export function ObjectiveOverview({ scores, showRun, open, onOpenChange }: Objec
       </div>
     </details>
   );
+}
+
+export function LiveObjectiveOverview({runIds,revision,...props}:Omit<ObjectiveOverviewProps,'scores'>&{runIds:string[];revision:number}) {
+  const {scores,error}=useScores(runIds,null,revision);
+  return <>{error?<p role="status">Scorecards unavailable: {error}</p>:null}<ObjectiveOverview {...props} scores={scores}/></>;
 }

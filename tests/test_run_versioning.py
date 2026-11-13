@@ -52,7 +52,7 @@ def test_client_prefers_server_side_run_resolution():
     resolve_response.json.return_value = {"run_id": "experiment-v3"}
 
     with patch("aeroboard_client.client.fl.FlightClient"):
-        with patch("requests.post", return_value=resolve_response):
+        with patch("requests.Session.post", return_value=resolve_response):
             client = AeroboardClient(run_id="experiment")
             assert client.run_id == "experiment-v3"
 
@@ -62,7 +62,7 @@ def test_client_falls_back_to_live_run_listing_when_resolve_endpoint_unavailable
     runs_response.json.return_value = {"runs": ["experiment", "experiment-v2"]}
 
     with patch("aeroboard_client.client.fl.FlightClient"):
-        with patch("requests.post", side_effect=RuntimeError("unavailable")):
-            with patch("requests.get", return_value=runs_response):
+        with patch("requests.Session.post", side_effect=RuntimeError("unavailable")):
+            with patch("requests.Session.get", return_value=runs_response):
                 client = AeroboardClient(run_id="experiment")
                 assert client.run_id == "experiment-v3"

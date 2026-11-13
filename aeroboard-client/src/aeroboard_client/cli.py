@@ -207,13 +207,24 @@ def start(host, cors_origins, port, flight_port, storage, data_dir, build_from_s
     elif os.path.isfile("aeroboard.toml"):
         env["AEROBOARD_DASHBOARD_CONFIG"] = os.path.abspath("aeroboard.toml")
 
+    import signal
+    child=subprocess.Popen([binary_path],cwd=os.path.dirname(binary_path),env=env)
+    previous=signal.getsignal(signal.SIGTERM)
+    def terminate(_signum,_frame):
+        child.terminate()
+    signal.signal(signal.SIGTERM,terminate)
     try:
-        result = subprocess.run([binary_path], cwd=os.path.dirname(binary_path), env=env, check=False)
-        if result.returncode != 0:
-            click.echo(f"Error: Aeroboard server exited with code {result.returncode}", err=True)
-            sys.exit(result.returncode)
+        code=child.wait()
+        if code!=0:
+            click.echo(f"Error: Aeroboard server exited with code {code}",err=True)
+            sys.exit(code)
     except KeyboardInterrupt:
         click.echo("\n👋 Shutting down...")
+        # On terminals the child receives SIGINT too; terminate is idempotent.
+        child.terminate()
+        child.wait()
+    finally:
+        signal.signal(signal.SIGTERM,previous)
 
 
 @main.command()

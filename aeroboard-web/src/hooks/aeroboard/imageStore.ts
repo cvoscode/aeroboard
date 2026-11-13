@@ -2,6 +2,11 @@ import type { ImageFrame, ImageSeries } from "./types";
 
 export type ImageStore = Record<string, Record<string, ImageSeries>>;
 
+const MAX_LIVE_IMAGE_BLOBS=32;
+function capLiveBlobs(frames:ImageFrame[]) {
+  let kept=0;
+  for(let i=frames.length-1;i>=0;i--)if(frames[i].objectUrl&&++kept>MAX_LIVE_IMAGE_BLOBS){URL.revokeObjectURL(frames[i].objectUrl!);delete frames[i].objectUrl;}
+}
 export function upsertImageFrame(imageStore: ImageStore, frame: ImageFrame) {
   const runSeries = (imageStore[frame.run_id] ??= {});
   const series = (runSeries[frame.name] ??= { run_id: frame.run_id, name: frame.name, frames: [] });
@@ -10,7 +15,7 @@ export function upsertImageFrame(imageStore: ImageStore, frame: ImageFrame) {
   // Fast path: live frames arrive in timestamp order.
   const last = frames[frames.length - 1];
   if (!last || last.ts_ms < frame.ts_ms) {
-    frames.push(frame);
+    frames.push(frame);capLiveBlobs(frames);
     return;
   }
 
@@ -21,11 +26,11 @@ export function upsertImageFrame(imageStore: ImageStore, frame: ImageFrame) {
       URL.revokeObjectURL(existing.objectUrl);
     }
     frames[existingIndex] = { ...existing, ...frame, objectUrl: frame.objectUrl ?? existing.objectUrl };
-    return;
+    capLiveBlobs(frames);return;
   }
 
   frames.push(frame);
-  frames.sort((a, b) => a.ts_ms - b.ts_ms);
+  frames.sort((a, b) => a.ts_ms - b.ts_ms);capLiveBlobs(frames);
 }
 
 export function getImageSeriesForRun(imageStore: ImageStore, runId: string): ImageSeries[] {

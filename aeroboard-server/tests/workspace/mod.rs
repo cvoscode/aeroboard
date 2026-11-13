@@ -389,11 +389,11 @@ mod tests {
             cursor: Some(1),
             ..Default::default()
         };
-        let mut selection = crate::storage::query::HistorySelection::new(&query);
-        for time in [10, 3, 8, 1, 5] {
-            selection.push(point(time, None, time as f64));
-        }
-        let page = crate::storage::query::apply_history_query(selection.finish(), &query);
+        let rows = [10, 3, 8, 1, 5]
+            .into_iter()
+            .map(|time| point(time, None, time as f64))
+            .collect();
+        let page = crate::storage::query::apply_history_query(rows, &query);
         assert_eq!(
             page.rows.iter().map(|p| p.ts_ms).collect::<Vec<_>>(),
             vec![3, 5]

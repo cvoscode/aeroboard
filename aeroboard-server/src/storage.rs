@@ -2,6 +2,7 @@ pub(crate) mod codec;
 mod durable;
 mod filesystem;
 mod greptime;
+mod payload;
 pub(crate) mod query;
 pub use durable::DurableStore;
 
@@ -28,6 +29,15 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 #[async_trait]
 pub trait StorageEngine: Send + Sync {
+    async fn initialize(&self) -> Result<(), BoxError> {
+        Ok(())
+    }
+    async fn persisted_summaries(
+        &self,
+        _runs: &BTreeSet<String>,
+    ) -> Result<Option<Vec<crate::history::RunSummary>>, BoxError> {
+        Ok(None)
+    }
     async fn load_asset(&self, _id: &str) -> Result<Option<MediaPayload>, BoxError> {
         Ok(None)
     }
@@ -37,6 +47,29 @@ pub trait StorageEngine: Send + Sync {
         ))
     }
     async fn append_batch(&self, batch: Arc<TelemetryBatch>) -> Result<(), BoxError>;
+    /// Each result reports whether this is a newly committed batch.
+    async fn append_group(&self, batches: Vec<Arc<TelemetryBatch>>) -> Vec<Result<bool, String>> {
+        let mut results = Vec::with_capacity(batches.len());
+        for batch in batches {
+            results.push(
+                self.append_batch(batch)
+                    .await
+                    .map(|()| true)
+                    .map_err(|e| e.to_string()),
+            );
+        }
+        results
+    }
+    async fn query_history_batches(
+        &self,
+        query: &HistoryQueryOptions,
+    ) -> Result<QueryPage<arrow::record_batch::RecordBatch>, BoxError> {
+        let page = self.query_history(query).await?;
+        Ok(QueryPage {
+            rows: vec![crate::history::history_rows_to_batch(&page.rows)?],
+            next_cursor: page.next_cursor,
+        })
+    }
     async fn query_history(
         &self,
         query: &HistoryQueryOptions,

@@ -1,0 +1,128 @@
+[
+  {
+    "name": "scalars",
+    "columns": [
+      {
+        "name": "timestamp",
+        "type": "t",
+        "values": [
+          1,
+          1,
+          2,
+          3
+        ]
+      },
+      {
+        "name": "run_id",
+        "type": "s",
+        "values": [
+          "r",
+          "r",
+          "r",
+          "r"
+        ]
+      },
+      {
+        "name": "name",
+        "type": "s",
+        "values": [
+          "loss",
+          "loss",
+          "loss",
+          "é"
+        ]
+      },
+      {
+        "name": "value",
+        "type": "f",
+        "values": [
+          1.5,
+          "NaN",
+          "-0",
+          "Infinity"
+        ]
+      },
+      {
+        "name": "step",
+        "type": "f",
+        "values": [
+          0,
+          null,
+          2,
+          3
+        ]
+      }
+    ],
+    "v1": "8f8919683469a5ca40e5cd4f179667fb80e55ff751fd22ef4645bcbae8dd5482",
+    "v2": "025c8c6c35af0416a18cc6c6223215f218f0a1cb92f2f111495a033c85dc8e34"
+  },
+  {
+    "name": "media",
+    "columns": [
+      {
+        "name": "timestamp",
+        "type": "t",
+        "values": [
+          0,
+          5
+        ]
+      },
+      {
+        "name": "run_id",
+        "type": "s",
+        "values": [
+          "μ",
+          "μ"
+        ]
+      },
+      {
+        "name": "name",
+        "type": "s",
+        "values": [
+          "image",
+          "image"
+        ]
+      },
+      {
+        "name": "image_data",
+        "type": "b",
+        "values": [
+          "00ff10",
+          ""
+        ]
+      },
+      {
+        "name": "format",
+        "type": "s",
+        "values": [
+          "png",
+          null
+        ]
+      }
+    ],
+    "v1": "9010d91072e6c19a59ddb3b91e814e39aeaacaf6fac9bc3cd160cb2096778d63",
+    "v2": "c1c4db3dcf04d277917010eb9ead4b336b54eb464024b56c064fbe7b26429cc4"
+  },
+  {
+    "name": "empty",
+    "columns": [
+      {
+        "name": "timestamp",
+        "type": "t",
+        "values": []
+      },
+      {
+        "name": "name",
+        "type": "s",
+        "values": []
+      },
+      {
+        "name": "value",
+        "type": "f",
+        "values": []
+      }
+    ],
+    "v1": "2ede79ba51cbe977bc50b02d66e148edfb5e79a3b2e127584e7f084c26fab74b",
+    "v2": "3d8b11a6d6340bea42300a5ce12df3c246e3c4a19358e40d417a684b1abf688a"
+  }
+]

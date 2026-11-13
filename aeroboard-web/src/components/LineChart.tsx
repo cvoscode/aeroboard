@@ -1,3 +1,5 @@
+import { seriesVersion } from "../hooks/aeroboard/seriesSubscriptions";
+import { minMaxIndices } from "../lib/decimation";
 import { useEffect, useMemo, useRef, useState } from 'react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
@@ -12,6 +14,7 @@ export type XAxisType = 'wall' | 'rel' | 'step';
 export interface ChartMarker { id: string; x: number; label: string }
 
 interface LineChartProps {
+    dataVersion?: number;
     yAxisScale?: YAxisScale;
     showTrend?: boolean;
     markers?: ChartMarker[];
@@ -119,7 +122,7 @@ function seriesId(data: TimeSeriesData): number {
 
 export function LineChart({
     yAxisScale = 'linear', showTrend = false, markers = [], onMarkerSelect,
-    title, seriesData, themeKey, xAxisType,
+    title, seriesData, themeKey, xAxisType, dataVersion,
     smoothing = 0, removeOutliers = false,
     xRange = null,
     referenceValue = null,
@@ -134,16 +137,16 @@ export function LineChart({
     referenceValueRef.current = logarithmic && referenceValue !== null && referenceValue <= 0 ? null : referenceValue;
     const markersRef = useRef(markers); markersRef.current = markers;
     const markerActionRef = useRef(onMarkerSelect); markerActionRef.current = onMarkerSelect;
-    const markerSignature = markers.map(marker => `${marker.id}:${marker.x}:${marker.label}`).join("|");
+    const markerSignature = useMemo(()=>markers.map(marker => `${marker.id}:${marker.x}:${marker.label}`).join("|"),[markers]);
 
-    const colorKey = seriesData.map(s => s.color ?? '').join(',');
+    const colorKey = useMemo(()=>seriesData.map(s => s.color ?? '').join(','),[seriesData]);
     const hasSmoothingKey = smoothing > 0;
     // Which series are plotted: changing it resets the user's zoom.
-    const seriesKey = seriesData.map(s => `${s.name}#${seriesId(s.fullData)}`).join('|');
+    const seriesKey = useMemo(()=>seriesData.map(s => `${s.name}#${seriesId(s.fullData)}`).join('|'),[seriesData]);
     // What data is plotted: the store mutates buffers in place, so the point count is
     // the cheap change marker. Parents rebuild `seriesData` on every render, so keying
     // on this avoids reprocessing (and redrawing) when nothing actually changed.
-    const dataSignature = seriesData.map(s => `${s.name}#${seriesId(s.fullData)}:${s.fullData.count}`).join('|');
+    const dataSignature = dataVersion ?? seriesData.reduce((total,series)=>total+series.fullData.count+seriesVersion(series.fullData),0);
     const axisRevisionKey = `${themeKey}:${xAxisType}:${removeOutliers ? 'trim' : 'full'}:${yAxisScale}`;
     // CSS variables only change with the theme; reading them per render forces a style recalc.
     const chartTheme = useMemo(readChartTheme, [themeKey]);
@@ -152,9 +155,9 @@ export function LineChart({
     seriesDataRef.current = seriesData;
 
     const processedData = useMemo(
-        () => buildProcessedData(seriesDataRef.current, xAxisType, smoothing, xRange, logarithmic),
+        () => buildProcessedData(seriesDataRef.current, xAxisType, smoothing, xRange ?? localXRange, logarithmic, containerRef.current?.clientWidth ?? 800),
         // eslint-disable-next-line react-hooks/exhaustive-deps
-        [dataSignature, xAxisType, smoothing, xRange, logarithmic]
+        [dataSignature, seriesKey, xAxisType, smoothing, xRange, localXRange, logarithmic]
     );
 
     const viewRange = xRange ?? localXRange;
@@ -207,6 +210,27 @@ export function LineChart({
     }, [focusedRange]);
     const exponentialTransformRef = useRef(exponentialTransform);
     exponentialTransformRef.current = exponentialTransform;
+
+    useEffect(()=>{
+        const range=xRange??localXRange;if(!range)return;
+        const timer=setTimeout(()=>{
+            for(const {fullData} of seriesDataRef.current){
+                let low=Infinity,high=-Infinity;
+                if(xAxisType==='wall'){low=range[0]*1000;high=range[1]*1000;}
+                else if(xAxisType==='rel'){low=(range[0]+(fullData.startTime??0))*1000;high=(range[1]+(fullData.startTime??0))*1000;}
+                else {
+                    for(let i=0;i<fullData.count;i++){
+                        const step=fullData.steps[i];
+                        if(step>=range[0]&&step<=range[1]||i>0&&fullData.steps[i-1]<range[0]&&step>range[1]){
+                            low=Math.min(low,fullData.wallTimes[Math.max(0,i-1)]*1000);high=Math.max(high,fullData.wallTimes[Math.min(fullData.count-1,i+1)]*1000);
+                        }
+                    }
+                }
+                if(Number.isFinite(low)&&Number.isFinite(high))void fullData.loadWindow?.(Math.floor(low),Math.ceil(high));
+            }
+        },150);
+        return ()=>clearTimeout(timer);
+    },[localXRange,xRange,xAxisType,seriesKey]);
 
     // A different set of series or a different axis invalidates any manual zoom.
     // Live points arriving for the same series keep it.
@@ -466,7 +490,7 @@ export function LineChart({
         });
     }, [plottedData, focusedRange, removeOutliers, xRange, localXRange, seriesKey, seriesData.length, title, colorKey, chartTheme, height, hasSmoothingKey, showTrend, axisRevisionKey, markerSignature]);
 
-    return <div key={axisRevisionKey} ref={containerRef} className="uplot-wrapper" />;
+    return <div ref={containerRef} className="uplot-wrapper" />;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -482,45 +506,68 @@ function buildProcessedData(
     xAxis: XAxisType,
     smoothing: number,
     xRange: [number, number] | null,
-    logarithmic = false
+    logarithmic = false,
+    width = 800
 ): ProcessedChartData {
     if (seriesData.length === 0) return { processed: [], alignedData: [[]] };
 
+    // Small wall-time traces can use zero-copy views directly. Larger/derived
+    // traces take the decimation path below before alignment or drawing.
+    if(seriesData.length===1&&xAxis==='wall'&&smoothing===0&&!logarithmic&&!xRange){
+        const {wallTimes,values,count}=seriesData[0].fullData;
+        const x=wallTimes.subarray(0,count),raw=values.subarray(0,count);
+        if(count<=Math.max(64,width*2)&&raw.every(Number.isFinite)&&x.every((value,i)=>i===0||value>x[i-1])){
+            return {processed:[{x,raw,smooth:[]}],alignedData:[x,raw]};
+        }
+    }
+
     const processed = seriesData.map(s => {
-        const { wallTimes, relTimes, values, count: n } = s.fullData;
-        const xArr = xAxis === 'wall' ? wallTimes : xAxis === 'rel' ? relTimes : s.fullData.plotX;
+        const { wallTimes, values, steps, count: n } = s.fullData;
+        const xAt=(i:number)=>xAxis==='wall'?wallTimes[i]:xAxis==='rel'?wallTimes[i]-(s.fullData.startTime??0):steps[i]>=0?steps[i]:wallTimes[i]-(s.fullData.startTime??0);
 
         const resX: number[] = [];
         const rawV: number[] = [];
         const smoothV: number[] = [];
         let ema = 0, first = true;
 
-        for (let i = 0; i < n; i++) {
-            const x = xArr[i];
+        let start=0,end=n;
+        // Timestamp axes are sorted. Include adjacent points for lines crossing a zoom boundary.
+        if(xRange&&xAxis!=='step') {
+            let lo=0,hi=n;while(lo<hi){const mid=(lo+hi)>>>1;if(xAt(mid)<xRange[0])lo=mid+1;else hi=mid;}start=Math.max(0,lo-1);
+            lo=start;hi=n;while(lo<hi){const mid=(lo+hi)>>>1;if(xAt(mid)<=xRange[1])lo=mid+1;else hi=mid;}end=Math.min(n,lo+1);
+        }
+        const indices=minMaxIndices(end-start,i=>values[start+i],Math.max(64,Math.round(width)*2));
+        let selected=0;
+        function* samples(){if(smoothing>0){for(let i=0;i<end;i++)yield i;}else{for(const index of indices)yield start+index;}}
+        const scan=samples();
+        for (const i of scan) {
+            const x = xAt(i);
             const v = values[i];
-            if (xAxis === 'step' && x < 0) continue;
-            if (!Number.isFinite(v) || logarithmic && v <= 0) {
-                resX.push(x); rawV.push(NaN);if(smoothing>0)smoothV.push(NaN);continue;
-            }
-            resX.push(x);
-            rawV.push(v);
-            if (smoothing > 0) {
-                if (first) { ema = v; first = false; } else { ema = ema * smoothing + v * (1 - smoothing); }
-                smoothV.push(ema);
-            }
+            const valid=Number.isFinite(v)&&(!logarithmic||v>0);
+            if(valid&&smoothing>0){if(first){ema=v;first=false;}else{ema=ema*smoothing+v*(1-smoothing);}}
+            if(smoothing>0){if(i!==start+indices[selected])continue;selected++;}
+            if(xAxis==='step'&&x<0)continue;
+            resX.push(x);rawV.push(valid?v:NaN);
+            if(smoothing>0)smoothV.push(valid?ema:NaN);
         }
         return { x: resX, raw: rawV, smooth: smoothV };
     });
+
+    if(processed.length===1&&processed[0].x.every((x,i,all)=>i===0||x>all[i-1])) {
+        const p=processed[0];
+        const data:uPlot.AlignedData=[p.x];
+        if(smoothing>0)data.push(p.raw);
+        data.push(smoothing>0?p.smooth:p.raw);
+        return {processed,alignedData:data};
+    }
 
     // Merge + sort all X values
     const xSet = new Set<number>();
     for (const p of processed) for (const x of p.x) xSet.add(x);
     const allX = Array.from(xSet).sort((a, b) => a - b);
 
-    // Apply window filter on the unified axis
-    const filteredX = xRange
-        ? allX.filter(x => x >= xRange[0] && x <= xRange[1])
-        : allX;
+    // Keep edge neighbors so a line can cross a zoom window without a sample inside.
+    const filteredX=allX;
 
     if (filteredX.length === 0) return { processed, alignedData: [filteredX] };
 

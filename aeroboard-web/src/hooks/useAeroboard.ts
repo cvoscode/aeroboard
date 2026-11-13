@@ -1,5 +1,6 @@
+import { useLiveSocket } from "./useLiveSocket";
 import { useState, useEffect, useRef, useCallback } from 'react';
-import * as arrow from 'apache-arrow';
+import { tableFromIPC } from 'apache-arrow';
 import { fetchImageHistory, fetchMediaHistory, fetchRuns, fetchRunSummaries, fetchScalarHistory, fetchServerDashboardDefaults, imageContentUrl, mediaContentUrl } from "./aeroboard/api";
 import { DASHBOARD_CONFIG_KEY, extractRunDashboardConfig, parseRunDashboardConfigValue, type PartialDashboardDefaults } from "../lib/dashboardDefaults";
 import { getMediaSeriesForRun as readMediaSeriesForRun, MEDIA_KINDS, type MediaStore, revokeMediaStore, upsertMediaClip } from "./aeroboard/mediaStore";
@@ -7,23 +8,19 @@ import { mediaMimeType } from "../lib/media";
 import { getImageSeries as readImageSeries, getImageSeriesForRun as readImageSeriesForRun, type ImageStore, revokeImageStore, upsertImageFrame } from "./aeroboard/imageStore";
 import {
     ensureRunSummary,
+    setSummaryHyperparameter,
     getChartData as readChartData,
     getGlobalXBounds as readGlobalXBounds,
     getMetricsForRun as readMetricsForRun,
-    ingestScalarRows,
-    mergeHistoryRows,
+    mergeScalarColumns,
     type RunSummaryStore,
     type ScalarStore,
 } from "./aeroboard/scalarStore";
-import type { ImageFrame, ImageSeries, LoadStatus, MediaClip, MediaKind, MediaSeries, RunSummary, ScalarRow, TimeSeriesData } from "./aeroboard/types";
+import type { ImageFrame, ImageSeries, LoadStatus, MediaClip, MediaKind, MediaSeries, RunSummary, TimeSeriesData } from "./aeroboard/types";
 
 export type { HyperparameterEntry, ImageFrame, ImageSeries, LoadStatus, MediaClip, MediaKind, MediaSeries, MetricSummary, RunSummary, TimeSeriesData } from "./aeroboard/types";
 
 type DashboardConfigStore = Record<string, PartialDashboardDefaults | null>;
-
-/** Reconnect delays for the live socket: 1s, 2s, 4s … capped at 30s. */
-const RECONNECT_BASE_MS = 1000;
-const RECONNECT_MAX_MS = 30_000;
 
 function setHyperparameter(
     summaryStore: RunSummaryStore,
@@ -39,13 +36,7 @@ function setHyperparameter(
         return;
     }
     const summary = ensureRunSummary(summaryStore, runId);
-    const existing = summary.hyperparameters.find((entry) => entry.key === key);
-    if (existing) {
-        existing.value = value;
-        existing.value_type = valueType;
-        return;
-    }
-    summary.hyperparameters.push({ key, value, value_type: valueType });
+    setSummaryHyperparameter(summary,key,value,valueType);
 }
 
 /**
@@ -108,6 +99,7 @@ export interface UseAeroboardResult {
     getMediaSource: (clip: MediaClip, attempt?: number) => string;
     runs: string[];
     tick: number;
+    subscribeRuns: (runs:string[])=>void;
     loadStatus: {
         runs: LoadStatus;
         summaries: LoadStatus;
@@ -131,6 +123,21 @@ export interface UseAeroboardResult {
 }
 
 export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string = getDefaultApiBase()): UseAeroboardResult {
+    const selectedRunsRef=useRef<string[]>([]);
+    const socketRef=useRef<WebSocket|null>(null);
+    const subscribeRuns=useCallback((runs:string[])=>{
+        const previous=new Set(selectedRunsRef.current);
+        selectedRunsRef.current=runs;
+        for(const run of runs)if(!previous.has(run))loadedHistoryRunsRef.current.delete(run);
+        // Keep a small navigation cache; selected comparisons are never evicted.
+        const inactive=Object.keys(storeRef.current).filter(run=>!runs.includes(run));
+        for(const run of inactive.slice(0,Math.max(0,inactive.length-8))){
+            delete storeRef.current[run];delete startTimes.current[run];loadedHistoryRunsRef.current.delete(run);
+            if(imageStoreRef.current[run]){revokeImageStore({[run]:imageStoreRef.current[run]});delete imageStoreRef.current[run];loadedImageRunsRef.current.delete(run);}
+            if(mediaStoreRef.current[run]){revokeMediaStore({[run]:mediaStoreRef.current[run]});delete mediaStoreRef.current[run];loadedMediaRunsRef.current.delete(run);}
+        }
+        if(socketRef.current?.readyState===WebSocket.OPEN)socketRef.current.send(JSON.stringify({type:'subscribe',runs}));
+    },[]);
     const [connected, setConnected] = useState(false);
     const storeRef = useRef<ScalarStore>({});
     const summaryRef = useRef<RunSummaryStore>({});
@@ -244,10 +251,11 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
 
         setLoadStatus((prev) => ({ ...prev, history: "loading" }));
         try {
-            const rows = await fetchScalarHistory(apiBase, targetRuns);
-            mergeHistoryRows(storeRef.current, summaryRef.current, startTimes.current,
-                targetRuns.filter(runId => !deletedRunsRef.current.has(runId)),
-                rows.filter(row => !deletedRunsRef.current.has(row.run_id)));
+            const lastTimes = targetRuns.map(run => Math.max(0,...Object.values(storeRef.current[run] ?? {}).map(series => series.count ? series.wallTimes[series.count-1]*1000 : 0)));
+            const startMs = force && lastTimes.every(time => time>0) ? Math.min(...lastTimes)-1000 : undefined;
+            const table = await fetchScalarHistory(apiBase, targetRuns,startMs);
+            mergeScalarColumns(storeRef.current, summaryRef.current, startTimes.current,table.batches,
+                new Set(targetRuns.filter(runId => !deletedRunsRef.current.has(runId))));
             targetRuns.forEach((runId) => loadedHistoryRunsRef.current.add(runId));
             refreshRuns();
             setLoadStatus((prev) => ({ ...prev, history: "ready" }));
@@ -349,7 +357,7 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
     }, [loadRunSummaries, runs]);
 
     const handleArrowMessage = useCallback((data: ArrayBuffer) => {
-        const table = arrow.tableFromIPC(new Uint8Array(data));
+        const table = tableFromIPC(new Uint8Array(data));
         const envelope = table.schema.metadata.get('aeroboard.envelope');
         if (envelope) {
             const id = (JSON.parse(envelope) as {batch_id?: string}).batch_id;
@@ -379,21 +387,8 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
             const valueTypeCol = batch.getChild('value_type');
 
             if (nameCol && valueCol && !keyCol) {
-                const rows: ScalarRow[] = [];
-                for (let i = 0; i < batch.numRows; i++) {
-                    if (deletedRunsRef.current.has(String(runIdCol.get(i)))) continue;
-                    const step = stepCol?.get(i);
-                    rows.push({
-                        ts_ms: Number(timeCol.get(i)),
-                        run_id: String(runIdCol.get(i)),
-                        name: String(nameCol.get(i)),
-                        value: Number(valueCol.get(i)),
-                        step: step === null || step === undefined ? null : Number(step),
-                    });
-                }
-                if (ingestScalarRows(storeRef.current, summaryRef.current, startTimes.current, rows)) {
-                    shouldUpdate = true;
-                }
+                const selected=new Set(runsRef.current.filter(run=>!deletedRunsRef.current.has(run)));
+                if (mergeScalarColumns(storeRef.current,summaryRef.current,startTimes.current,[batch],selected)) shouldUpdate=true;
             } else if (nameCol && imageCol && formatCol) {
                 for (let i = 0; i < batch.numRows; i++) {
                     if (deletedRunsRef.current.has(String(runIdCol.get(i)))) continue;
@@ -455,67 +450,24 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
         if (shouldUpdate) refreshRuns();
     }, [refreshRuns]);
 
-    useEffect(() => {
-        let disposed = false;
-        let socket: WebSocket | null = null;
-        let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-        let attempts = 0;
-        let hasConnected = false;
-
-        const connect = () => {
-            if (disposed) return;
-            const ws = new WebSocket(wsUrl);
-            socket = ws;
-            ws.binaryType = 'arraybuffer';
-
-            ws.onopen = () => {
-                window.dispatchEvent(new Event("aeroboard:catalog"));
-                setConnected(true);
-                attempts = 0;
-                // Anything sent while we were disconnected was persisted, not pushed.
-                if (hasConnected) resync();
-                hasConnected = true;
-            };
-
-            ws.onclose = () => {
-                setConnected(false);
-                if (disposed) return;
-                const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** attempts);
-                attempts += 1;
-                reconnectTimer = setTimeout(connect, delay);
-            };
-
-            ws.onerror = (event) => {
-                console.error('[Aeroboard] WebSocket error:', event);
-            };
-
-            ws.onmessage = (event) => {
-                try {
-                    if (event.data instanceof ArrayBuffer) {
-                        handleArrowMessage(event.data);
-                    } else if (typeof event.data === 'string') {
-                        const message = JSON.parse(event.data) as { type?: string; skipped?: number };
+    useLiveSocket(wsUrl,socketRef,selectedRunsRef,{
+        binary:handleArrowMessage,connected:setConnected,reconnect:resync,
+        control:message=>{
                         if (message.type === 'lagged') {
                             console.warn(`[Aeroboard] Live stream skipped ${message.skipped ?? '?'} batches; re-fetching history`);
                             resync();
                             window.dispatchEvent(new Event("aeroboard:catalog"));
-                        } else if (message.type === 'catalog_changed') {
-                            window.dispatchEvent(new Event("aeroboard:catalog"));
+                         } else if (message.type === 'data_changed') {
+                            let changed=false;
+                            for(const run of message.runs??[])if(!fetchedRunsRef.current.includes(run)){fetchedRunsRef.current.push(run);changed=true;}
+                            if(changed)refreshRuns();
+                            window.dispatchEvent(new CustomEvent("aeroboard:data",{detail:message}));
+                        } else if (message.type?.endsWith('_changed')) {
+                            if(message.kind==='run')void loadRuns();
+                            window.dispatchEvent(new CustomEvent("aeroboard:catalog",{detail:message}));
                         }
-                    }
-                } catch (err) {
-                    console.error('[Aeroboard] Failed to handle live message:', err);
-                }
-            };
-        };
-
-        connect();
-        return () => {
-            disposed = true;
-            clearTimeout(reconnectTimer);
-            socket?.close();
-        };
-    }, [wsUrl, handleArrowMessage, resync]);
+        },
+    });
 
     useEffect(() => {
         const media = mediaStoreRef;
@@ -527,8 +479,19 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
     }, []);
 
     const getChartData = useCallback((runId: string, name: string): TimeSeriesData | null => {
-        return readChartData(storeRef.current, runId, name);
-    }, []);
+        const series=readChartData(storeRef.current,runId,name);
+        if(series&&!series.loadWindow){
+            const windows=new Set<string>();
+            series.loadWindow=async(startMs,endMs)=>{
+                const key=`${startMs}:${endMs}`;if(windows.has(key))return;windows.add(key);
+                try{
+                    const table=await fetchScalarHistory(apiBase,[runId],undefined,{metric:name,start_ms:startMs,end_ms:endMs});
+                    if(!deletedRunsRef.current.has(runId))mergeScalarColumns(storeRef.current,summaryRef.current,startTimes.current,table.batches,new Set([runId]));
+                }catch(error){windows.delete(key);console.warn('[Aeroboard] Failed to refine chart window',error);}
+            };
+        }
+        return series;
+    }, [apiBase]);
 
     const getMetricsForRun = useCallback((runId: string): string[] => {
         return readMetricsForRun(storeRef.current, runId);
@@ -643,6 +606,7 @@ export function useAeroboard(wsUrl: string = getDefaultWsUrl(), apiBase: string 
     }, [apiBase]);
 
     return {
+        subscribeRuns,
         connected,
         getChartData,
         getMetricsForRun,

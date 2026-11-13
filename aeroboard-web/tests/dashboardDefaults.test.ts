@@ -164,3 +164,15 @@ test("a newly starred chart joins the end of the pinned charts", () => {
   assert.deepEqual(pinChart(["a","b","c","d"],"d",["a","b"]),["a","b","d","c"]);
   assert.deepEqual(pinChart(["a","b","c"],"val/c",[]),["c","a","b"]);
 });
+
+test('all four preference layers preserve explicit false, zero, removal, and saved positions',async()=>{
+  const {resolveChartPreferences}=await import('../src/lib/dashboardDefaults.ts');
+  const result=resolveChartPreferences({
+    keys:['accuracy','loss','lr'],server:{starred:['loss'],targets:{loss:1}},runs:[{starred:['accuracy'],targets:{loss:0.5}}],
+    view:{starred:['loss'],targets:{loss:0.25},order:['loss','lr']},favorites:{loss:false,accuracy:true},
+    targets:{'val/loss':0},removedTargets:['accuracy'],order:[],
+  });
+  assert.deepEqual(result.effectiveFavoriteCharts,{accuracy:true,loss:false,lr:false});
+  assert.deepEqual(result.effectiveOptimalValues,{accuracy:null,loss:0,lr:null});
+  assert.deepEqual(result.orderedMetricKeys,['loss','lr','accuracy']);
+});

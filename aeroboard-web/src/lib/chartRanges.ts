@@ -1,7 +1,7 @@
 export interface ChartSeries {
-  x: number[];
-  raw: number[];
-  smooth: number[];
+  x: ArrayLike<number>;
+  raw: ArrayLike<number>;
+  smooth: ArrayLike<number>;
 }
 
 export interface ChartRanges {
@@ -13,7 +13,7 @@ export interface ChartRanges {
 interface Point { x: number; y: number }
 
 /** Finite points of one line, in drawing order. */
-function linePoints(x: number[], y: number[]): Point[] {
+function linePoints(x: ArrayLike<number>, y: ArrayLike<number>): Point[] {
   const points: Point[] = [];
   for (let i = 0; i < y.length; i++) {
     if (Number.isFinite(y[i])) points.push({x: x[i], y: y[i]});

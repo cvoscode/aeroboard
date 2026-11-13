@@ -1,4 +1,6 @@
-# Issues Found During Testing (May 8, 2026)
+# Historical UI issues (May 8, 2026)
+
+Rechecked on November 11, 2026 with the runs, groups, analysis and comparison-grid browser suites. The three issues below are covered by passing regressions.
 
 ## Testing Environment
 - Aeroboard started: `uv run aeroboard start --storage filesystem`
@@ -12,27 +14,27 @@
 ## Confirmed Issues
 
 ### 1. **CRITICAL: UI shows "No run selected" even when runs appear in sidebar**
-**Status:** Open
+**Status:** Closed — current browser regressions pass
 **Severity:** High
 **Symptom:** Runs are listed in the sidebar but dashboard shows "Awaiting Telemetry..." instead of displaying metrics after clicking a run
 **Root cause:** React state management issue - `selectedRuns` state updates but chart rendering not triggered
 
 ### 2. **"Live" indicator shows but data isn't displayed**
-**Status:** Open
+**Status:** Closed — current browser regressions pass
 **Severity:** High
 **Root cause:** Same as Issue 1 - WebSocket connection works but data hook doesn't connect run selection to metric display
 
 ### 3. **Run version display confusion**
-**Status:** Open
+**Status:** Closed — current browser regressions pass
 **Severity:** Medium
 **Symptom:** UI shows run entries as versioned (e.g., "1 version latest v1") but selection logic may not properly account for version suffixes
 
 ---
 
-## Wishlist Items
-- width setting
-- grid where you can drag the plots
-- all plots start collapsed, but we can set favorites which are shown
+## Completed wishlist
+- Width setting (compact, wide and full)
+- Chart and metric-group drag ordering
+- Collapsed charts with favorites and configurable initial dashboard defaults
 
 ---
 

@@ -1,57 +1,43 @@
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use crate::{app_state::AppState, t_junction::PersistJob};
+use tokio::{sync::mpsc, task::JoinHandle};
 
-use crate::app_state::AppState;
-use crate::t_junction::PersistJob;
-
-/// Start the loop that appends every published batch to the configured storage.
-///
-/// It drains the T-junction's bounded persistence queue, so no batch is skipped
-/// when storage is slow: the queue fills up and ingestion waits instead. A failed
-/// append is logged and the loop moves on (the backend may be temporarily
-/// unavailable; GreptimeDB writes are retried inside the store).
-///
-/// Each job's outcome is sent back to the Flight request that published it, which
-/// acknowledges the upload only once it is stored (or reports the failure so the
-/// client retries).
-///
-/// The loop ends once `TJunction::close_persistence` has been called and the queue
-/// is empty, which lets shutdown flush everything that was already accepted.
+/// Drain a bounded group, sharing the catalog's durable transactions and acknowledgments.
 pub fn start_persistence_loop(
     state: AppState,
     mut rx: mpsc::Receiver<PersistJob>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some(PersistJob {
-            batch: telemetry,
-            done,
-        }) = rx.recv().await
-        {
+        while let Some(first) = rx.recv().await {
+            let mut jobs = vec![first];
+            // A short bounded window allows concurrent uploaders to share a commit.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(2);
+            let mut bytes = jobs[0].batch.batch.get_array_memory_size();
+            while jobs.len() < 64 && bytes < 16 * 1024 * 1024 {
+                match tokio::time::timeout_at(deadline, rx.recv()).await {
+                    Ok(Some(job)) => {
+                        bytes += job.batch.batch.get_array_memory_size();
+                        jobs.push(job);
+                    }
+                    _ => break,
+                }
+            }
             let _gate = state.analysis.gate.lock().await;
-            let outcome = match state.storage.append_batch(telemetry.clone()).await {
-                Ok(()) => {
-                    state.analysis.invalidate();
-                    state.analysis.record(&telemetry).await;
-                    state.summaries.record(&telemetry).await;
-                    tracing::debug!(
-                        "Persisted {:?} batch of {} rows",
-                        telemetry.kind,
-                        telemetry.batch.num_rows()
-                    );
-                    Ok(())
+            let outcomes = state
+                .storage
+                .append_group(jobs.iter().map(|job| job.batch.clone()).collect())
+                .await;
+            for (job, outcome) in jobs.into_iter().zip(outcomes) {
+                match &outcome {
+                    Ok(true) => {
+                        state.analysis.invalidate();
+                        state.summaries.record(&job.batch).await;
+                        state.t_junction.committed(job.batch.clone());
+                    }
+                    Err(error) => tracing::error!("Failed to persist telemetry: {error}"),
+                    _ => {}
                 }
-                Err(error) => {
-                    tracing::error!(
-                        "Failed to persist {:?} batch of {} rows: {}",
-                        telemetry.kind,
-                        telemetry.batch.num_rows(),
-                        error
-                    );
-                    Err(error.to_string())
-                }
-            };
-            // The uploader may have disconnected; the batch is stored either way.
-            let _ = done.send(outcome);
+                let _ = job.done.send(outcome.map(|_| ()));
+            }
         }
         tracing::info!("Persistence queue drained");
     })

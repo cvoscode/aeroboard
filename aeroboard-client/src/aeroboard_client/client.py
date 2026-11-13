@@ -19,7 +19,10 @@ Example:
     >>> client.close()
 """
 
+from __future__ import annotations
+
 import atexit
+import logging
 import json
 import re
 import os
@@ -39,6 +42,14 @@ from .schema import scalar_schema, image_schema, audio_schema, video_schema, hyp
 from ._sender import BatchSender, DEFAULT_MAX_QUEUE_BYTES
 from ._tracking import RunTracker
 from ._protocol import batch_checksum, media_metadata, ENVELOPE_KEY
+
+
+from ._errors import AeroboardClientError, FlightConnectionError
+from ._query import QueryClient
+from ._buffers import ColumnBuffer, ScalarBuffer
+from ._media import _coerce_image_bytes, _normalize_media_format, _coerce_encoded_media, _coerce_audio_bytes, _encode_wav, _maybe_compress_encoded_image, _encode_pil_image
+from ._naming import _normalize_run_id, _default_api_base_url, _fetch_existing_run_ids, resolve_run_id, _split_framework_suffix, _extract_version
+from ._protocol import DeferredBatch, prepare_batch
 
 MAX_IMAGE_BYTES = 256 * 1024  # 256 KB
 # Audio/video are passed through as already-encoded bytes; these limits keep a
@@ -64,39 +75,6 @@ def _close_open_clients() -> None:
         except Exception:  # noqa: BLE001 - best effort during shutdown
             pass
 _MEDIA_DEFAULT_FORMATS = {"audio": "wav", "video": "mp4"}
-
-
-def _resolve_lightning_integration() -> tuple[type[Any], type[Any], Any, bool]:
-    try:
-        from lightning.pytorch import Callback as lightning_callback_base
-        from lightning.pytorch.loggers.logger import Logger as lightning_logger_base
-        from lightning.pytorch.utilities.rank_zero import rank_zero_only
-        return lightning_callback_base, lightning_logger_base, rank_zero_only, True
-    except ImportError:
-        try:
-            from pytorch_lightning import Callback as lightning_callback_base
-            from pytorch_lightning.loggers.logger import Logger as lightning_logger_base
-            from pytorch_lightning.utilities.rank_zero import rank_zero_only
-            return lightning_callback_base, lightning_logger_base, rank_zero_only, True
-        except ImportError:
-            def passthrough(func):
-                return func
-
-            return object, object, passthrough, False
-
-
-_LightningCallbackBase, _LightningLoggerBase, _rank_zero_only, _LIGHTNING_AVAILABLE = _resolve_lightning_integration()
-
-
-def _resolve_ray_tune_integration() -> tuple[type[Any], bool]:
-    try:
-        from ray.tune.logger import LoggerCallback as ray_logger_callback_base
-        return ray_logger_callback_base, True
-    except ImportError:
-        return object, False
-
-
-_RayTuneLoggerCallbackBase, _RAY_TUNE_AVAILABLE = _resolve_ray_tune_integration()
 
 
 # Per-run dashboard defaults travel on the hyperparameter channel under a reserved
@@ -140,19 +118,7 @@ def _normalize_dashboard_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
-class AeroboardClientError(Exception):
-    """Base exception for Aeroboard client errors."""
-
-    pass
-
-
-class FlightConnectionError(AeroboardClientError):
-    """Raised when unable to connect to the Flight server."""
-
-    pass
-
-
-class AeroboardClient:
+class AeroboardClient(QueryClient):
     """
     Python SDK client for sending telemetry data to the Aeroboard Rust backend.
 
@@ -219,8 +185,8 @@ class AeroboardClient:
         self.batch_size = batch_size
         self.api_base_url = (api_base_url or _default_api_base_url(url)).rstrip("/")
         self.ssl_verify = ssl_verify
-        self._scalar_buffer: List[Dict[str, Any]] = []
-        self._hyperparameter_buffer: List[Dict[str, Any]] = []
+        self._scalar_buffer = ScalarBuffer()
+        self._hyperparameter_buffer = ColumnBuffer()
         self._image_buffer: List[Dict[str, Any]] = []
         self._media_buffers: Dict[str, List[Dict[str, Any]]] = {"audio": [], "video": []}
         self._media_buffer_bytes: int = 0
@@ -245,7 +211,7 @@ class AeroboardClient:
             self.client = fl.FlightClient(self.url)
         except Exception as e:
             error_msg = f"[Aeroboard] Failed to connect to Flight server at {url}: {e}"
-            print(error_msg)
+            logging.getLogger(__name__).warning(error_msg)
             self.client = None
 
         self._sender: Optional[BatchSender] = None
@@ -263,7 +229,7 @@ class AeroboardClient:
             self._sender = OutboxSender(outbox, self._transport, on_error=self._report_error, max_queue_bytes=max_queue_bytes)
             self._tracking.durable_enqueue = self._sender.submit_control
         elif background and self.client is not None:
-            self._sender = BatchSender(self._do_put, on_error=self._report_error, max_queue_bytes=max_queue_bytes)
+            self._sender = BatchSender(self._do_put, put_many=self._do_put_many, on_error=self._report_error, max_queue_bytes=max_queue_bytes)
         _OPEN_CLIENTS.add(self)
 
     @property
@@ -318,11 +284,8 @@ class AeroboardClient:
     def _ensure_http_client(self) -> None:
         """Lazily create the HTTP session used by the query_* helpers."""
         if self._http_client is None:
-            import requests
-
-            session = requests.Session()
-            session.verify = self.ssl_verify
-            self._http_client = session
+            self._http_client=self._tracking._session
+        self._http_client.verify=self.ssl_verify
 
     def _resolve_run_id(self, base: str) -> str:
         """
@@ -337,12 +300,11 @@ class AeroboardClient:
         Returns:
             The resolved run ID.
         """
-        import requests
-
+        self._ensure_http_client()
         normalized_base = _normalize_run_id(base)
 
         try:
-            response = requests.post(
+            response = self._http_client.post(
                 f"{self.api_base_url}/api/runs/resolve",
                 json={"base_run_id": normalized_base},
                 timeout=5,
@@ -351,14 +313,14 @@ class AeroboardClient:
             if response.status_code == 200:
                 resolved = response.json().get("run_id", normalized_base)
             else:
-                existing = _fetch_existing_run_ids(normalized_base, api_base_url=self.api_base_url)
+                existing = _fetch_existing_run_ids(normalized_base, api_base_url=self.api_base_url,session=self._http_client,verify=self.ssl_verify)
                 resolved = resolve_run_id(normalized_base, existing)
         except Exception:
-            existing = _fetch_existing_run_ids(normalized_base, api_base_url=self.api_base_url)
+            existing = _fetch_existing_run_ids(normalized_base, api_base_url=self.api_base_url,session=self._http_client,verify=self.ssl_verify)
             resolved = resolve_run_id(normalized_base, existing)
 
         if resolved != normalized_base:
-            print(f"[Aeroboard] Run '{normalized_base}' already exists → using '{resolved}'")
+            logging.getLogger(__name__).warning(f"[Aeroboard] Run '{normalized_base}' already exists → using '{resolved}'")
         return resolved
 
     def log(self, metrics: Dict[str, float], step: Optional[Union[int, float]] = None) -> None:
@@ -396,13 +358,7 @@ class AeroboardClient:
             for k, v in values.items():
                 normalized = _coerce_scalar_metric_value(v)
                 if normalized is not None:
-                    self._scalar_buffer.append({
-                        "timestamp": ts,
-                        "run_id": run_id,
-                        "name": k,
-                        "value": normalized,
-                        "step": resolved_step,
-                    })
+                    self._scalar_buffer.append(ts,run_id,k,normalized,resolved_step)
 
             if len(self._scalar_buffer) >= self.batch_size:
                 self._flush_buffers()
@@ -476,13 +432,7 @@ class AeroboardClient:
                 if normalized is None:
                     continue
                 encoded_value, value_type = normalized
-                self._hyperparameter_buffer.append({
-                    "timestamp": ts,
-                    "run_id": run_id,
-                    "key": str(key),
-                    "value": encoded_value,
-                    "value_type": value_type,
-                })
+                self._hyperparameter_buffer.append(ts,run_id,str(key),encoded_value,value_type)
 
             if len(self._hyperparameter_buffer) >= self.batch_size:
                 self._flush_buffers()
@@ -524,15 +474,11 @@ class AeroboardClient:
         config = _normalize_dashboard_config({k: v for k, v in options.items() if v is not None})
         run_id = self.run_id
         with self._lock:
-            self._hyperparameter_buffer.append({
-                "timestamp": int(time.time() * 1000),
-                "run_id": run_id,
-                "key": DASHBOARD_CONFIG_KEY,
-                "value": json.dumps(config, sort_keys=True),
-                "value_type": DASHBOARD_CONFIG_VALUE_TYPE,
-            })
+            self._hyperparameter_buffer.append(int(time.time()*1000),run_id,DASHBOARD_CONFIG_KEY,json.dumps(config,sort_keys=True),DASHBOARD_CONFIG_VALUE_TYPE)
+
         # Send right away so the dashboard picks up the view before the first metrics.
-        self.flush()
+        with self._lock:
+            self._flush_hyperparameter_buffer()
 
     def log_image(
         self,
@@ -567,7 +513,10 @@ class AeroboardClient:
         if self.client is None:
             raise FlightConnectionError("No Flight connection available.")
 
-        encoded, inferred_format = _coerce_image_bytes(image, format=format)
+        # Snapshot mutable inputs before returning to training. Encoding stays off this thread.
+        from ._media import snapshot_image
+        image,estimated_bytes = snapshot_image(image)
+        inferred_format = format
         _validate_media_position(step,segment)
         run_id = self.run_id
         asset_id = str(uuid.uuid4())
@@ -577,7 +526,8 @@ class AeroboardClient:
                 "asset_id": asset_id, "step": step, "segment": segment,
                 "run_id": run_id,
                 "name": name,
-                "image_data": encoded,
+                "image_data": image,
+                "estimated_bytes": estimated_bytes,
                 "format": inferred_format,
             })
 
@@ -750,6 +700,7 @@ class AeroboardClient:
         Raises:
             RuntimeError: If Lightning is not installed.
         """
+        from .integrations.lightning import AeroboardLightningLogger
         return AeroboardLightningLogger(
             client=self,
             run_id=run_name or self.base_run_id,
@@ -808,17 +759,21 @@ class AeroboardClient:
             self._report_error(f"[Aeroboard] Error flushing data via Flight: {e}")
 
     def _report_error(self, message: str) -> None:
-        print(message)
+        logging.getLogger(__name__).warning(message)
         self._had_flush_error = True
 
     def _send(self, batch: pa.RecordBatch, schema: pa.Schema, descriptor_path: bytes) -> None:
         if self._tracking.enabled and "batch_envelopes" in self._tracking.capabilities.get("features", []):
             self._batch_sequence += 1
-            envelope = {"version":1,"batch_id":str(uuid.uuid4()),"run_uid":self.run_uid,
+            envelope = {"version":2 if self._tracking.capabilities.get("protocol_version",1)>=2 else 1,"batch_id":str(uuid.uuid4()),"run_uid":self.run_uid,
                 "session_id":self._tracking.session_id,"server_id":self._tracking.server_id,
-                "sequence":self._batch_sequence,"checksum":batch_checksum(batch),"captured_at_ms":int(time.time()*1000),"segment":self._tracking.segment}
-            batch = batch.replace_schema_metadata({**(batch.schema.metadata or {}),ENVELOPE_KEY:json.dumps(envelope).encode()})
-            schema = batch.schema
+                "sequence":self._batch_sequence,"checksum":"","captured_at_ms":int(time.time()*1000),"segment":self._tracking.segment}
+            if isinstance(batch,DeferredBatch):
+                original=batch.factory
+                batch=DeferredBatch(lambda:original().replace_schema_metadata({ENVELOPE_KEY:json.dumps(envelope).encode()}),batch.num_rows,batch.nbytes,batch.schema)
+            else:
+                batch=batch.replace_schema_metadata({**(batch.schema.metadata or {}),ENVELOPE_KEY:json.dumps(envelope).encode()})
+            schema=batch.schema
         if self._sender is not None:
             self._sender.submit(batch, schema, descriptor_path)
         else:
@@ -842,11 +797,7 @@ class AeroboardClient:
         if not self._scalar_buffer:
             return
 
-        timestamps = [x["timestamp"] for x in self._scalar_buffer]
-        run_ids = [x["run_id"] for x in self._scalar_buffer]
-        names = [x["name"] for x in self._scalar_buffer]
-        values = [x["value"] for x in self._scalar_buffer]
-        steps = [x["step"] for x in self._scalar_buffer]
+        timestamps,run_ids,names,values,steps = self._scalar_buffer.columns
 
         batch = pa.RecordBatch.from_arrays(
             [
@@ -867,14 +818,8 @@ class AeroboardClient:
         if not self._hyperparameter_buffer:
             return
 
-        batch = pa.RecordBatch.from_arrays(
-            [
-                pa.array([x["timestamp"] for x in self._hyperparameter_buffer], type=pa.timestamp('ms')),
-                pa.array([x["run_id"] for x in self._hyperparameter_buffer], type=pa.string()),
-                pa.array([x["key"] for x in self._hyperparameter_buffer], type=pa.string()),
-                pa.array([x["value"] for x in self._hyperparameter_buffer], type=pa.string()),
-                pa.array([x["value_type"] for x in self._hyperparameter_buffer], type=pa.string()),
-            ],
+        batch=pa.RecordBatch.from_arrays(
+            [pa.array(column,type=field.type) for column,field in zip(self._hyperparameter_buffer.columns,hyperparameter_schema)],
             schema=hyperparameter_schema,
         )
 
@@ -886,20 +831,25 @@ class AeroboardClient:
         if not self._image_buffer:
             return
 
-        batch = pa.RecordBatch.from_arrays(
-            [
-                pa.array([x["timestamp"] for x in self._image_buffer], type=pa.timestamp('ms')),
-                pa.array([x["run_id"] for x in self._image_buffer], type=pa.string()),
-                pa.array([x["name"] for x in self._image_buffer], type=pa.string()),
-                pa.array([x["image_data"] for x in self._image_buffer], type=pa.binary()),
-                pa.array([x["format"] for x in self._image_buffer], type=pa.string()),
-            ],
-            schema=image_schema,
-        )
+        rows = self._image_buffer[:]
+        def encode():
+            encoded = [_coerce_image_bytes(row["image_data"],format=row["format"]) for row in rows]
+            batch = pa.RecordBatch.from_arrays(
+                [
+                    pa.array([x["timestamp"] for x in rows], type=pa.timestamp('ms')),
+                    pa.array([x["run_id"] for x in rows], type=pa.string()),
+                    pa.array([x["name"] for x in rows], type=pa.string()),
+                    pa.array([item[0] for item in encoded], type=pa.binary()),
+                    pa.array([item[1] for item in encoded], type=pa.string()),
+                ],
+                schema=image_schema,
+            )
 
-        if self._tracking.enabled and "assets" in self._tracking.capabilities.get("features",[]):
-            batch = media_metadata(batch,self._image_buffer)
-        self._send(batch, batch.schema, b"images")
+            if self._tracking.enabled and "assets" in self._tracking.capabilities.get("features",[]):
+                batch = media_metadata(batch,rows)
+            return batch
+        deferred=DeferredBatch(encode,len(rows),sum(row["estimated_bytes"] for row in rows),image_schema)
+        self._send(deferred,image_schema,b"images")
         self._image_buffer.clear()
 
     def _flush_media_buffer(self, kind: str) -> None:
@@ -926,6 +876,18 @@ class AeroboardClient:
         self._media_buffer_bytes -= sum(len(x["data"]) for x in buffer)
         buffer.clear()
 
+    def _do_put_many(self,items):
+        if "batch_streams" not in self._tracking.capabilities.get("features",[]):
+            for batch,schema,path in items:self._do_put(batch,schema,path)
+            return
+        batches=[prepare_batch(batch) for batch,_schema,_path in items]
+        writer,reader=self.client.do_put(fl.FlightDescriptor.for_path(items[0][2]),batches[0].schema,options=fl.FlightCallOptions(timeout=FLIGHT_CALL_TIMEOUT))
+        try:
+            for batch in batches:writer.write_with_metadata(batch,(batch.schema.metadata or {}).get(ENVELOPE_KEY,b""))
+            writer.done_writing()
+            if reader.read() is None:raise FlightConnectionError("server did not acknowledge the batch stream")
+        finally:writer.close()
+
     def _do_put(
         self,
         batch: pa.RecordBatch,
@@ -936,6 +898,8 @@ class AeroboardClient:
 
         Raises on failure; the background sender decides whether to retry.
         """
+        batch=prepare_batch(batch)
+        schema=batch.schema
         if self.client is None:
             return
 
@@ -947,190 +911,6 @@ class AeroboardClient:
         # close() completes the RPC and raises if the server rejected the batch.
         writer.close()
 
-    def query_history(
-        self,
-        *,
-        run_id: Optional[str] = None,
-        metric: Optional[str] = None,
-        from_timestamp: Optional[float] = None,
-        to_timestamp: Optional[float] = None,
-        limit: Optional[int] = None,
-        cursor: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """
-        Query historical metrics data from the backend.
-
-        Args:
-            run_id: Filter by run ID. Uses client's run_id if not provided.
-            metric: Filter by metric name.
-            from_timestamp: Start timestamp in Unix seconds (float with decimals for ms).
-            to_timestamp: End timestamp in Unix seconds.
-            limit: Maximum number of results to return.
-            cursor: Pagination cursor from previous query.
-
-        Returns:
-            Dictionary containing:
-                - "rows": List of metric data points.
-                - "run_summaries": Aggregated per-run summaries.
-                - "next_cursor": Cursor for next page (None if last page).
-
-        Example:
-            >>> response = client.query_history(run_id="my-run", metric="loss")
-            >>> for point in response["rows"]:
-            ...     print(point["name"], point["value"])
-
-        Raises:
-            AeroboardClientError: If HTTP query fails.
-        """
-        self._ensure_http_client()
-        url = f"{self.api_base_url}/api/history"
-
-        params = {}
-        if run_id is None:
-            run_id = self.run_id
-        if run_id:
-            params["run_id"] = run_id
-        if metric:
-            params["metric"] = metric
-        if from_timestamp is not None:
-            params["start_ms"] = str(int(from_timestamp * 1000))
-        if to_timestamp is not None:
-            params["end_ms"] = str(int(to_timestamp * 1000))
-        if limit is not None:
-            params["limit"] = str(limit)
-        if cursor is not None:
-            params["cursor"] = str(cursor)
-
-        try:
-            resp = self._http_client.get(url, params=params, timeout=10)
-            if resp.status_code != 200:
-                raise AeroboardClientError(f"HTTP {resp.status_code}: {resp.text}")
-            return resp.json()
-        except Exception as e:
-            raise AeroboardClientError(f"Failed to query history: {e}")
-
-    def query_hyperparameters(
-        self,
-        *,
-        run_id: Optional[str] = None,
-        key: Optional[str] = None,
-        limit: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
-        """
-        Query hyperparameter settings for a run.
-
-        Args:
-            run_id: Filter by run ID. Uses client's run_id if not provided.
-            key: Filter by hyperparameter key.
-            limit: Maximum number of results.
-
-        Returns:
-            List of hyperparameter entries.
-        """
-        self._ensure_http_client()
-
-        url = f"{self.api_base_url}/api/history"
-
-        params = {}
-        if run_id is None:
-            run_id = self.run_id
-        if run_id:
-            params["run_id"] = run_id
-        if limit is not None:
-            params["limit"] = str(limit)
-
-        try:
-            resp = self._http_client.get(url, params=params, timeout=10)
-            if resp.status_code != 200:
-                raise AeroboardClientError(f"HTTP {resp.status_code}: {resp.text}")
-            data = resp.json()
-            summaries = data.get("run_summaries", [])
-            entries: List[Dict[str, Any]] = []
-            for summary in summaries:
-                summary_run_id = summary.get("run_id")
-                for entry in summary.get("hyperparameters", []):
-                    if key is not None and entry.get("key") != key:
-                        continue
-                    if key is None and entry.get("key") == DASHBOARD_CONFIG_KEY:
-                        continue  # internal dashboard settings, not a hyperparameter
-                    entries.append({
-                        "run_id": summary_run_id,
-                        "key": entry.get("key"),
-                        "value": entry.get("value"),
-                        "value_type": entry.get("value_type"),
-                    })
-            return entries
-        except Exception as e:
-            raise AeroboardClientError(f"Failed to query hyperparameters: {e}")
-
-    def query_images(
-        self,
-        *,
-        run_id: Optional[str] = None,
-        name: Optional[str] = None,
-        format: Optional[str] = None,
-        limit: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
-        """
-        Query image history for a run.
-
-        Args:
-            run_id: Filter by run ID. Uses client's run_id if not provided.
-            name: Filter by image name.
-            format: Filter by image format (webp, jpeg, png).
-            limit: Maximum number of images to return.
-
-        Returns:
-            List of image data points with base64-encoded image data.
-        """
-        self._ensure_http_client()
-
-        url = f"{self.api_base_url}/api/history/images"
-
-        params = {}
-        if run_id is None:
-            run_id = self.run_id
-        if run_id:
-            params["run_id"] = run_id
-        if name:
-            params["metric"] = name
-        if limit is not None:
-            params["limit"] = str(limit)
-
-        try:
-            resp = self._http_client.get(url, params=params, timeout=10)
-            if resp.status_code != 200:
-                raise AeroboardClientError(f"HTTP {resp.status_code}: {resp.text}")
-            data = resp.json()
-            rows = data.get("rows", [])
-            if format is not None:
-                rows = [row for row in rows if row.get("format") == format]
-            return rows
-        except Exception as e:
-            raise AeroboardClientError(f"Failed to query images: {e}")
-
-    def list_runs(self) -> List[str]:
-        """
-        List all run IDs from the backend.
-
-        Returns:
-            List of run ID strings.
-
-        Raises:
-            AeroboardClientError: If unable to connect or query.
-        """
-        self._ensure_http_client()
-
-        url = f"{self.api_base_url}/api/runs"
-
-        try:
-            resp = self._http_client.get(url, timeout=10)
-            if resp.status_code != 200:
-                raise AeroboardClientError(f"HTTP {resp.status_code}: {resp.text}")
-            data = resp.json()
-            return data.get("runs", [])
-        except Exception as e:
-            raise AeroboardClientError(f"Failed to list runs: {e}")
 
     def close(self, timeout: Optional[float] = None) -> None:
         """
@@ -1153,323 +933,7 @@ class AeroboardClient:
             try:
                 self.client.close()
             except Exception as e:
-                print(f"[Aeroboard] Warning: error closing Flight client: {e}")
-
-
-class AeroboardLightningCallback:
-    """
-    PyTorch Lightning callback for automatic telemetry logging.
-
-    This callback automatically logs:
-    - Hyperparameters on fit start
-    - Training metrics (loss, accuracy) on each batch end
-    - Validation metrics on validation epoch end
-
-    Example:
-        >>> from lightning.pytorch import LightningModule, Trainer
-        >>> callback = AeroboardLightningCallback()
-        >>> trainer = Trainer(callbacks=[callback])
-        >>> trainer.fit(model)
-    """
-
-    def __init__(
-        self,
-        run_id: Optional[str] = None,
-        url: str = "grpc://localhost:50051",
-        batch_size: int = 100,
-        client: Optional[AeroboardClient] = None,
-    ):
-        """
-        Initialize the Lightning callback.
-
-        Args:
-            run_id: Run name for telemetry.
-            url: Flight server URL.
-            batch_size: Telemetry batch size.
-            client: Pre-created AeroboardClient instance.
-        """
-        if not _LIGHTNING_AVAILABLE:
-            raise RuntimeError("lightning is required for AeroboardLightningCallback")
-
-        # Create client if not provided
-        self.client = client or AeroboardClient(run_id=run_id, url=url, batch_size=batch_size)
-
-        # Create internal callback class
-        class _Callback(_LightningCallbackBase):
-            def __init__(self, outer: "AeroboardLightningCallback"):
-                super().__init__()
-                self._outer = outer
-                self._hparams_logged = False
-
-            def _client(self) -> AeroboardClient:
-                return self._outer.client
-
-            def _maybe_log_hparams(self, trainer, pl_module):
-                """Log hyperparameters if not already logged."""
-                if self._hparams_logged:
-                    return
-                combined = {}
-
-                # Get module hyperparameters
-                module_hparams = getattr(pl_module, "hparams", None)
-                if module_hparams is not None:
-                    combined.update(_mapping_like(module_hparams))
-
-                # Get trainer logger hyperparameters
-                if getattr(trainer, "logger", None) is not None:
-                    maybe_hparams = getattr(trainer.logger, "hparams", None)
-                    if maybe_hparams:
-                        combined.update(_mapping_like(maybe_hparams))
-
-                if combined:
-                    self._client().log_hyperparameters(combined)
-                    self._hparams_logged = True
-
-            def on_fit_start(self, trainer, pl_module):
-                """Log hyperparameters at fit start."""
-                self._maybe_log_hparams(trainer, pl_module)
-
-            def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-                """Log metrics after each training batch."""
-                self._maybe_log_hparams(trainer, pl_module)
-                payload: Dict[str, float] = {"step": float(trainer.global_step)}
-                loss = outputs.get("loss") if isinstance(outputs, dict) else None
-                if loss is not None:
-                    payload["train/loss"] = float(loss.detach().item() if hasattr(loss, "detach") else loss)
-                train_acc = trainer.callback_metrics.get("train_acc")
-                if train_acc is not None:
-                    payload["train/accuracy"] = float(train_acc.detach().item() if hasattr(train_acc, "detach") else train_acc)
-                self._client().log(payload)
-
-            def on_validation_epoch_end(self, trainer, pl_module):
-                """Log validation metrics at epoch end."""
-                self._maybe_log_hparams(trainer, pl_module)
-                metrics = trainer.callback_metrics
-                payload: Dict[str, float] = {"step": float(trainer.global_step)}
-                if "val_loss" in metrics:
-                    value = metrics["val_loss"]
-                    payload["val/loss"] = float(value.detach().item() if hasattr(value, "detach") else value)
-                if "val_acc" in metrics:
-                    value = metrics["val_acc"]
-                    payload["val/accuracy"] = float(value.detach().item() if hasattr(value, "detach") else value)
-                if len(payload) > 1:
-                    self._client().log(payload)
-                    self._client().flush()
-
-            def on_train_end(self, trainer, pl_module):
-                """Flush remaining data at training end."""
-                self._client().flush()
-
-            @_rank_zero_only
-            def on_fit_end(self, trainer, pl_module):
-                self._client().finish("completed")
-
-            @_rank_zero_only
-            def on_exception(self, trainer, pl_module, exception):
-                self._client().finish("cancelled" if isinstance(exception,KeyboardInterrupt) else "failed",error=str(exception))
-
-        self.callback = _Callback(self)
-
-    def __getattr__(self, item: str) -> Any:
-        """Delegate attribute access to the internal callback."""
-        return getattr(self.callback, item)
-
-
-class AeroboardLightningLogger(_LightningLoggerBase):
-    """
-    Lightning-compatible logger for Aeroboard telemetry.
-
-    This logger forwards metrics emitted by `LightningModule.log(...)` and
-    hyperparameters provided through Lightning's logger interface.
-
-    Example:
-        >>> from lightning.pytorch import Trainer
-        >>> logger = AeroboardLightningLogger(run_id="lightning-demo")
-        >>> trainer = Trainer(logger=logger)
-        >>> trainer.fit(model)
-    """
-
-    def __init__(
-        self,
-        run_id: Optional[str] = None,
-        url: str = "grpc://localhost:50051",
-        batch_size: int = 100,
-        client: Optional[AeroboardClient] = None,
-    ):
-        if not _LIGHTNING_AVAILABLE:
-            raise RuntimeError("lightning is required for AeroboardLightningLogger")
-
-        super().__init__()
-        self.client = client or AeroboardClient(run_id=run_id, url=url, batch_size=batch_size)
-        self._name = "aeroboard"
-        self._version = self.client.run_id
-        self._hparams: Dict[str, Any] = {}
-        self._last_step: Optional[float] = None
-
-    @property
-    def name(self) -> str:
-        return self._name
-
-    @property
-    def version(self) -> str:
-        return self._version
-
-    @property
-    def experiment(self) -> AeroboardClient:
-        return self.client
-
-    @property
-    def hparams(self) -> Dict[str, Any]:
-        return dict(self._hparams)
-
-    @_rank_zero_only
-    def log_hyperparams(self, params: Any) -> None:
-        values = _mapping_like(params)
-        if not values:
-            return
-        self._hparams.update(values)
-        self.client.log_hyperparameters(values)
-
-    @_rank_zero_only
-    def log_metrics(self, metrics: Dict[str, Any], step: Optional[int] = None) -> None:
-        payload: Dict[str, Any] = {key: value for key, value in metrics.items() if key != "step"}
-
-        resolved_step = _coerce_scalar_metric_value(step)
-        if resolved_step is None:
-            resolved_step = self._last_step
-        if resolved_step is None and "epoch" in payload:
-            resolved_step = _coerce_scalar_metric_value(payload["epoch"])
-
-        if resolved_step is not None:
-            self._last_step = resolved_step
-
-        self.client.log_metrics(payload, step=resolved_step)
-
-    @_rank_zero_only
-    def save(self) -> None:
-        self.client.flush()
-
-    @_rank_zero_only
-    def finalize(self, status: str) -> None:
-        self.client.finish("completed" if status in ("success", "finished", "completed") else "cancelled" if status in ("interrupted","cancelled") else "failed")
-
-
-class AeroboardRayTuneLoggerCallback(_RayTuneLoggerCallbackBase):
-    """
-    Ray Tune callback that creates one Aeroboard run per trial.
-
-    Trial configuration is logged as hyperparameters, and numeric trial results are
-    streamed as scalar metrics to the matching Aeroboard run.
-    """
-
-    def __init__(
-        self,
-        *,
-        url: str = "grpc://localhost:50051",
-        api_base_url: Optional[str] = None,
-        batch_size: int = 100,
-        run_prefix: Optional[str] = None,
-        metric_prefix: Optional[str] = None,
-    ):
-        if not _RAY_TUNE_AVAILABLE:
-            raise RuntimeError("ray[tune] is required for AeroboardRayTuneLoggerCallback")
-
-        super().__init__()
-        self.url = url
-        self.api_base_url = api_base_url
-        self.batch_size = batch_size
-        self.run_prefix = run_prefix
-        self.metric_prefix = metric_prefix
-        self._clients: Dict[str, AeroboardClient] = {}
-
-    def _trial_key(self, trial: Any) -> str:
-        return str(getattr(trial, "trial_id", id(trial)))
-
-    def _trial_run_id(self, trial: Any) -> str:
-        trial_name = (
-            getattr(trial, "trial_name", None)
-            or getattr(trial, "experiment_tag", None)
-            or getattr(trial, "trial_id", None)
-            or "trial"
-        )
-        if self.run_prefix:
-            return f"{self.run_prefix}-{trial_name}"
-        return str(trial_name)
-
-    def _build_trial_hparams(self, trial: Any) -> Dict[str, Any]:
-        payload = _mapping_like(getattr(trial, "config", {}) or {})
-        trial_id = getattr(trial, "trial_id", None)
-        trial_name = getattr(trial, "trial_name", None)
-        experiment_tag = getattr(trial, "experiment_tag", None)
-        if trial_id is not None:
-            payload["ray/trial_id"] = str(trial_id)
-        if trial_name is not None:
-            payload["ray/trial_name"] = str(trial_name)
-        if experiment_tag is not None:
-            payload["ray/experiment_tag"] = str(experiment_tag)
-        return payload
-
-    def _get_client(self, trial: Any) -> AeroboardClient:
-        trial_key = self._trial_key(trial)
-        if trial_key in self._clients:
-            return self._clients[trial_key]
-
-        client = AeroboardClient(
-            run_id=self._trial_run_id(trial),
-            url=self.url,
-            api_base_url=self.api_base_url,
-            batch_size=self.batch_size,
-        )
-        hparams = self._build_trial_hparams(trial)
-        if hparams:
-            client.log_hyperparameters(hparams)
-        self._clients[trial_key] = client
-        return client
-
-    def log_trial_start(self, trial: Any) -> None:
-        self._get_client(trial)
-
-    def log_trial_result(self, iteration: int, trial: Any, result: Dict[str, Any]) -> None:
-        client = self._get_client(trial)
-        step = _coerce_scalar_metric_value(result.get("training_iteration"))
-        if step is None:
-            step = _coerce_scalar_metric_value(iteration)
-
-        filtered = {
-            key: value
-            for key, value in result.items()
-            if key not in {
-                "config",
-                "date",
-                "done",
-                "experiment_id",
-                "hostname",
-                "node_ip",
-                "pid",
-                "timestamp",
-                "time_since_restore",
-                "timesteps_since_restore",
-                "iterations_since_restore",
-                "training_iteration",
-                "trial_id",
-                "should_checkpoint",
-            }
-        }
-        client.log_metrics(filtered, step=step, prefix=self.metric_prefix)
-
-    def log_trial_end(self, trial: Any, failed: bool = False) -> None:
-        client = self._clients.pop(self._trial_key(trial), None)
-        if client is None:
-            return
-        client.log_hyperparameters({"ray/failed": failed})
-        client.finish("failed" if failed else "completed")
-
-    def on_experiment_end(self, trials: List[Any], **info: Any) -> None:
-        del trials, info
-        for client in list(self._clients.values()):
-            client.flush()
-            client.close()
-        self._clients.clear()
+                logging.getLogger(__name__).warning(f"[Aeroboard] Warning: error closing Flight client: {e}")
 
 
 def _validate_media_position(step, segment):
@@ -1502,246 +966,6 @@ def _normalize_hparam_value(value: Any) -> Optional[tuple[str, str]]:
     if isinstance(value, (list, tuple, set)):
         return (", ".join(map(str, value)), "list")
     return (str(value), type(value).__name__)
-
-
-def _coerce_image_bytes(
-    image: Any,
-    *,
-    format: Optional[str] = None,
-    max_bytes: int = MAX_IMAGE_BYTES,
-) -> tuple[bytes, str]:
-    """
-    Coerce image data to bytes and infer format.
-
-    Args:
-        image: Image in any supported format (bytes, PIL, numpy, torch).
-        format: Target format (default: inferred).
-        max_bytes: Maximum allowed size in bytes.
-
-    Returns:
-        Tuple of (encoded_bytes, format_string).
-    """
-    inferred_format = (format or "png").lower()
-    if isinstance(image, (bytes, bytearray, memoryview)):
-        raw = bytes(image)
-        return _maybe_compress_encoded_image(raw, inferred_format, max_bytes=max_bytes)
-
-    try:
-        from PIL import Image
-    except ImportError:
-        Image = None
-
-    if Image is not None and isinstance(image, Image.Image):
-        return _encode_pil_image(image, inferred_format, max_bytes=max_bytes)
-
-    try:
-        import numpy as np
-    except ImportError:
-        np = None
-
-    if np is not None and isinstance(image, np.ndarray):
-        if Image is None:
-            raise RuntimeError("Pillow is required to encode numpy array images")
-        pil_image = Image.fromarray(image)
-        return _coerce_image_bytes(pil_image, format=inferred_format, max_bytes=max_bytes)
-
-    try:
-        import torch
-    except ImportError:
-        torch = None
-
-    if torch is not None and isinstance(image, torch.Tensor):
-        if np is None:
-            raise RuntimeError("numpy is required to encode torch tensor images")
-        arr = image.detach().cpu().numpy()
-        if arr.ndim == 3 and arr.shape[0] in (1, 3, 4):
-            arr = arr.transpose(1, 2, 0)
-        return _coerce_image_bytes(arr, format=inferred_format, max_bytes=max_bytes)
-
-    raise TypeError("Unsupported image type. Use bytes, PIL Image, numpy array, or torch tensor.")
-
-
-def _normalize_media_format(value: str) -> str:
-    return value.strip().lstrip(".").lower()
-
-
-def _coerce_encoded_media(
-    media: Any,
-    *,
-    kind: str,
-    format: Optional[str] = None,
-) -> tuple[bytes, str]:
-    """
-    Accept already-encoded media as bytes or a file path. No transcoding is done.
-
-    Returns:
-        Tuple of (payload, format).
-    """
-    if isinstance(media, (bytes, bytearray, memoryview)):
-        media_format = _normalize_media_format(format or _MEDIA_DEFAULT_FORMATS[kind])
-        return bytes(media), media_format
-
-    if isinstance(media, (str, os.PathLike)):
-        path = os.fspath(media)
-        suffix = os.path.splitext(path)[1]
-        media_format = _normalize_media_format(format or suffix or _MEDIA_DEFAULT_FORMATS[kind])
-        with open(path, "rb") as handle:
-            return handle.read(), media_format
-
-    hint = (
-        " Encode frames to MP4/WebM first (e.g. with ffmpeg) and pass the bytes or file path."
-        if kind == "video"
-        else ""
-    )
-    raise TypeError(f"Unsupported {kind} type {type(media).__name__}. Use bytes or a file path.{hint}")
-
-
-def _coerce_audio_bytes(
-    audio: Any,
-    *,
-    sample_rate: Optional[int] = None,
-    format: Optional[str] = None,
-) -> tuple[bytes, str]:
-    """
-    Coerce audio to encoded bytes.
-
-    Encoded bytes and file paths pass through unchanged. numpy arrays and torch
-    tensors are packed as 16-bit PCM WAV (vectorised numpy + stdlib ``wave``).
-    """
-    if isinstance(audio, (bytes, bytearray, memoryview, str, os.PathLike)):
-        return _coerce_encoded_media(audio, kind="audio", format=format)
-
-    if hasattr(audio, "detach") and hasattr(audio, "cpu"):  # torch.Tensor without importing torch
-        audio = audio.detach().cpu().numpy()
-
-    try:
-        import numpy as np
-    except ImportError:
-        np = None
-
-    if np is None or not isinstance(audio, np.ndarray):
-        raise TypeError(
-            f"Unsupported audio type {type(audio).__name__}. Use bytes, a file path, a numpy array or a torch tensor."
-        )
-
-    if format is not None and _normalize_media_format(format) != "wav":
-        raise ValueError("Waveform arrays are encoded as WAV; pass encoded bytes to log other formats.")
-    if not sample_rate or sample_rate <= 0:
-        raise ValueError("sample_rate is required when logging a waveform array.")
-
-    return _encode_wav(audio, int(sample_rate)), "wav"
-
-
-def _encode_wav(samples: Any, sample_rate: int) -> bytes:
-    import numpy as np
-
-    arr = np.asarray(samples)
-    if arr.ndim == 2 and arr.shape[0] < arr.shape[1]:
-        arr = arr.T  # (channels, samples) -> (samples, channels)
-    if arr.ndim == 1:
-        arr = arr[:, None]
-    if arr.ndim != 2 or arr.shape[0] == 0:
-        raise ValueError(f"Expected a 1D or 2D waveform, got shape {np.shape(samples)}.")
-
-    if np.issubdtype(arr.dtype, np.floating):
-        pcm = (np.clip(np.nan_to_num(arr), -1.0, 1.0) * 32767.0).astype("<i2")
-    elif arr.dtype == np.int16:
-        pcm = arr.astype("<i2", copy=False)
-    else:
-        raise TypeError(f"Unsupported waveform dtype {arr.dtype}; use float in [-1, 1] or int16.")
-
-    with io.BytesIO() as buffer:
-        with wave.open(buffer, "wb") as writer:
-            writer.setnchannels(pcm.shape[1])
-            writer.setsampwidth(2)
-            writer.setframerate(sample_rate)
-            writer.writeframes(np.ascontiguousarray(pcm).tobytes())
-        return buffer.getvalue()
-
-
-def _maybe_compress_encoded_image(
-    payload: bytes,
-    image_format: str,
-    *,
-    max_bytes: int = MAX_IMAGE_BYTES,
-) -> tuple[bytes, str]:
-    """
-    Compress large images to stay within size limits.
-
-    Args:
-        payload: Raw image bytes.
-        image_format: Image format.
-        max_bytes: Maximum allowed size.
-
-    Returns:
-        Compressed payload and format (may be converted to webp).
-    """
-    if len(payload) <= max_bytes:
-        return payload, image_format
-
-    try:
-        from PIL import Image
-    except ImportError:
-        return payload, image_format
-
-    try:
-        with Image.open(io.BytesIO(payload)) as image:
-            converted = (
-                image.convert('RGB')
-                if image.mode not in ('RGB', 'L')
-                else image.copy()
-            )
-            return _encode_pil_image(converted, 'webp', max_bytes=max_bytes)
-    except Exception:
-        return payload, image_format
-
-
-def _encode_pil_image(
-    image: Any,  # PIL Image
-    image_format: str,
-    *,
-    max_bytes: int = MAX_IMAGE_BYTES,
-) -> tuple[bytes, str]:
-    """
-    Encode a PIL image to bytes.
-
-    Args:
-        image: PIL Image object.
-        image_format: Target format.
-        max_bytes: Maximum allowed size.
-
-    Returns:
-        Encoded bytes and format.
-    """
-    # Check if image is actually a PIL Image
-    if not hasattr(image, 'save'):
-        raise TypeError(f"Expected PIL Image, got {type(image)}")
-
-    normalized = image_format.lower()
-    save_format = 'JPEG' if normalized in {'jpg', 'jpeg'} else normalized.upper()
-
-    if save_format == 'WEBP':
-        for quality in (85, 75, 60):
-            with io.BytesIO() as buffer:
-                image.save(buffer, format='WEBP', quality=quality, method=6)
-                payload = buffer.getvalue()
-            if len(payload) <= max_bytes:
-                return payload, 'webp'
-        return payload, 'webp'
-
-    with io.BytesIO() as buffer:
-        image.save(buffer, format=save_format)
-        payload = buffer.getvalue()
-
-    if len(payload) > max_bytes:
-        rgb_image = (
-            image.convert('RGB')
-            if getattr(image, 'mode', '') not in ('RGB', 'L')
-            else image
-        )
-        return _encode_pil_image(rgb_image, 'webp', max_bytes=max_bytes)
-
-    return payload, normalized
 
 
 def _mapping_like(value: Any) -> Dict[str, Any]:
@@ -1779,113 +1003,14 @@ def _coerce_scalar_metric_value(value: Any) -> Optional[float]:
     return None
 
 
-def _normalize_run_id(run_id: Optional[str]) -> str:
-    """Normalize a run ID by stripping whitespace."""
-    cleaned = (run_id or '').strip()
-    return cleaned or f"run-{int(time.time())}"
-
-
-def _default_api_base_url(flight_url: Optional[str] = None) -> str:
-    if flight_url is None:
-        return "http://localhost:3000"
-
-    if flight_url.startswith("grpc://"):
-        return flight_url.replace("grpc://", "http://").replace(":50051", ":3000")
-    if flight_url.startswith("grpcs://"):
-        return flight_url.replace("grpcs://", "https://").replace(":50051", ":3000")
-    return "http://localhost:3000"
-
-
-def _fetch_existing_run_ids(base: str, api_base_url: Optional[str] = None) -> set[str]:
-    """Fetch run IDs matching ``base`` (or its versions) from the server's run list.
-
-    Only used when the server's ``/api/runs/resolve`` endpoint is unavailable. The
-    client never talks to the storage backend directly.
-    """
-    import requests
-
-    normalized_base = _normalize_run_id(base)
-    api_base_url = (api_base_url or "http://localhost:3000").rstrip("/")
-    try:
-        resp = requests.get(f"{api_base_url}/api/runs", timeout=2)
-        if resp.status_code != 200:
-            return set()
-        runs = resp.json().get("runs", [])
-    except Exception:
-        return set()
-    return {
-        run_id for run_id in runs
-        if run_id == normalized_base or run_id.startswith(f"{normalized_base}-v")
-    }
-
-
-def resolve_run_id(base: str, existing: set[str], include_base: bool = True) -> str:
-    """
-    Resolve a run ID with versioning.
-
-    Args:
-        base: Base run name.
-        existing: Set of existing run IDs.
-        include_base: Whether to include the base run if version 1 doesn't exist.
-
-    Returns:
-        The resolved run ID with version suffix if needed.
-    """
-    normalized = _normalize_run_id(base)
-    base_without_suffix, framework_suffix = _split_framework_suffix(normalized)
-
-    existing_versions = {
-        version
-        for candidate in existing
-        if (version := _extract_version(candidate, normalized)) is not None
-    }
-
-    if include_base and 1 not in existing_versions:
-        return normalized
-
-    next_version = max(existing_versions, default=1) + 1
-    return f"{base_without_suffix}-v{next_version}{framework_suffix}"
-
-
-def _split_framework_suffix(candidate: str) -> tuple[str, str]:
-    """
-    Split a run ID into base name and framework suffix.
-
-    Args:
-        candidate: The run ID to split.
-
-    Returns:
-        Tuple of (base_name, framework_suffix).
-    """
-    # A Lightning suffix is "-pl" plus a dotted version ("exp-pl2.5.1"); names that
-    # merely contain "-pl" ("sample-placement") have none.
-    match = re.fullmatch(r"(.+?)(-pl\d+(?:\.\d+)*)?", candidate)
-    if match is None:
-        return candidate, ""
-    return match.group(1), match.group(2) or ""
-
-
-def _extract_version(candidate: str, base: str) -> Optional[int]:
-    """
-    Extract version number from a candidate run ID relative to base.
-
-    Args:
-        candidate: The candidate run ID.
-        base: The base run name.
-
-    Returns:
-        Version number or None if no match.
-    """
-    candidate_base, candidate_suffix = _split_framework_suffix(candidate)
-    base_without_suffix, base_suffix = _split_framework_suffix(base)
-
-    if candidate_suffix != base_suffix:
-        return None
-
-    if candidate_base == base_without_suffix:
-        return 1
-
-    match = re.fullmatch(rf"{re.escape(base_without_suffix)}-v(\d+)", candidate_base)
-    if match is None:
-        return None
-    return int(match.group(1))
+_INTEGRATIONS={"AeroboardLightningCallback":"lightning","AeroboardLightningLogger":"lightning","AeroboardRayTuneLoggerCallback":"ray"}
+def __getattr__(name):
+    if name in _INTEGRATIONS:
+        import importlib
+        value=getattr(importlib.import_module(f".integrations.{_INTEGRATIONS[name]}",__package__),name)
+        globals()[name]=value
+        return value
+    if name=="_RAY_TUNE_AVAILABLE":
+        from .integrations.ray import _RAY_TUNE_AVAILABLE
+        return _RAY_TUNE_AVAILABLE
+    raise AttributeError(name)

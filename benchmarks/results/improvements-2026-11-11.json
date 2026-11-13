@@ -1,0 +1,126 @@
+{
+  "date": "2026-11-11",
+  "notes": [
+    "Single local debug-build samples, not a performance guarantee.",
+    "Both server builds used the updated SDK and dashboard, with normal protocol negotiation.",
+    "Receipt-growth cases seed unrelated pending receipt metadata without payloads.",
+    "The original server ignores max_points; its overview returns all 1M observations.",
+    "Each case launches a fresh server with a disposable filesystem store."
+  ],
+  "before": [
+    {
+      "binary": "original HEAD debug build",
+      "receipts": 10000,
+      "batch_size": 100,
+      "points": 10000,
+      "seconds": 1.308858316999249,
+      "points_per_second": 7640.246365952335
+    },
+    {
+      "binary": "original HEAD debug build",
+      "receipts": 10000,
+      "batch_size": 5000,
+      "points": 10000,
+      "seconds": 0.0951689739995345,
+      "points_per_second": 105076.26151406144
+    },
+    {
+      "binary": "original HEAD debug build",
+      "receipts": 1000000,
+      "batch_size": 100,
+      "points": 10000,
+      "seconds": 14.39468063700042,
+      "points_per_second": 694.7010671633637
+    },
+    {
+      "binary": "original HEAD debug build",
+      "receipts": 1000000,
+      "batch_size": 5000,
+      "points": 10000,
+      "seconds": 0.49289065199991455,
+      "points_per_second": 20288.475667827708
+    },
+    {
+      "binary": "original HEAD debug build",
+      "receipts": 0,
+      "batch_size": 5000,
+      "points": 1000000,
+      "seconds": 6.537679938999645,
+      "points_per_second": 152959.46105202174,
+      "full": {
+        "http_ms": 1168.8225450016034,
+        "decode_ms": 0.17029700029524975,
+        "bytes": 36752136,
+        "rows": 1000000
+      },
+      "overview": {
+        "http_ms": 1104.7034580005857,
+        "decode_ms": 1.1365499995008577,
+        "bytes": 36752136,
+        "rows": 1000000
+      },
+      "browser": {
+        "navigation_to_chart_ms": 2050.395514,
+        "errors": []
+      }
+    }
+  ],
+  "after": [
+    {
+      "binary": "improved debug build",
+      "receipts": 10000,
+      "batch_size": 100,
+      "points": 10000,
+      "seconds": 0.2545899630022177,
+      "points_per_second": 39278.8461967485
+    },
+    {
+      "binary": "improved debug build",
+      "receipts": 10000,
+      "batch_size": 5000,
+      "points": 10000,
+      "seconds": 0.07451715400020475,
+      "points_per_second": 134197.28831796933
+    },
+    {
+      "binary": "improved debug build",
+      "receipts": 1000000,
+      "batch_size": 100,
+      "points": 10000,
+      "seconds": 0.23759850100032054,
+      "points_per_second": 42087.807616204234
+    },
+    {
+      "binary": "improved debug build",
+      "receipts": 1000000,
+      "batch_size": 5000,
+      "points": 10000,
+      "seconds": 0.10669822500130977,
+      "points_per_second": 93722.27138621328
+    },
+    {
+      "binary": "improved debug build",
+      "receipts": 0,
+      "batch_size": 5000,
+      "points": 1000000,
+      "seconds": 3.5508085430010397,
+      "points_per_second": 281625.99810431607,
+      "full": {
+        "http_ms": 704.6234070003266,
+        "decode_ms": 0.5500779989233706,
+        "bytes": 36814600,
+        "rows": 1000000
+      },
+      "overview": {
+        "http_ms": 368.96098000215716,
+        "decode_ms": 2.068806999886874,
+        "bytes": 369992,
+        "rows": 10000
+      },
+      "browser": {
+        "navigation_to_chart_ms": 895.8294149999999,
+        "errors": []
+      }
+    }
+  ]
+}

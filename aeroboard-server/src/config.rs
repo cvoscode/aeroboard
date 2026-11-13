@@ -43,7 +43,9 @@ pub enum CorsPolicy {
 impl CorsPolicy {
     fn from_env() -> Self {
         // `CORS_ORIGIN` is the pre-0.2 name; keep honouring it.
-        let raw = env::var("AEROBOARD_CORS_ORIGINS").or_else(|_| env::var("CORS_ORIGIN")).unwrap_or_default();
+        let raw = env::var("AEROBOARD_CORS_ORIGINS")
+            .or_else(|_| env::var("CORS_ORIGIN"))
+            .unwrap_or_default();
         let origins: Vec<String> = raw
             .split(',')
             .map(str::trim)
@@ -134,7 +136,11 @@ fn read_host() -> IpAddr {
     match env::var("AEROBOARD_HOST") {
         Ok(value) if !value.trim().is_empty() => {
             let value = value.trim();
-            let value = if value.eq_ignore_ascii_case("localhost") { "127.0.0.1" } else { value };
+            let value = if value.eq_ignore_ascii_case("localhost") {
+                "127.0.0.1"
+            } else {
+                value
+            };
             value.parse().unwrap_or_else(|_| {
                 tracing::warn!("Ignoring invalid AEROBOARD_HOST={value:?}; binding to {default}");
                 default

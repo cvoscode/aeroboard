@@ -15,6 +15,7 @@ thread that sends queued batches one at a time, in order:
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import deque
@@ -31,7 +32,7 @@ DEFAULT_MAX_QUEUE_BYTES = 256 * 1024 * 1024
 DEFAULT_MAX_QUEUE_BATCHES = 1000
 
 # The server answers INVALID_ARGUMENT for malformed batches; pyarrow surfaces it as these.
-_PERMANENT_ERRORS = (pa.ArrowInvalid, pa.ArrowTypeError, fl.FlightUnauthenticatedError, fl.FlightUnauthorizedError)
+_PERMANENT_ERRORS = (TypeError, ValueError, pa.ArrowInvalid, pa.ArrowTypeError, fl.FlightUnauthenticatedError, fl.FlightUnauthorizedError)
 
 
 @dataclass
@@ -52,8 +53,10 @@ class BatchSender:
         max_queue_batches: int = DEFAULT_MAX_QUEUE_BATCHES,
         initial_retry_delay: float = 0.5,
         max_retry_delay: float = 10.0,
+        put_many=None,
     ) -> None:
         self._put = put
+        self._put_many=put_many
         self._on_error = on_error
         self._max_queue_bytes = max_queue_bytes
         self._max_queue_batches = max(1, max_queue_batches)
@@ -178,14 +181,24 @@ class BatchSender:
                     return
                 item = self._queue.popleft()
                 self._queued_bytes -= item.size
+                items=[item]
+                if self._put_many is not None:
+                    while self._queue and len(items)<16 and sum(entry.size for entry in items)<8*1024*1024:
+                        candidate=self._queue[0]
+                        if candidate.path!=item.path or not candidate.schema.equals(item.schema):break
+                        items.append(self._queue.popleft());self._queued_bytes-=candidate.size
                 self._in_flight = True
 
             try:
-                self._put(item.batch, item.schema, item.path)
+                from ._protocol import prepare_batch
+                for entry in items:
+                    entry.batch=prepare_batch(entry.batch);entry.schema=entry.batch.schema
+                if len(items)>1:self._put_many([(entry.batch,entry.schema,entry.path) for entry in items])
+                else:self._put(item.batch, item.schema, item.path)
             except _PERMANENT_ERRORS as exc:
                 with self._cond:
                     self._in_flight = False
-                    self._dropped_rows += item.batch.num_rows
+                    self._dropped_rows += sum(entry.batch.num_rows for entry in items)
                     self._cond.notify_all()
                 self._on_error(f"[Aeroboard] Server rejected a {item.path.decode()} batch; dropping it: {exc}")
                 continue
@@ -196,8 +209,7 @@ class BatchSender:
                     self._failing = True
                     if not self._abandon:
                         # Keep ordering: the failed batch goes back to the front.
-                        self._queue.appendleft(item)
-                        self._queued_bytes += item.size
+                        for entry in reversed(items):self._queue.appendleft(entry);self._queued_bytes+=entry.size
                         self._enforce_budget()
                     self._cond.notify_all()
                 if newly_failing:
@@ -213,5 +225,5 @@ class BatchSender:
                 self._failing = False
                 self._cond.notify_all()
             if recovered:
-                print("[Aeroboard] Connection to the server restored; resuming delivery.")
+                logging.getLogger(__name__).info("Connection to the server restored; resuming delivery.")
             delay = self._initial_retry_delay

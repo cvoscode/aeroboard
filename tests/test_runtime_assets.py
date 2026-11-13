@@ -54,3 +54,26 @@ def test_ensure_web_dist_rejects_missing_index(tmp_path, monkeypatch):
 
     with pytest.raises(runtime.RuntimeAssetError):
         runtime.ensure_web_dist()
+
+def test_download_checks_checksum_before_install(tmp_path,monkeypatch):
+    import hashlib
+    import io
+    content=b'verified artifact'
+    digest=hashlib.sha256(content).hexdigest()
+    def open_url(request,timeout):
+        return io.BytesIO((f'{digest}  server.tar.gz\n').encode() if request.full_url.endswith('SHA256SUMS') else content)
+    monkeypatch.setattr(runtime.urllib.request,'urlopen',open_url)
+    target=tmp_path/'download'
+    assert runtime._download_asset('server.tar.gz',target).read_bytes()==content
+
+
+def test_download_rejects_corrupt_artifact_and_preserves_existing_file(tmp_path,monkeypatch):
+    import io
+    def open_url(request,timeout):
+        return io.BytesIO((f'{"0"*64}  server.tar.gz\n').encode() if request.full_url.endswith('SHA256SUMS') else b'corrupt')
+    monkeypatch.setattr(runtime.urllib.request,'urlopen',open_url)
+    target=tmp_path/'download';target.write_bytes(b'previous')
+    with pytest.raises(runtime.RuntimeAssetError,match='checksum mismatch'):
+        runtime._download_asset('server.tar.gz',target)
+    assert target.read_bytes()==b'previous'
+    assert not target.with_name('download.partial').exists()

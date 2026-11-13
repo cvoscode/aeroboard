@@ -10,7 +10,8 @@ Python client package that exposes the telemetry SDK, CLI entrypoints, and integ
 
 Important paths:
 
-- `src/aeroboard_client/client.py`: client implementation and framework integrations
+- `src/aeroboard_client/client.py`: telemetry client; media, HTTP queries and naming helpers live in separate modules
+- `src/aeroboard_client/integrations/`: lazy Lightning and Ray adapters
 - `src/aeroboard_client/cli.py`: top-level `aeroboard` CLI
 - `src/aeroboard_client/schema.py`: Arrow schemas for supported telemetry types
 
@@ -49,7 +50,7 @@ Sphinx documentation source tree. Guides use Markdown through MyST, `conf.py` co
 
 ## Package layout notes
 
-The repository root `pyproject.toml` is the canonical Python package manifest. The `aeroboard-client/` directory contains the package source tree and local examples, not an independent publishable package definition.
+The repository root `pyproject.toml` is the canonical Python package manifest. The `aeroboard-client/` directory contains the package source tree, not an independent publishable package definition.
 
 ## Build outputs and generated artifacts
 

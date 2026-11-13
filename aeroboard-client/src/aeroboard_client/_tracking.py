@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import deque
 import importlib.metadata
 import json
+import logging
 import math
 import subprocess
 import threading
@@ -35,7 +36,7 @@ def provenance() -> dict:
 
 class RunTracker:
     def __init__(self, base_url, *, project=None, resume=False, verify=True,
-                 capture_provenance=False, metadata=None, tags=None, interval=15.0, on_error=print):
+                 capture_provenance=False, metadata=None, tags=None, interval=15.0, on_error=None):
         if project is not None and (not isinstance(project, str) or not project or len(project)>128):
             raise ValueError("project must be a nonempty project ID")
         self.base_url = base_url
@@ -52,7 +53,7 @@ class RunTracker:
         self.attempted = False
         self.sequence = 0
         self.interval = interval
-        self.on_error = on_error
+        self.on_error = on_error or logging.getLogger(__name__).warning
         self.metadata = {**(provenance() if capture_provenance else {}), **(metadata or {})}
         self.tags = tags or []
         if not isinstance(self.metadata,dict) or not isinstance(self.tags,list) or len(self.tags)>50 or any(not isinstance(tag,str) or len(tag)>128 for tag in self.tags):
@@ -217,8 +218,11 @@ class RunTracker:
 
     def deliver(self, method, path, payload):
         if method == "DEFINE":
-            definitions = self.request("GET", "/api/metric-definitions?parent="+self.run_uid)
-            existing = next((d for d in definitions if d["data"]["name"]==payload["name"]), None)
+            if not getattr(self,"_definitions_loaded",False):
+                definitions=self.request("GET", "/api/metric-definitions?parent="+self.run_uid)
+                self.definitions.update({d["data"]["name"]:d for d in definitions})
+                self._definitions_loaded=True
+            existing=self.definitions.get(payload["name"])
             body = {**payload, **({"revision": existing["revision"]} if existing else {})}
             result = self.request("POST", path, body)
             self.definitions[payload["name"]] = result

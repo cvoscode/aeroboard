@@ -54,6 +54,7 @@ include = [
   "/aeroboard-client/src/aeroboard_client",
   "/setup.sh",
   "/tests",
+  "/protocol",
 ]
 
 [tool.hatch.metadata]

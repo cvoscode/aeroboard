@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BinaryArray};
+use arrow::array::{Array, ArrayRef, AsArray, BinaryArray, BooleanArray};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use axum::{
@@ -41,7 +41,10 @@ pub(crate) fn live_batch(
     telemetry: &TelemetryBatch,
     strip_media_payloads: bool,
 ) -> Arc<RecordBatch> {
-    let is_av = matches!(telemetry.kind, TelemetryKind::Audio | TelemetryKind::Video);
+    let is_av = matches!(
+        telemetry.kind,
+        TelemetryKind::Images | TelemetryKind::Audio | TelemetryKind::Video
+    );
     let batch = &telemetry.batch;
     let data_index = telemetry
         .kind
@@ -98,51 +101,61 @@ async fn handle_socket(
     drop(t_junction);
     let (mut sender, mut receiver) = socket.split();
 
-    // Read from the socket only to notice when the browser goes away.
-    let mut recv_task = tokio::spawn(async move {
-        while let Some(msg_result) = receiver.next().await {
-            if matches!(msg_result, Ok(Message::Close(_)) | Err(_)) {
-                break;
-            }
-        }
-    });
-
-    let mut send_task = tokio::spawn(async move {
-        loop {
-            let telemetry = tokio::select! {
-                update = metadata.recv() => {
-                    let message = update.unwrap_or_else(|_|serde_json::json!({"type":"catalog_changed"}).to_string());
-                    if sender.send(Message::Text(message.into())).await.is_err() { break; }
-                    continue;
-                }
-                telemetry = rx.recv() => telemetry,
-            };
-            let message = match telemetry {
-                Ok(telemetry) => match live_payload(&telemetry, strip_media_payloads) {
-                    Ok(bytes) => Message::Binary(bytes),
-                    Err(error) => {
-                        tracing::error!("Failed to serialize batch for WebSocket: {}", error);
+    // None preserves compatibility for clients that have not sent subscriptions.
+    let mut subscriptions: Option<std::collections::BTreeSet<String>> = None;
+    loop {
+        let message = tokio::select! {
+            input=receiver.next()=>{
+                match input {
+                    Some(Ok(Message::Text(text)))=>{
+                        if let Ok(value)=serde_json::from_str::<serde_json::Value>(&text) && value["type"]=="subscribe"
+                            && let Some(runs)=value["runs"].as_array() && runs.len()<=1000 && runs.iter().all(|r|r.as_str().is_some_and(|s|s.len()<=256)) {
+                                subscriptions=Some(runs.iter().filter_map(|r|r.as_str().map(str::to_owned)).collect());
+                        }
                         continue;
-                    }
-                },
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::warn!(
-                        "WebSocket subscriber lagged and skipped {} batches",
-                        skipped
-                    );
-                    Message::Text(lagged_message(skipped).into())
+                    },
+                    Some(Ok(Message::Ping(bytes)))=>Message::Pong(bytes),
+                    Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,
+                    _=>continue
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
-            };
-            if sender.send(message).await.is_err() {
-                break;
+            },
+            update=metadata.recv()=>{
+                match update {
+                    Ok(message)=>Message::Text(message.into()),
+                    Err(broadcast::error::RecvError::Lagged(_))=>Message::Text(serde_json::json!({"type":"catalog_changed"}).to_string().into()),
+                    Err(broadcast::error::RecvError::Closed)=>break
+                }
+            },
+            update=rx.recv()=>{
+                match update {
+                    Ok(telemetry)=>{
+                        let ids=telemetry.batch.column(1).as_string::<i32>();
+                        let runs=telemetry.run_ids();
+                        let activity=serde_json::json!({"type":"data_changed","runs":runs,"batch_id":telemetry.envelope.as_ref().map(|e|&e.batch_id)}).to_string();
+                        if sender.send(Message::Text(activity.into())).await.is_err(){break;}
+                        let filtered = if let Some(selected)=&subscriptions {
+                            let mask=BooleanArray::from((0..ids.len()).map(|i|selected.contains(ids.value(i))).collect::<Vec<_>>());
+                            let count=mask.values().count_set_bits();
+                            if count==0 {continue;}
+                            if count==ids.len(){None}else{
+                                match arrow::compute::filter_record_batch(&telemetry.batch,&mask){
+                                    Ok(batch)=>Some(TelemetryBatch::new(telemetry.kind.clone(),Arc::new(batch))),
+                                    Err(error)=>{tracing::warn!("Cannot filter live batch: {error}");continue;}
+                                }
+                            }
+                        }else{None};
+                        match live_payload(filtered.as_ref().unwrap_or(&telemetry),strip_media_payloads){
+                            Ok(bytes)=>Message::Binary(bytes),
+                            Err(error)=>{tracing::warn!("Cannot encode live batch: {error}");continue;}
+                        }
+                    },
+                    Err(broadcast::error::RecvError::Lagged(skipped))=>Message::Text(lagged_message(skipped).into()),
+                    Err(broadcast::error::RecvError::Closed)=>break
+                }
             }
+        };
+        if sender.send(message).await.is_err() {
+            break;
         }
-    });
-
-    // If either task exits, abort the other.
-    tokio::select! {
-        _ = (&mut send_task) => recv_task.abort(),
-        _ = (&mut recv_task) => send_task.abort(),
-    };
+    }
 }

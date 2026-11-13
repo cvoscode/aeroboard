@@ -1,20 +1,22 @@
+import { changedSeries } from "./seriesSubscriptions.ts";
 import type { MetricSummary, RunSummary, ScalarRow, TimeSeriesData } from "./types";
 
 export type ScalarStore = Record<string, Record<string, TimeSeriesData>>;
 export type RunSummaryStore = Record<string, RunSummary>;
 
 type MetricSummaryInternal = MetricSummary & { __ts?: number };
+const summaryIndexes = new WeakMap<RunSummary, Map<string,MetricSummaryInternal>>();
 
-export const DEFAULT_BUFFER_SIZE = 4096;
+export const DEFAULT_BUFFER_SIZE = 128;
 export const BUFFER_GROWTH_FACTOR = 2;
-export const BUFFER_MIN_CAPACITY = 1024;
+export const BUFFER_MIN_CAPACITY = 128;
 
 export function makeEmptySeries(): TimeSeriesData {
   return {
     wallTimes: new Float64Array(DEFAULT_BUFFER_SIZE),
-    relTimes: new Float64Array(DEFAULT_BUFFER_SIZE),
+    get relTimes() { return this.wallTimes.subarray(0,this.count).map(time => time - (this.startTime ?? 0)); },
     steps: new Float64Array(DEFAULT_BUFFER_SIZE).fill(-1),
-    plotX: new Float64Array(DEFAULT_BUFFER_SIZE),
+    get plotX() { return this.wallTimes.subarray(0,this.count).map((time,i) => this.steps[i] >= 0 ? this.steps[i] : time - (this.startTime ?? 0)); },
     values: new Float64Array(DEFAULT_BUFFER_SIZE),
     count: 0,
   };
@@ -33,9 +35,7 @@ function ensureSeriesCapacity(series: TimeSeriesData) {
   if (series.count < series.values.length) return;
   const nextSize = Math.max(BUFFER_MIN_CAPACITY, series.values.length * BUFFER_GROWTH_FACTOR);
   series.wallTimes = growFloat64Array(series.wallTimes, nextSize);
-  series.relTimes = growFloat64Array(series.relTimes, nextSize);
   series.steps = growFloat64Array(series.steps, nextSize, -1);
-  series.plotX = growFloat64Array(series.plotX, nextSize);
   series.values = growFloat64Array(series.values, nextSize);
 }
 
@@ -48,7 +48,9 @@ export function ensureRunSummary(summaryStore: RunSummaryStore, runId: string): 
 
 export function updateMetricSummary(summary: RunSummary, name: string, tsMs: number, value: number) {
   const metricEntries = summary.metric_summaries as MetricSummaryInternal[];
-  const existing = metricEntries.find((entry) => entry.name === name);
+  let index = summaryIndexes.get(summary);
+  if (!index) { index = new Map(metricEntries.map(entry => [entry.name,entry])); summaryIndexes.set(summary,index); }
+  const existing = index.get(name);
   if (existing) {
     existing.min = Math.min(existing.min, value);
     existing.max = Math.max(existing.max, value);
@@ -59,7 +61,8 @@ export function updateMetricSummary(summary: RunSummary, name: string, tsMs: num
     return;
   }
 
-  metricEntries.push({ name, last: value, min: value, max: value, __ts: tsMs });
+  const entry = { name, last: value, min: value, max: value, __ts: tsMs };
+  metricEntries.push(entry); index.set(name,entry);
 }
 
 function isStepMetric(name: string): boolean {
@@ -88,7 +91,10 @@ export function ingestPoint(
   const wallTime = row.ts_ms / 1000;
 
   if (startTimes[row.run_id] === undefined) startTimes[row.run_id] = wallTime;
-  const relTime = wallTime - startTimes[row.run_id];
+  if (wallTime < startTimes[row.run_id]) {
+    startTimes[row.run_id] = wallTime;
+    for (const series of Object.values(store[row.run_id] ?? {})) {series.startTime=wallTime;changedSeries(series);}
+  }
 
   if (!store[row.run_id]) store[row.run_id] = {};
   const runStore = store[row.run_id];
@@ -102,16 +108,17 @@ export function ingestPoint(
   let i = series.count;
   if (i > 0 && wallTime < series.wallTimes[i - 1]) {
     i = upperBound(series, wallTime);
-    for (const array of [series.wallTimes, series.relTimes, series.steps, series.plotX, series.values]) {
+    for (const array of [series.wallTimes, series.steps, series.values]) {
       array.copyWithin(i + 1, i, series.count);
     }
   }
   series.wallTimes[i] = wallTime;
-  series.relTimes[i] = relTime;
-  series.plotX[i] = step ?? relTime;
+  series.startTime = startTimes[row.run_id];
   series.values[i] = row.value;
   series.steps[i] = step ?? -1;
   series.count += 1;
+  if (step !== null && step >= 0) {series.minStep=Math.min(series.minStep ?? Infinity,step);series.maxStep=Math.max(series.maxStep ?? -Infinity,step);}
+  changedSeries(series);
 
   updateMetricSummary(ensureRunSummary(summaryStore, row.run_id), row.name, row.ts_ms, row.value);
   return true;
@@ -232,14 +239,99 @@ export function getGlobalXBounds(
     const runStore = store[runId];
     if (!runStore) continue;
     for (const series of Object.values(runStore)) {
-      const xArr = xAxis === "wall" ? series.wallTimes : xAxis === "rel" ? series.relTimes : series.steps;
-      for (let i = 0; i < series.count; i++) {
-        if (xAxis === "step" && xArr[i] < 0) continue;
-        if (xArr[i] < min) min = xArr[i];
-        if (xArr[i] > max) max = xArr[i];
-      }
+      if (!series.count) continue;
+      const low = xAxis === "step" ? series.minStep ?? Infinity : series.wallTimes[0] - (xAxis === "rel" ? series.startTime ?? 0 : 0);
+      const high = xAxis === "step" ? series.maxStep ?? -Infinity : series.wallTimes[series.count-1] - (xAxis === "rel" ? series.startTime ?? 0 : 0);
+      min=Math.min(min,low);max=Math.max(max,high);
     }
   }
 
   return min === Infinity ? [0, 100] : [min, max];
+}
+
+/** Arrow vectors stay columnar; allocate indices once per series, never point objects. */
+interface VectorLike {get(index:number):unknown}
+export interface ScalarColumns {numRows:number;getChild(name:string):VectorLike|null}
+export function mergeScalarColumns(store:ScalarStore,summaries:RunSummaryStore,starts:Record<string,number>,batches:ScalarColumns[],allowed?:Set<string>):boolean {
+  let structureChanged=false;
+  for (const batch of batches) {
+    const times=batch.getChild('timestamp'),runs=batch.getChild('run_id'),names=batch.getChild('name'),values=batch.getChild('value'),steps=batch.getChild('step');
+    if(!times||!runs||!names||!values)continue;
+    const groups=new Map<string,Map<string,number[]>>();
+    const legacy=new Map<string,Map<number,number>>();
+    for(let i=0;i<batch.numRows;i++) {
+      const run=runs.get(i) as string,name=names.get(i) as string;
+      if(allowed&&!allowed.has(run))continue;
+      if(isStepMetric(name)){let map=legacy.get(run);if(!map){map=new Map();legacy.set(run,map);}map.set(Number(times.get(i)),Number(values.get(i)));continue;}
+      let metrics=groups.get(run);if(!metrics){metrics=new Map();groups.set(run,metrics);}
+      let rows=metrics.get(name);if(!rows){rows=[];metrics.set(name,rows);}rows.push(i);
+    }
+    for(const [run,metrics] of groups) for(const [name,indices] of metrics) {
+      const stepAt=(i:number)=>{const value=steps?.get(i);return value==null?legacy.get(run)?.get(Number(times.get(i)))??-1:Number(value);};
+      indices.sort((a,b)=>Number(times.get(a))-Number(times.get(b))||stepAt(a)-stepAt(b));
+      const runStore=store[run]??=Object.create(null) as Record<string,TimeSeriesData>;
+      let series=runStore[name];
+      if(!series){series=makeEmptySeries();runStore[name]=series;structureChanged=true;}
+      const first=Number(times.get(indices[0]))/1000;
+      if(starts[run]===undefined||first<starts[run]) {
+        starts[run]=first;
+        for(const other of Object.values(runStore)){other.startTime=first;changedSeries(other);}
+      }
+      const firstStep=stepAt(indices[0]);
+      if(!series.count||first>series.wallTimes[series.count-1]||first===series.wallTimes[series.count-1]&&firstStep>series.steps[series.count-1]) {
+        const summary=ensureRunSummary(summaries,run);let min=Infinity,max=-Infinity,last=-Infinity,lastValue=NaN;
+        for(const row of indices){
+          const time=Number(times.get(row))/1000,step=stepAt(row),value=Number(values.get(row));
+          const previous=series.count-1;
+          if(previous>=0&&series.wallTimes[previous]===time&&series.steps[previous]===step)continue;
+          ensureSeriesCapacity(series);const i=series.count++;
+          series.wallTimes[i]=time;series.steps[i]=step;series.values[i]=value;
+          if(step>=0){series.minStep=Math.min(series.minStep??Infinity,step);series.maxStep=Math.max(series.maxStep??-Infinity,step);}
+          if(Number.isFinite(value)){min=Math.min(min,value);max=Math.max(max,value);}
+          last=time*1000;lastValue=value;
+        }
+        series.startTime=starts[run];updateMetricSummary(summary,name,last,lastValue);
+        const metric=summaryIndexes.get(summary)!.get(name)!;metric.min=Math.min(metric.min,min);metric.max=Math.max(metric.max,max);
+        changedSeries(series);continue;
+      }
+      const capacity=Math.max(DEFAULT_BUFFER_SIZE,series.count+indices.length);
+      const wallTimes=new Float64Array(capacity),newValues=new Float64Array(capacity),newSteps=new Float64Array(capacity).fill(-1);
+      let a=0,b=0,count=0,lastTime=-Infinity,lastStep=-Infinity;
+      const put=(time:number,step:number,value:number)=>{
+        if(time===lastTime&&step===lastStep)return;
+        wallTimes[count]=time;newSteps[count]=step;newValues[count]=value;count++;lastTime=time;lastStep=step;
+      };
+      while(a<series.count||b<indices.length){
+        const row=indices[b],time=b<indices.length?Number(times.get(row))/1000:Infinity,step=b<indices.length?stepAt(row):Infinity;
+        if(a<series.count&&(b>=indices.length||series.wallTimes[a]<time||series.wallTimes[a]===time&&series.steps[a]<=step)) {put(series.wallTimes[a],series.steps[a],series.values[a]);a++;}
+        else {put(time,step,Number(values.get(row)));b++;}
+      }
+      series.wallTimes=wallTimes;series.values=newValues;series.steps=newSteps;series.count=count;series.startTime=starts[run];
+      let min=Infinity,max=-Infinity;series.minStep=Infinity;series.maxStep=-Infinity;
+      for(let i=0;i<count;i++){if(Number.isFinite(newValues[i])){min=Math.min(min,newValues[i]);max=Math.max(max,newValues[i]);}if(newSteps[i]>=0){series.minStep=Math.min(series.minStep,newSteps[i]);series.maxStep=Math.max(series.maxStep,newSteps[i]);}}
+      const summary=ensureRunSummary(summaries,run);updateMetricSummary(summary,name,wallTimes[count-1]*1000,newValues[count-1]);
+      const metric=summaryIndexes.get(summary)!.get(name)!;metric.min=Math.min(metric.min,min);metric.max=Math.max(metric.max,max);
+      changedSeries(series);
+    }
+  }
+  return structureChanged;
+}
+
+const hyperparameterIndexes = new WeakMap<RunSummary, Map<string, RunSummary["hyperparameters"][number]>>();
+/** Live hyperparameter updates use one index per summary object. */
+export function setSummaryHyperparameter(summary: RunSummary, key: string, value: string, valueType: string) {
+  let entries = hyperparameterIndexes.get(summary);
+  if (!entries) {
+    entries = new Map(summary.hyperparameters.map(entry => [entry.key, entry]));
+    hyperparameterIndexes.set(summary, entries);
+  }
+  const existing = entries.get(key);
+  if (existing) {
+    existing.value = value;
+    existing.value_type = valueType;
+  } else {
+    const entry = { key, value, value_type: valueType };
+    entries.set(key, entry);
+    summary.hyperparameters.push(entry);
+  }
 }

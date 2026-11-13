@@ -121,11 +121,15 @@ def test_replay_fault_windows_scores_assets_views_filters_and_tombstones(server,
                 # the write again, then make it visible exactly once.
                 with sqlite3.connect(root/"catalog.sqlite") as db:
                     db.execute("UPDATE receipts SET committed=0 WHERE id=?",(batch_id,))
-                if storage=="filesystem":
-                    (root/"batches"/f"{batch_id}.arrow").unlink()
-                else:
-                    response=requests.post(os.environ["GREPTIME_TEST_URL"]+"/v1/sql",data={"sql":f"DELETE FROM aeroboard_batches WHERE batch_id='{batch_id}'"},timeout=10)
+                with sqlite3.connect(root/"catalog.sqlite") as db:
+                    location=json.loads(db.execute("SELECT body FROM payload_locations WHERE id=?",(batch_id,)).fetchone()[0])
+                if location["path"].startswith("greptime/"):
+                    table="aeroboard_"+location["path"].split("/")[1]
+                    response=requests.post(os.environ["GREPTIME_TEST_URL"]+"/v1/sql",data={"sql":f"DELETE FROM {table} WHERE batch_id='{batch_id}'"},timeout=10)
                     response.raise_for_status();assert not response.json().get("error")
+                else:
+                    with (root/location["path"]).open("r+b") as payload:
+                        payload.truncate(location["offset"]-8)
                 transport(kind,path,body)
             replayed.append((kind,path,body))
             outbox.acknowledge(ordinal)

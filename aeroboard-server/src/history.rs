@@ -46,6 +46,7 @@ pub struct HistoryQuery {
     pub limit: Option<usize>,
     pub cursor: Option<usize>,
     pub include_summaries: Option<bool>,
+    pub max_points: Option<usize>,
     pub format: Option<String>,
 }
 
@@ -93,6 +94,17 @@ pub struct HistoryResponse {
     pub run_summaries: Vec<RunSummary>,
     pub next_cursor: Option<usize>,
     pub error: Option<String>,
+}
+
+impl HistoryResponse {
+    fn failure(message: String) -> Self {
+        Self {
+            rows: vec![],
+            run_summaries: vec![],
+            next_cursor: None,
+            error: Some(message),
+        }
+    }
 }
 
 /// Response from /api/history/images and /api/history/media.
@@ -152,7 +164,7 @@ pub struct ImageHistoryPoint {
 }
 
 /// Summary of hyperparameters for a run.
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct HyperparameterEntry {
     pub key: String,
     pub value: String,
@@ -284,6 +296,8 @@ pub fn build_history_query_options(query: &HistoryQuery) -> HistoryQueryOptions 
         end_ms: query.end_ms,
         limit: query.limit,
         cursor: query.cursor,
+        max_points: query.max_points,
+        ..Default::default()
     }
 }
 
@@ -296,6 +310,7 @@ pub fn build_image_query_options(query: &ImageHistoryQuery) -> ImageQueryOptions
         limit: query.limit,
         cursor: query.cursor,
         include_data: query.include_data.unwrap_or(false),
+        ..Default::default()
     }
 }
 
@@ -313,7 +328,9 @@ fn json_error<T: Serialize>(
 
 /// Encode history rows as an Arrow IPC stream. `run_id` and `name` are
 /// dictionary-encoded, so each distinct string is sent once.
-pub fn history_rows_to_arrow(rows: &[HistoryPoint]) -> Result<Vec<u8>, arrow::error::ArrowError> {
+pub fn history_rows_to_batch(
+    rows: &[HistoryPoint],
+) -> Result<RecordBatch, arrow::error::ArrowError> {
     let dictionary = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
     let schema = Arc::new(Schema::new(vec![
         Field::new(
@@ -350,12 +367,63 @@ pub fn history_rows_to_arrow(rows: &[HistoryPoint]) -> Result<Vec<u8>, arrow::er
     ];
     let batch = RecordBatch::try_new(schema.clone(), columns)?;
 
-    let mut buf = Vec::new();
-    let mut writer = StreamWriter::try_new(&mut buf, &schema)?;
-    writer.write(&batch)?;
-    writer.finish()?;
-    drop(writer);
-    Ok(buf)
+    Ok(batch)
+}
+
+struct IpcSink(tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>);
+impl std::io::Write for IpcSink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .blocking_send(Ok(Bytes::copy_from_slice(bytes)))
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "history client disconnected",
+                )
+            })?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+fn arrow_response(page: crate::storage::QueryPage<RecordBatch>) -> Response {
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    tokio::task::spawn_blocking(move || {
+        let result = (|| -> Result<(), arrow::error::ArrowError> {
+            let schema = page
+                .rows
+                .first()
+                .map(|b| b.schema())
+                .unwrap_or(history_rows_to_batch(&[])?.schema());
+            let mut writer = StreamWriter::try_new(
+                std::io::BufWriter::with_capacity(256 * 1024, IpcSink(tx.clone())),
+                &schema,
+            )?;
+            for batch in page.rows {
+                for offset in (0..batch.num_rows()).step_by(8192) {
+                    writer.write(&batch.slice(offset, 8192.min(batch.num_rows() - offset)))?;
+                }
+            }
+            writer.finish()?;
+            writer.flush()?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let _ = tx.blocking_send(Err(std::io::Error::other(error.to_string())));
+        }
+    });
+    let mut response = Response::builder()
+        .header(header::CONTENT_TYPE, ARROW_STREAM_CONTENT_TYPE)
+        .header(header::CACHE_CONTROL, "no-store");
+    if let Some(cursor) = page.next_cursor {
+        response = response.header(NEXT_CURSOR_HEADER, cursor.to_string());
+    }
+    response
+        .body(Body::from_stream(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        ))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 /// GET /api/history handler
@@ -369,6 +437,26 @@ pub async fn history_handler(
         .as_deref()
         .is_some_and(|format| format.eq_ignore_ascii_case("arrow"));
 
+    if query
+        .max_points
+        .is_some_and(|n| !(4..=1_000_000).contains(&n))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":"max_points must be between 4 and 1000000"})),
+        )
+            .into_response();
+    }
+    if as_arrow {
+        return match state.storage.query_history_batches(&storage_query).await {
+            Ok(page) => arrow_response(page),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error":error.to_string()})),
+            )
+                .into_response(),
+        };
+    }
     let page = match state.storage.query_history(&storage_query).await {
         Ok(page) => page,
         Err(error) => {
@@ -376,43 +464,10 @@ pub async fn history_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to query history",
                 &error,
-                |msg| HistoryResponse {
-                    rows: vec![],
-                    run_summaries: vec![],
-                    next_cursor: None,
-                    error: Some(msg),
-                },
+                HistoryResponse::failure,
             );
         }
     };
-
-    if as_arrow {
-        return match history_rows_to_arrow(&page.rows) {
-            Ok(bytes) => {
-                let mut builder = Response::builder()
-                    .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, ARROW_STREAM_CONTENT_TYPE)
-                    .header(header::CACHE_CONTROL, "no-store");
-                if let Some(cursor) = page.next_cursor {
-                    builder = builder.header(NEXT_CURSOR_HEADER, cursor.to_string());
-                }
-                builder
-                    .body(Body::from(bytes))
-                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-            }
-            Err(error) => json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to encode history",
-                &error.into(),
-                |msg| HistoryResponse {
-                    rows: vec![],
-                    run_summaries: vec![],
-                    next_cursor: None,
-                    error: Some(msg),
-                },
-            ),
-        };
-    }
 
     // Summaries cover whole runs, not just the requested page.
     let run_summaries = if query.include_summaries.unwrap_or(true) {
@@ -427,12 +482,7 @@ pub async fn history_handler(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Failed to build run summaries",
                     &error,
-                    |msg| HistoryResponse {
-                        rows: vec![],
-                        run_summaries: vec![],
-                        next_cursor: None,
-                        error: Some(msg),
-                    },
+                    HistoryResponse::failure,
                 );
             }
         }
@@ -507,20 +557,12 @@ pub async fn image_history_handler(
 /// Live run IDs plus every persisted run.
 pub(crate) async fn known_runs(state: &AppState) -> BTreeSet<String> {
     let mut runs: BTreeSet<String> = state.t_junction.current_runs().into_iter().collect();
-    match state.storage.list_runs().await {
-        Ok(stored_runs) => runs.extend(stored_runs),
-        Err(error) => tracing::warn!("Failed to list persisted runs: {}", error),
-    }
-    if let Ok(records) = state
+    if let Ok(stored) = state
         .catalog
-        .read(|db| crate::catalog::list(db, "run", None))
+        .read(|db| crate::catalog::run_names(db, None))
         .await
     {
-        runs.extend(
-            records
-                .iter()
-                .filter_map(|r| r.data["run_id"].as_str().map(str::to_owned)),
-        );
+        runs.extend(stored);
     }
     runs
 }
@@ -530,13 +572,7 @@ pub async fn runs_handler(State(state): State<AppState>) -> Json<RunsResponse> {
     let mut runs = known_runs(&state).await;
     if let Ok(deleted) = state
         .catalog
-        .read(|db| {
-            Ok(crate::catalog::list(db, "run", None)?
-                .into_iter()
-                .filter(|r| r.data["deleted"] == true)
-                .filter_map(|r| r.data["run_id"].as_str().map(str::to_owned))
-                .collect::<BTreeSet<_>>())
-        })
+        .read(|db| crate::catalog::run_names(db, Some(true)))
         .await
     {
         runs.retain(|r| !deleted.contains(r));
@@ -627,6 +663,7 @@ pub async fn media_history_handler(
         limit: query.limit,
         cursor: query.cursor,
         include_data: false,
+        ..Default::default()
     };
 
     match state

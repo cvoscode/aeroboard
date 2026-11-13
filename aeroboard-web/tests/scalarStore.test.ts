@@ -72,3 +72,28 @@ test("merge keeps distinct steps logged within the same millisecond", () => {
   mergeHistoryRows(store, summaries, starts, ["r"], [row(1000, "loss", 0.1, 1), row(1000, "loss", 0.2, 2), row(1000, "loss", 0.3, 3)]);
   assert.deepEqual(points(store, "r", "loss").map((p) => p.step), [1, 2, 3]);
 });
+
+
+test('column merging keeps live overlap, sparse steps, bounds, and small allocations',async()=>{
+  const {mergeScalarColumns,getGlobalXBounds,DEFAULT_BUFFER_SIZE}=await import('../src/hooks/aeroboard/scalarStore.ts');
+  const {seriesVersion}=await import('../src/hooks/aeroboard/seriesSubscriptions.ts');
+  const store:ScalarStore={},summaries:RunSummaryStore={},starts:Record<string,number>={};
+  const columns=(times:number[],steps:(number|null)[],values:number[])=>({numRows:times.length,getChild:(name:string)=>({get:(i:number)=>({timestamp:times,run_id:times.map(()=> 'r'),name:times.map(()=> 'loss'),value:values,step:steps}[name]?.[i])})});
+  mergeScalarColumns(store,summaries,starts,[columns([2000,3000],[2,3],[2,3])]);
+  const series=store.r.loss,version=seriesVersion(series);
+  mergeScalarColumns(store,summaries,starts,[columns([1000,2000,2000],[1,2,2.5],[1,2,2.5])]);
+  assert.equal(store.r.loss,series);
+  assert.deepEqual(Array.from(series.values.subarray(0,series.count)),[1,2,2.5,3]);
+  assert.deepEqual(getGlobalXBounds(store,['r'],'rel'),[0,2]);
+  assert.deepEqual(getGlobalXBounds(store,['r'],'step'),[1,3]);
+  assert.ok(seriesVersion(series)>version);
+  assert.ok(DEFAULT_BUFFER_SIZE<=256);
+});
+
+test('hyperparameter updates replace the indexed entry without appending duplicates',async()=>{
+  const {setSummaryHyperparameter,ensureRunSummary}=await import('../src/hooks/aeroboard/scalarStore.ts');
+  const summary=ensureRunSummary({},'r');
+  setSummaryHyperparameter(summary,'lr','1','int');
+  setSummaryHyperparameter(summary,'lr','0.1','float');
+  assert.deepEqual(summary.hyperparameters,[{key:'lr',value:'0.1',value_type:'float'}]);
+});

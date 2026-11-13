@@ -106,6 +106,9 @@ The client accepts multiple image input forms and normalizes them to encoded byt
 
 ### `configure_dashboard(*, starred=None, targets=None, order=None)`
 
+Queues the update without waiting for a network acknowledgment. Call `flush()`
+when you need delivery to finish before continuing.
+
 Sets the run's initial dashboard view and flushes the settings immediately. The module-level helper has the same keyword-only arguments.
 
 | Argument | Meaning |

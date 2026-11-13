@@ -23,17 +23,16 @@ use tokio::sync::Mutex;
 pub struct AnalysisCache {
     pub revision: AtomicU64,
     entries: Mutex<HashMap<String, Value>>,
-    /// Serializes cold objective rebuilds with persistence, so counters never
-    /// double-count the batch at a snapshot boundary.
+    /// Serializes deletion with accepted writes; queries never hold this gate.
     pub gate: Mutex<()>,
-    scores: Mutex<HashMap<String, CachedScores>>,
-    seen: Mutex<(BTreeSet<String>, std::collections::VecDeque<String>)>,
 }
+#[derive(Serialize, Deserialize)]
 struct CachedScores {
     signature: String,
     definitions: BTreeMap<String, Value>,
     metrics: BTreeMap<String, ObjectiveStats>,
 }
+#[derive(Serialize, Deserialize)]
 struct ObjectiveStats {
     score: Score,
     first_ms: i64,
@@ -104,43 +103,17 @@ impl AnalysisCache {
     pub fn invalidate(&self) {
         self.revision.fetch_add(1, Ordering::Relaxed);
     }
-    pub async fn clear(&self) {
-        self.scores.lock().await.clear();
-        self.entries.lock().await.clear();
+    pub async fn remove(&self, run_id: &str) {
+        let quoted = serde_json::to_string(run_id).unwrap_or_default();
+        self.entries
+            .lock()
+            .await
+            .retain(|key, _| !key.contains(&quoted));
         self.invalidate();
     }
-    pub async fn record(&self, telemetry: &crate::telemetry::TelemetryBatch) {
-        if telemetry.kind != crate::telemetry::TelemetryKind::Scalars {
-            return;
-        }
-        if let Some(envelope) = &telemetry.envelope {
-            let mut seen = self.seen.lock().await;
-            if !seen.0.insert(envelope.batch_id.clone()) {
-                return;
-            }
-            seen.1.push_back(envelope.batch_id.clone());
-            if seen.1.len() > 8192
-                && let Some(id) = seen.1.pop_front()
-            {
-                seen.0.remove(&id);
-            }
-        }
-        let mut cache = self.scores.lock().await;
-        for point in crate::storage::codec::parse_scalar_batch(&telemetry.batch) {
-            if let Some(run) = cache.get_mut(&point.run_id) {
-                if let Some(stats) = run.metrics.get_mut(&point.name) {
-                    stats.record(point);
-                } else {
-                    let definition = run
-                        .definitions
-                        .get(&point.name)
-                        .cloned()
-                        .unwrap_or_else(|| json!({}));
-                    run.metrics
-                        .insert(point.name.clone(), ObjectiveStats::new(point, definition));
-                }
-            }
-        }
+    pub async fn clear(&self) {
+        self.entries.lock().await.clear();
+        self.invalidate();
     }
     async fn get(&self, key: &str) -> Option<Value> {
         self.entries.lock().await.get(key).cloned()
@@ -187,51 +160,71 @@ async fn export_csv(
     let options = HistoryQueryOptions {
         run_ids,
         metrics,
-        limit: Some(5000),
         ..Default::default()
     };
-    let first = state
+    let batches = state
         .storage
-        .query_history(&options)
+        .query_history_batches(&options)
         .await
-        .map_err(|e| CatalogError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let stream = futures::stream::try_unfold(
-        (state.storage, options, Some(first), true),
-        |(storage, mut options, page, header)| async move {
-            let page = match page {
-                Some(page) => page,
-                None => return Ok::<_, std::io::Error>(None),
-            };
-            let mut csv = if header {
-                "run_id,metric,timestamp_ms,step,value,segment\r\n".to_owned()
-            } else {
-                String::new()
-            };
-            for point in page.rows {
-                let quote = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
-                csv.push_str(&format!(
-                    "{},{},{},{},{},{}\r\n",
-                    quote(&point.run_id),
-                    quote(&point.name),
-                    point.ts_ms,
-                    point.step.map(|n| n.to_string()).unwrap_or_default(),
-                    point.value,
-                    quote(point.segment.as_deref().unwrap_or(""))
-                ));
-            }
-            let next = if let Some(cursor) = page.next_cursor {
-                options.cursor = Some(cursor);
-                Some(
-                    storage
-                        .query_history(&options)
-                        .await
+        .map_err(CatalogError::from)?
+        .rows;
+    let stream = futures::stream::iter(
+        batches
+            .into_iter()
+            .flat_map(|batch| {
+                (0..batch.num_rows())
+                    .step_by(5000)
+                    .map(|offset| batch.slice(offset, 5000.min(batch.num_rows() - offset)))
+                    .collect::<Vec<_>>()
+            })
+            .enumerate()
+            .map(|(index, batch)| {
+                use arrow::array::{Array, AsArray};
+                let mut csv = if index == 0 {
+                    "run_id,metric,timestamp_ms,step,value,segment\r\n".to_owned()
+                } else {
+                    String::new()
+                };
+                let columns: [arrow::array::ArrayRef; 2] = [
+                    arrow::compute::cast(batch.column(1), &arrow::datatypes::DataType::Utf8)
                         .map_err(|e| std::io::Error::other(e.to_string()))?,
-                )
-            } else {
-                None
-            };
-            Ok(Some((csv, (storage, options, next, false))))
-        },
+                    arrow::compute::cast(batch.column(2), &arrow::datatypes::DataType::Utf8)
+                        .map_err(|e| std::io::Error::other(e.to_string()))?,
+                ];
+                let runs = columns[0].as_string::<i32>();
+                let names = columns[1].as_string::<i32>();
+                let times = batch
+                    .column(0)
+                    .as_primitive::<arrow::datatypes::TimestampMillisecondType>();
+                let values = batch
+                    .column(3)
+                    .as_primitive::<arrow::datatypes::Float64Type>();
+                let steps = batch
+                    .column(4)
+                    .as_primitive::<arrow::datatypes::Float64Type>();
+                let segments = batch.column(5).as_string::<i32>();
+                let quote = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+                for i in 0..batch.num_rows() {
+                    csv.push_str(&format!(
+                        "{},{},{},{},{},{}\r\n",
+                        quote(runs.value(i)),
+                        quote(names.value(i)),
+                        times.value(i),
+                        if steps.is_null(i) {
+                            String::new()
+                        } else {
+                            steps.value(i).to_string()
+                        },
+                        values.value(i),
+                        quote(if segments.is_null(i) {
+                            ""
+                        } else {
+                            segments.value(i)
+                        })
+                    ));
+                }
+                Ok::<_, std::io::Error>(csv)
+            }),
     );
     Ok((
         [
@@ -373,10 +366,6 @@ pub fn definition_for(run: &Entity, name: &str, definitions: &[Entity]) -> Value
 async fn metadata(state: &AppState) -> Result<(Vec<Entity>, Vec<Entity>)> {
     state
         .catalog
-        .import_runs(crate::history::known_runs(state).await)
-        .await?;
-    state
-        .catalog
         .read(|db| {
             Ok((
                 catalog::list(db, "run", None)?,
@@ -400,9 +389,9 @@ async fn history(
             ..Default::default()
         })
         .await
-        .map_err(|e| CatalogError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(CatalogError::from)?;
     if page.rows.len() > 2_000_000 {
-        return Err(CatalogError(
+        return Err(CatalogError::http(
             StatusCode::PAYLOAD_TOO_LARGE,
             "comparison exceeds 2 million observations; select fewer runs or metrics".into(),
         ));
@@ -443,15 +432,25 @@ async fn scorecards(
         })
         .collect();
     let revision = state.analysis.revision.load(Ordering::Relaxed);
+    let revisions = data_revisions(&state, &selected).await?;
+    let definition_revisions = definitions
+        .iter()
+        .filter(|d| {
+            selected
+                .iter()
+                .any(|r| d.parent == r.id || d.parent == r.parent)
+        })
+        .map(|d| (&d.id, d.revision))
+        .collect::<Vec<_>>();
     let key = format!(
-        "scores:{requested:?}:{:?}:{:?}:{revision}:{:?}:{:?}",
-        query.metric,
-        query.step,
-        definitions
-            .iter()
-            .map(|d| (&d.id, d.revision))
-            .collect::<Vec<_>>(),
-        query.segment
+        "scores:{}",
+        json!([
+            revisions,
+            definition_revisions,
+            query.metric,
+            query.step,
+            query.segment
+        ])
     );
     if let Some(value) = state.analysis.get(&key).await {
         return Ok(Json(value));
@@ -461,92 +460,74 @@ async fn scorecards(
         .filter_map(|r| r.data["run_id"].as_str().map(str::to_owned))
         .collect();
     if query.step.is_none() && query.segment.is_none() {
-        let _gate = state.analysis.gate.lock().await;
-        let mut missing = BTreeSet::new();
-        let signatures: BTreeMap<String, String> = selected
-            .iter()
-            .map(|run| {
-                (
-                    run.data["run_id"].as_str().unwrap_or("").to_owned(),
-                    format!(
-                        "{:?}",
-                        definitions
-                            .iter()
-                            .filter(|d| d.parent == run.parent || d.parent == run.id)
-                            .map(|d| (&d.id, d.revision))
-                            .collect::<Vec<_>>()
-                    ),
-                )
-            })
-            .collect();
-        {
-            let cache = state.analysis.scores.lock().await;
-            for (id, signature) in &signatures {
-                if cache.get(id).is_none_or(|c| &c.signature != signature) {
-                    missing.insert(id.clone());
+        let mut scores = Vec::new();
+        for run in &selected {
+            let run_id = run.data["run_id"]
+                .as_str()
+                .ok_or_else(|| CatalogError::invalid("missing run ID"))?
+                .to_owned();
+            let signature = definition_signature(run, &definitions);
+            let lookup = run_id.clone();
+            let (stored, data_revision) = state
+                .catalog
+                .read(move |db| {
+                    use rusqlite::OptionalExtension;
+                    Ok((
+                        db.query_row(
+                            "SELECT body FROM run_scores WHERE run_id=?1",
+                            [&lookup],
+                            |r| r.get::<_, Vec<u8>>(0),
+                        )
+                        .optional()?,
+                        db.query_row(
+                            "SELECT revision FROM data_revisions WHERE run_id=?1",
+                            [&lookup],
+                            |r| r.get::<_, i64>(0),
+                        )
+                        .optional()?
+                        .unwrap_or(0),
+                    ))
+                })
+                .await?;
+            let stored: Option<CachedScores> =
+                stored.and_then(|bytes| serde_json::from_slice(&bytes).ok());
+            let snapshot = if let Some(stored) = stored.filter(|s| s.signature == signature) {
+                stored
+            } else {
+                let points =
+                    history(&state, BTreeSet::from([run_id.clone()]), BTreeSet::new()).await?;
+                let mut snapshot = empty_scores(run, &definitions);
+                for point in points {
+                    record_score(&mut snapshot, point);
                 }
-            }
+                let body = serde_json::to_vec(&snapshot)
+                    .map_err(|e| CatalogError::invalid(e.to_string()))?;
+                let id = run_id.clone();
+                state.catalog.quiet(move |db| {
+                    use rusqlite::OptionalExtension;
+                    let current = db.query_row("SELECT revision FROM data_revisions WHERE run_id=?1",[&id],|r|r.get::<_,i64>(0)).optional()?.unwrap_or(0);
+                    // A concurrent write makes this response a snapshot; don't replace its newer counters.
+                    if current==data_revision {db.execute("INSERT INTO run_scores VALUES(?1,?2) ON CONFLICT(run_id) DO UPDATE SET body=excluded.body",rusqlite::params![id,body])?;}
+                    Ok(())
+                }).await?;
+                snapshot
+            };
+            scores.extend(
+                snapshot
+                    .metrics
+                    .into_values()
+                    .filter(|s| {
+                        query
+                            .metric
+                            .as_ref()
+                            .is_none_or(|name| name == &s.score.name)
+                    })
+                    .map(|s| s.score),
+            );
         }
-        if !missing.is_empty() {
-            let points = history(&state, missing.clone(), BTreeSet::new()).await?;
-            let mut cache = state.analysis.scores.lock().await;
-            if cache.len() + missing.len() > 128 {
-                cache.retain(|id, _| signatures.contains_key(id));
-            }
-            for id in &missing {
-                let run = selected
-                    .iter()
-                    .find(|r| r.data["run_id"] == *id)
-                    .ok_or_else(CatalogError::missing)?;
-                let mut defs = BTreeMap::new();
-                for d in definitions
-                    .iter()
-                    .filter(|d| d.parent == run.parent || d.parent == run.id)
-                {
-                    let name = d.data["name"].as_str().unwrap_or("");
-                    defs.insert(name.to_owned(), definition_for(run, name, &definitions));
-                }
-                cache.insert(
-                    id.clone(),
-                    CachedScores {
-                        signature: signatures[id].clone(),
-                        definitions: defs,
-                        metrics: BTreeMap::new(),
-                    },
-                );
-            }
-            for point in points {
-                let run = cache
-                    .get_mut(&point.run_id)
-                    .ok_or_else(CatalogError::missing)?;
-                if let Some(stats) = run.metrics.get_mut(&point.name) {
-                    stats.record(point);
-                } else {
-                    let definition = run
-                        .definitions
-                        .get(&point.name)
-                        .cloned()
-                        .unwrap_or_else(|| json!({}));
-                    run.metrics
-                        .insert(point.name.clone(), ObjectiveStats::new(point, definition));
-                }
-            }
-        }
-        let cache = state.analysis.scores.lock().await;
-        let scores: Vec<_> = selected
-            .iter()
-            .filter_map(|r| cache.get(r.data["run_id"].as_str().unwrap_or("")))
-            .flat_map(|r| r.metrics.values())
-            .filter(|s| {
-                query
-                    .metric
-                    .as_ref()
-                    .is_none_or(|name| name == &s.score.name)
-            })
-            .map(|s| s.score.clone())
-            .collect();
         return Ok(Json(json!({"rows":scores,"data_revision":revision})));
     }
+
     let metrics = query
         .metric
         .map(|s| BTreeSet::from([s]))
@@ -665,11 +646,27 @@ async fn aggregate(
         .summaries
         .summaries(state.storage.as_ref(), &ids)
         .await
-        .map_err(|e| CatalogError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(CatalogError::from)?;
     let revision = state.analysis.revision.load(Ordering::Relaxed);
+    let revisions = data_revisions(&state, &selected).await?;
+    let metadata = selected
+        .iter()
+        .map(|r| {
+            (
+                &r.id,
+                &r.parent,
+                &r.data["metadata_revision"],
+                &r.data["status"],
+            )
+        })
+        .collect::<Vec<_>>();
+    let definition_revisions = definitions
+        .iter()
+        .map(|d| (&d.id, d.revision))
+        .collect::<Vec<_>>();
     let key = format!(
-        "aggregate:{}:{revision}:{definitions:?}:{selected:?}",
-        serde_json::to_string(&query).unwrap_or_default()
+        "aggregate:{}",
+        json!([query, revisions, metadata, definition_revisions])
     );
     if let Some(value) = state.analysis.get(&key).await {
         return Ok(Json(value));
@@ -808,4 +805,121 @@ async fn aggregate(
     let value = json!({"groups":groups,"excluded_runs":query.run_ids.len()-selected.len(),"alignment":query.alignment,"band":"sample standard deviation","data_revision":revision});
     state.analysis.put(key, value.clone()).await;
     Ok(Json(value))
+}
+
+fn definition_signature(run: &Entity, definitions: &[Entity]) -> String {
+    serde_json::to_string(
+        &definitions
+            .iter()
+            .filter(|d| d.parent == run.parent || d.parent == run.id)
+            .map(|d| (&d.id, d.revision))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_default()
+}
+fn empty_scores(run: &Entity, definitions: &[Entity]) -> CachedScores {
+    let mut defs = BTreeMap::new();
+    for d in definitions
+        .iter()
+        .filter(|d| d.parent == run.parent || d.parent == run.id)
+    {
+        if let Some(name) = d.data["name"].as_str() {
+            defs.insert(name.to_owned(), definition_for(run, name, definitions));
+        }
+    }
+    CachedScores {
+        signature: definition_signature(run, definitions),
+        definitions: defs,
+        metrics: BTreeMap::new(),
+    }
+}
+fn record_score(snapshot: &mut CachedScores, point: HistoryPoint) {
+    if let Some(stats) = snapshot.metrics.get_mut(&point.name) {
+        stats.record(point);
+    } else {
+        let definition = snapshot
+            .definitions
+            .get(&point.name)
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        snapshot
+            .metrics
+            .insert(point.name.clone(), ObjectiveStats::new(point, definition));
+    }
+}
+pub(crate) fn persist_batch(
+    db: &rusqlite::Connection,
+    telemetry: &crate::telemetry::TelemetryBatch,
+) -> Result<()> {
+    use rusqlite::OptionalExtension;
+    if telemetry.kind != crate::telemetry::TelemetryKind::Scalars {
+        return Ok(());
+    }
+    let definitions = catalog::list(db, "metric", None)?;
+    let mut runs: HashMap<String, CachedScores> = HashMap::new();
+    let mut rebuild = BTreeSet::new();
+    for point in crate::storage::codec::parse_scalar_batch(&telemetry.batch) {
+        if rebuild.contains(&point.run_id) {
+            continue;
+        }
+        if !runs.contains_key(&point.run_id) {
+            let run = catalog::run_by_id(db, &point.run_id)?;
+            let stored: Option<Vec<u8>> = db
+                .query_row(
+                    "SELECT body FROM run_scores WHERE run_id=?1",
+                    [&point.run_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let stored: Option<CachedScores> =
+                stored.and_then(|bytes| serde_json::from_slice(&bytes).ok());
+            let signature = definition_signature(&run, &definitions);
+            if let Some(stored) = stored.filter(|s| s.signature == signature) {
+                runs.insert(point.run_id.clone(), stored);
+            } else {
+                let previous:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM run_summaries s,json_each(CAST(s.body AS TEXT),'$.metrics') WHERE s.run_id=?1)",[&point.run_id],|r|r.get(0))?;
+                if previous {
+                    rebuild.insert(point.run_id.clone());
+                    continue;
+                }
+                runs.insert(point.run_id.clone(), empty_scores(&run, &definitions));
+            }
+        }
+        if let Some(snapshot) = runs.get_mut(&point.run_id) {
+            record_score(snapshot, point);
+        }
+    }
+    for (id, snapshot) in runs {
+        let bytes =
+            serde_json::to_vec(&snapshot).map_err(|e| CatalogError::invalid(e.to_string()))?;
+        db.execute("INSERT INTO run_scores VALUES(?1,?2) ON CONFLICT(run_id) DO UPDATE SET body=excluded.body",rusqlite::params![id,bytes])?;
+    }
+    Ok(())
+}
+
+async fn data_revisions(state: &AppState, runs: &[&Entity]) -> Result<Vec<(String, i64)>> {
+    let names = runs
+        .iter()
+        .filter_map(|run| run.data["run_id"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    state
+        .catalog
+        .read(move |db| {
+            use rusqlite::OptionalExtension;
+            names
+                .into_iter()
+                .map(|name| {
+                    let revision = db
+                        .query_row(
+                            "SELECT revision FROM data_revisions WHERE run_id=?1",
+                            [&name],
+                            |r| r.get::<_, i64>(0),
+                        )
+                        .optional()?
+                        .unwrap_or(0);
+                    Ok((name, revision))
+                })
+                .collect()
+        })
+        .await
 }

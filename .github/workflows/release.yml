@@ -19,7 +19,7 @@ jobs:
           node-version: '22'
       - name: Install frontend dependencies
         working-directory: aeroboard-web
-        run: npm install
+        run: npm ci
       - name: Build frontend bundle
         working-directory: aeroboard-web
         run: npm run build
@@ -27,6 +27,7 @@ jobs:
         run: |
           set -e
           VERSION="${GITHUB_REF_NAME}"
+          find aeroboard-web/dist -type f \( -name '*.js' -o -name '*.css' -o -name '*.html' -o -name '*.svg' \) -exec gzip -k -9 {} \;
           tar -czf "aeroboard-web-${VERSION}.tar.gz" -C aeroboard-web dist
       - name: Upload frontend release asset
         uses: softprops/action-gh-release@v2
@@ -122,3 +123,18 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.whl
+  checksums:
+    needs: [build-web, build-server, build-python]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release artifacts and publish checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          mkdir release-assets
+          gh release download "$RELEASE_TAG" --dir release-assets
+          cd release-assets
+          sha256sum aeroboard-* > SHA256SUMS
+          gh release upload "$RELEASE_TAG" SHA256SUMS --clobber

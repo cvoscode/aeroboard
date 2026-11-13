@@ -1,82 +1,66 @@
 # Architecture
 
-This page describes the runtime architecture of Aeroboard as implemented today.
-
-## High-level topology
-
-1. **Python SDK**: buffers telemetry and sends Arrow `RecordBatch`es over Arrow Flight from a background thread.
-2. **Rust server**: one binary for Flight ingestion, live WebSocket streaming, persistence, the HTTP history API and the dashboard bundle.
-3. **React dashboard**: loads history as Arrow IPC, then merges live Arrow batches from the WebSocket.
-4. **Storage backend**: filesystem (default), GreptimeDB, or none (live-only).
+Aeroboard consists of a Python SDK/CLI, a Rust server (Axum, Tokio and Arrow
+Flight), and a React dashboard (Vite, Arrow JS and uPlot).
 
 ## Data path
 
-### Ingestion
+The SDK buffers scalar columns and queues Arrow batches. Image encoding,
+checksums and serialization run on delivery workers. Optional Lightning and Ray
+modules load lazily. Durable mode journals operations in a SQLite outbox and wakes
+the sender through notifications. Compatible uploads share Flight streams.
 
-`do_put` decodes the Flight stream with `arrow_flight`'s decoder (schema and
-dictionary messages are handled correctly). The telemetry kind comes from the Flight
-descriptor path, or from the column names when there is none. Every batch then goes
-through `schema::normalize_batch`, which checks column names, casts compatible types
-(e.g. `int64` values, `us` timestamps, `large_string`) to the canonical schema, and
-rejects anything else with `INVALID_ARGUMENT`. Code after this point can rely on the
-canonical layout.
+The server normalizes schemas, validates envelopes and submits batches to a
+bounded persistence queue. The persistence loop groups writes, reserves receipt
+identities, writes payloads, then commits visibility and derived data. It
+acknowledges only durable writes. Retries preserve idempotent visible effects.
 
-### T-junction
+Newly committed batches enter the live broadcast channel. Browsers subscribe to
+selected run names. Images, audio and video are fetched by URL in persistent
+modes; live messages carry metadata. Other runs produce lightweight activity
+notices. Reconnects and lag notices trigger history recovery with a timestamp
+overlap window.
 
-`TJunction` splits each validated batch into two paths with different guarantees:
+SIGINT and SIGTERM stop accepting work and drain the queue. The CLI forwards
+termination to the server. Local access and same-origin requests are the defaults;
+network exposure still requires explicit host/CORS configuration.
 
-- **Persistence**: a bounded `mpsc` queue drained by one persistence loop. When it is
-  full, ingestion waits, so a slow backend slows uploads down (backpressure) rather
-  than losing data. The loop reports each batch's outcome back to the request that
-  sent it, and `do_put` acknowledges an upload only once all of its batches are
-  stored. A client's `flush()` therefore means "durably stored", and storage errors
-  reach the client, which retries.
-- **Live**: a `broadcast` channel for WebSocket subscribers. A slow browser lags,
-  loses batches, and is told so with a `{"type": "lagged"}` message so it can
-  re-fetch history. Each batch is IPC-encoded once and shared by all subscribers.
+## Catalog and storage
 
-### Summaries
+SQLite WAL stores the server identity, typed entities, indexed receipts, run
+lookups, payload locations, summaries, scores and data revisions. A single writer
+and four snapshot readers allow queries during commits. Heartbeats are quiet;
+other entity changes identify the affected kind, ID and revision.
 
-`SummaryCache` holds per-run last/min/max per metric plus hyperparameters. A run is
-loaded from storage the first time it is requested; after that, the persistence loop
-folds every stored batch into it, so `/api/runs/summary` doesn't rescan history.
+Filesystem payloads use per-run/per-kind segments rolled at 64 MiB. Greptime
+scalars and hyperparameters use native rows; media uses local segments. Startup
+migrates the old immutable batch representation. See the [storage model](storage-model.md)
+for recovery, migration and compatibility contracts.
 
-### Shutdown
+Default scorecards and summaries read persisted reducers. Objective edits can
+rebuild from raw history without holding the ingestion gate. Remaining caches
+use selected run and metric-definition revisions.
 
-On Ctrl-C both servers stop accepting work and finish in-flight requests, the
-persistence queue is closed and drained (up to 30 s), and the process exits.
+## Dashboard
 
-## Frontend data model
+History remains columnar into per-series typed buffers. Each series has its own
+version and subscription. Scalar updates redraw the affected chart cards and
+axis controls; run and metric-list changes update the application structure.
+Buffers begin at 128 entries, grow geometrically, and derive relative/plot axes.
 
-High-frequency series live in typed-array stores held in refs, not React state.
-`useAeroboard` exposes a `tick` counter, bumped at most once per animation frame,
-that memos reading the stores depend on.
+Charts mount canvases near the viewport, decimate with min/max buckets, and fetch
+full-resolution zoom windows. History and live overlaps merge in sorted order.
+Persistent images load by URL; live image Blob URLs are capped. A small inactive
+run cache bounds navigation memory.
 
-- History is fetched as one Arrow IPC response per run selection.
-- `mergeHistoryRows` merges fetched history with live points that are already
-  present, sorted by (timestamp, step) and de-duplicated, so loading history mid-run
-  doesn't duplicate or reorder points.
-- The step for each point comes from the `step` column. Data from older clients,
-  which logged a separate `step` metric, is matched by timestamp.
-- The WebSocket reconnects with exponential backoff. After a reconnect or a `lagged`
-  message, the dashboard re-fetches what it shows.
-- Images and other media are shown through URLs: Blob URLs for frames pushed live,
-  `/api/history/media/content` for persisted ones.
+Socket lifecycle, controls, deletion, data stores, media panels and comparison
+panels are separate modules. Styles are split by component area. Capabilities
+load once; typed metadata events patch records, and data events refresh scores.
 
-## Security model
+## Verification
 
-There is no authentication. The server listens on `127.0.0.1` and sends no CORS
-headers by default; `AEROBOARD_HOST` and `AEROBOARD_CORS_ORIGINS` opt in to wider
-access.
-
-## When you change the architecture
-
-A new telemetry type needs coordinated changes in:
-
-1. Python schema and client buffering (`aeroboard-client/src/aeroboard_client/schema.py`).
-2. The canonical schema in `aeroboard-server/src/schema.rs` and kind detection in `telemetry.rs`.
-3. Storage serialization and queries in each backend.
-4. HTTP response shaping if the UI reads it.
-5. Frontend decoding and rendering.
-
-Changing only one layer is the fastest way to create bugs in Aeroboard.
+Rust unit tests live beside modules; API fixtures are in `aeroboard-server/tests`.
+Python tests cover delivery and shared checksum vectors; frontend tests cover
+stores, reducers and chart logic. CI runs all five browser suites, formatting,
+lint and builds. The isolated ingestion/history benchmark supports baseline
+binaries and optional browser navigation-to-chart measurement.
